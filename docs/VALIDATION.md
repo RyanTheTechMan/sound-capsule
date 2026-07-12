@@ -18,6 +18,8 @@ new-pattern and current-pattern append, override, PPQ scaling, isolated preview 
 dirty-state rejection, in-place backup/restore, configurable time-limited Undo,
 post-import-change safety backups, expired-restore rejection, library indexing,
 favorite filtering, explicit recent/name/usage sorting and usage counters,
+validated external capsule ingestion, duplicate-ID skipping, collision-safe
+library filenames, partial batch results,
 the local JSON protocol, pollable import progress, persisted first-run setup, automatic current-project
 resolution, and Save-time disambiguation.
 
@@ -71,7 +73,12 @@ public release profile is claimed:
 7. Exercise unsaved projects, duplicate titles, nonstandard project locations, project
    data folders, locked files, helper/app termination, render failures,
    corrupted capsules, missing plugins/assets, and newer FL formats.
-8. Repeat the suite on Windows x64, macOS Intel, and macOS Apple Silicon before
+8. Exercise capsule sharing on macOS and Windows: drag a row to Finder/Explorer,
+   another folder, and Discord; confirm the library source remains present. Drop
+   single and multiple valid capsules back into the window, then repeat with a
+   duplicate and a corrupt capsule in the same batch. Verify the native Export
+   dialog's default filename, cancellation, overwrite warning, and saved bytes.
+9. Repeat the suite on Windows x64, macOS Intel, and macOS Apple Silicon before
    adding each exact build to `helper/soundcapsule/compatibility.py`.
 
 Do not enable a profile based only on parser success. FL must load and render

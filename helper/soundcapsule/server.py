@@ -365,6 +365,16 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             with self.operation_lock:
                 self.service.library.delete(args["id"])
             return {}
+        if command == "add_capsules":
+            raw_paths = args.get("paths", [])
+            if not isinstance(raw_paths, list) or not raw_paths:
+                raise ValueError("add_capsules paths must be a non-empty list")
+            if not all(isinstance(path, str) for path in raw_paths):
+                raise ValueError("add_capsules paths must contain only strings")
+            with self.operation_lock:
+                return self.service.library.add_capsules(
+                    [Path(path) for path in raw_paths]
+                )
         if command == "capture":
             raw_tags = args.get("tags", [])
             if not isinstance(raw_tags, list):

@@ -4,11 +4,14 @@ from contextlib import contextmanager
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import shutil
 import sqlite3
+import tempfile
 import threading
 
-from .capsule import Capsule
+from .capsule import Capsule, unique_capsule_path
 
 INDEX_VERSION = 6
 
@@ -235,6 +238,99 @@ class CapsuleLibrary:
         if row is None:
             raise KeyError(f"unknown capsule {capsule_id}")
         return Capsule(row["path"])
+
+    def add_capsules(self, paths: list[Path]) -> dict[str, list[dict[str, str]]]:
+        result: dict[str, list[dict[str, str]]] = {
+            "imported": [],
+            "skipped": [],
+            "failed": [],
+        }
+        with self._lock:
+            self.reindex()
+            with self.session() as database:
+                known_ids = {
+                    str(row["id"])
+                    for row in database.execute("SELECT id FROM capsules").fetchall()
+                }
+
+            for raw_path in paths:
+                source = Path(raw_path)
+                temporary: Path | None = None
+                try:
+                    source = source.expanduser().resolve()
+                    if source.suffix.casefold() != ".flcapsule":
+                        raise ValueError("file does not have the .flcapsule extension")
+                    if not source.is_file():
+                        raise FileNotFoundError("capsule file was not found")
+
+                    capsule = Capsule(source)
+                    capsule.verify()
+                    manifest = capsule.manifest
+                    if manifest.id in known_ids:
+                        result["skipped"].append(
+                            {
+                                "source": str(source),
+                                "id": manifest.id,
+                                "name": manifest.name,
+                                "reason": "capsule is already in the library",
+                            }
+                        )
+                        continue
+
+                    with tempfile.NamedTemporaryFile(
+                        dir=self.library_dir,
+                        prefix=".capsule-import-",
+                        suffix=".tmp",
+                        delete=False,
+                    ) as target, source.open("rb") as input_file:
+                        temporary = Path(target.name)
+                        shutil.copyfileobj(input_file, target, length=1024 * 1024)
+                        target.flush()
+                        os.fsync(target.fileno())
+
+                    # Verify the private copy too; only these exact bytes can be
+                    # installed into the library.
+                    copied_capsule = Capsule(temporary)
+                    copied_capsule.verify()
+                    manifest = copied_capsule.manifest
+                    if manifest.id in known_ids:
+                        result["skipped"].append(
+                            {
+                                "source": str(source),
+                                "id": manifest.id,
+                                "name": manifest.name,
+                                "reason": "capsule is already in the library",
+                            }
+                        )
+                        continue
+                    while True:
+                        destination = unique_capsule_path(self.library_dir, manifest.name)
+                        try:
+                            os.link(temporary, destination)
+                            break
+                        except FileExistsError:
+                            continue
+
+                    known_ids.add(manifest.id)
+                    result["imported"].append(
+                        {
+                            "source": str(source),
+                            "path": str(destination.resolve()),
+                            "id": manifest.id,
+                            "name": manifest.name,
+                        }
+                    )
+                except Exception as error:
+                    result["failed"].append(
+                        {"source": str(source), "error": str(error)}
+                    )
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+
+            if result["imported"]:
+                self.reindex()
+        return result
 
     def set_favorite(self, capsule_id: str, favorite: bool) -> None:
         with self._lock:

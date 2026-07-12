@@ -30,6 +30,28 @@ class ServerTests(unittest.TestCase):
             preview_wav=preview,
         )
 
+    def test_add_capsules_command_returns_ingestion_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(
+                root / "incoming" / "Shared.flcapsule", "Shared", preview
+            )
+            settings = Settings(data_dir=root / "data", server_port=0)
+            with SoundCapsuleServer(settings) as server:
+                payload = server.dispatch(
+                    {
+                        "command": "add_capsules",
+                        "args": {"paths": [str(capsule.path)]},
+                    }
+                )
+
+            self.assertEqual(len(payload["imported"]), 1)
+            self.assertFalse(payload["skipped"])
+            self.assertFalse(payload["failed"])
+            self.assertTrue(Path(payload["imported"][0]["path"]).is_file())
+
     def test_missing_bridge_has_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(RuntimeError, "enable Sound Capsule Control"):

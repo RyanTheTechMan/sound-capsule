@@ -47,6 +47,7 @@ private:
 };
 
 class SoundCapsuleAudioProcessorEditor final : public juce::AudioProcessorEditor,
+                                                public juce::FileDragAndDropTarget,
                                                 private juce::ListBoxModel,
                                                 private juce::Timer
 {
@@ -55,7 +56,12 @@ public:
     ~SoundCapsuleAudioProcessorEditor() override;
 
     void paint(juce::Graphics&) override;
+    void paintOverChildren(juce::Graphics&) override;
     void resized() override;
+    bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void fileDragEnter(const juce::StringArray& files, int x, int y) override;
+    void fileDragExit(const juce::StringArray& files) override;
+    void filesDropped(const juce::StringArray& files, int x, int y) override;
 
 private:
     enum class WaveformChannels { mono = 1, stereo = 2 };
@@ -92,6 +98,9 @@ private:
     void selectedRowsChanged(int row) override;
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override;
     void timerCallback() override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
     void mouseMove(const juce::MouseEvent&) override;
     void mouseExit(const juce::MouseEvent&) override;
 
@@ -110,6 +119,10 @@ private:
     void showImportMenu(const juce::String& id, juce::Point<int> screenPosition);
     void pollImportProgress();
     void showRowMenu(int row, juce::Point<int> screenPosition);
+    void exportCapsule(const juce::String& path, const juce::String& name);
+    void copyCapsuleForExport(const juce::File& source, const juce::File& destination);
+    void addExternalCapsules(const juce::StringArray& files);
+    void showAddCapsulesResult(const juce::var& response);
     void promptRename(const juce::String& id, const juce::String& currentName);
     void promptTags(const juce::String& id, const juce::String& currentTags);
     void confirmDelete(const juce::String& id, const juce::String& name);
@@ -154,7 +167,11 @@ private:
     std::atomic<bool> updateCheckInFlight{false};
     double pendingPreviewStart = 0.0;
     int hoveredRow = -1;
+    int dragCandidateRow = -1;
+    int incomingFileCount = 0;
     RowHoverTarget hoveredTarget = RowHoverTarget::none;
+    bool outboundDragStarted = false;
+    bool inboundFileDragActive = false;
 
     juce::Label title;
     juce::Label status;
@@ -180,6 +197,7 @@ private:
     juce::Label volumeLabel{{}, "Volume"};
     juce::Slider previewVolume;
     ImportProgressOverlay importProgress;
+    std::unique_ptr<juce::FileChooser> exportChooser;
     std::array<bool, 3> sortDescendingByMode{{true, false, true}};
     WaveformChannels waveformChannels = WaveformChannels::mono;
     ImportMode defaultImportMode = ImportMode::currentPattern;

@@ -16,6 +16,8 @@ also display the library inside FL Studio, but it is not required.
   playback.
 - Import a capsule into the current pattern, a new pattern, or matching selected
   channels.
+- Share capsules by dragging them out, exporting through a native Save dialog,
+  or dropping shared `.flcapsule` files into the app.
 
 ## Install
 
@@ -78,6 +80,17 @@ overwritten and can be revealed from the result message.
 
 Sound Capsule creates a backup before changing a project. **Undo Import** is
 available for the recovery period configured in Settings.
+
+## Share a capsule
+
+- Drag a library row from its name/details area to Finder, Explorer, another
+  folder, or an app such as Discord. Sound Capsule shares a copy and keeps the
+  library file in place.
+- Open a row's three-dot menu and choose **Export...** to copy it with the native
+  Save dialog.
+- Drop one or more `.flcapsule` files anywhere on the Sound Capsule window to
+  validate and add them. Valid files in a mixed batch are added while corrupt,
+  unsupported, or duplicate capsules are reported and skipped.
 
 ## What’s included
 

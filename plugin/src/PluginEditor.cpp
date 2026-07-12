@@ -625,6 +625,60 @@ void SoundCapsuleAudioProcessorEditor::paint(juce::Graphics& graphics)
     graphics.fillAll(background);
 }
 
+void SoundCapsuleAudioProcessorEditor::paintOverChildren(juce::Graphics& graphics)
+{
+    if (!inboundFileDragActive)
+        return;
+
+    graphics.fillAll(juce::Colours::black.withAlpha(0.56f));
+    const auto card = getLocalBounds().withSizeKeepingCentre(
+        juce::jmin(520, getWidth() - 48), 128).toFloat();
+    graphics.setColour(panel);
+    graphics.fillRoundedRectangle(card, 12.0f);
+    graphics.setColour(accent);
+    graphics.drawRoundedRectangle(card, 12.0f, 2.0f);
+    graphics.setFont(juce::FontOptions(21.0f, juce::Font::bold));
+    graphics.drawFittedText(
+        incomingFileCount == 1 ? "Add capsule to library"
+                               : "Add " + juce::String(incomingFileCount) + " capsules to library",
+        card.toNearestInt().reduced(24), juce::Justification::centred, 2);
+}
+
+bool SoundCapsuleAudioProcessorEditor::isInterestedInFileDrag(
+    const juce::StringArray& files)
+{
+    if (files.isEmpty())
+        return false;
+    for (const auto& path : files)
+        if (!juce::File(path).hasFileExtension("flcapsule"))
+            return false;
+    return true;
+}
+
+void SoundCapsuleAudioProcessorEditor::fileDragEnter(
+    const juce::StringArray& files, int, int)
+{
+    incomingFileCount = files.size();
+    inboundFileDragActive = true;
+    repaint();
+}
+
+void SoundCapsuleAudioProcessorEditor::fileDragExit(const juce::StringArray&)
+{
+    incomingFileCount = 0;
+    inboundFileDragActive = false;
+    repaint();
+}
+
+void SoundCapsuleAudioProcessorEditor::filesDropped(
+    const juce::StringArray& files, int, int)
+{
+    incomingFileCount = 0;
+    inboundFileDragActive = false;
+    repaint();
+    addExternalCapsules(files);
+}
+
 void SoundCapsuleAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds().reduced(16);
@@ -907,6 +961,8 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
 
 void SoundCapsuleAudioProcessorEditor::listBoxItemClicked(int rowNumber, const juce::MouseEvent& event)
 {
+    if (outboundDragStarted)
+        return;
     if (!juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
         return;
     if (event.x < 42)
@@ -1080,6 +1136,76 @@ void SoundCapsuleAudioProcessorEditor::updateRowHover(juce::Point<int> position)
     list.setMouseCursor(hoveredTarget == RowHoverTarget::none
                             ? juce::MouseCursor::NormalCursor
                             : juce::MouseCursor::PointingHandCursor);
+}
+
+void SoundCapsuleAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
+{
+    dragCandidateRow = -1;
+    outboundDragStarted = false;
+    if (!event.mods.isLeftButtonDown())
+        return;
+
+    const auto position = event.getEventRelativeTo(&list).getPosition();
+    const auto rowNumber = list.getRowContainingPosition(position.x, position.y);
+    if (!juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
+        return;
+    const auto rowBounds = list.getRowPosition(rowNumber, true);
+    const auto rowPosition = juce::Point<int>(position.x, position.y - rowBounds.getY());
+    if (hitTestRow(rowPosition, rowBounds.getWidth()) != RowHoverTarget::none)
+        return;
+    for (const auto& [chip, tag] : tagHitAreas(
+             rows[static_cast<size_t>(rowNumber)], rowBounds.getWidth()))
+    {
+        juce::ignoreUnused(tag);
+        if (chip.contains(rowPosition))
+            return;
+    }
+    dragCandidateRow = rowNumber;
+}
+
+void SoundCapsuleAudioProcessorEditor::mouseDrag(const juce::MouseEvent& event)
+{
+    if (outboundDragStarted || !event.mods.isLeftButtonDown()
+        || !event.mouseWasDraggedSinceMouseDown()
+        || !juce::isPositiveAndBelow(dragCandidateRow, static_cast<int>(rows.size())))
+        return;
+
+    const auto capsule = juce::File(
+        rows[static_cast<size_t>(dragCandidateRow)].capsulePath);
+    dragCandidateRow = -1;
+    if (!capsule.existsAsFile())
+    {
+        status.setText("Capsule file was not found", juce::dontSendNotification);
+        return;
+    }
+
+    outboundDragStarted = true;
+    juce::StringArray files;
+    files.add(capsule.getFullPathName());
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    if (!juce::DragAndDropContainer::performExternalDragDropOfFiles(
+            files, false, &list, [safe] {
+                if (safe != nullptr)
+                    safe->status.setText("Capsule shared", juce::dontSendNotification);
+            }))
+    {
+        outboundDragStarted = false;
+        status.setText("Could not start file drag", juce::dontSendNotification);
+    }
+    else
+        status.setText("Sharing capsule...", juce::dontSendNotification);
+}
+
+void SoundCapsuleAudioProcessorEditor::mouseUp(const juce::MouseEvent&)
+{
+    dragCandidateRow = -1;
+    if (!outboundDragStarted)
+        return;
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    juce::Timer::callAfterDelay(100, [safe] {
+        if (safe != nullptr)
+            safe->outboundDragStarted = false;
+    });
 }
 
 void SoundCapsuleAudioProcessorEditor::mouseMove(const juce::MouseEvent& event)
@@ -1976,6 +2102,7 @@ void SoundCapsuleAudioProcessorEditor::showRowMenu(int rowNumber, juce::Point<in
     menu.addItem(10, "Rename");
     menu.addItem(11, "Edit tags");
     menu.addItem(12, "Show File");
+    menu.addItem(14, "Export...");
     addDarkMenuSection(menu, "Import to...");
     menu.addItem(1, "Current pattern");
     menu.addItem(2, "New pattern");
@@ -2008,8 +2135,142 @@ void SoundCapsuleAudioProcessorEditor::showRowMenu(int rowNumber, juce::Point<in
             else
                 safe->status.setText("Capsule file was not found", juce::dontSendNotification);
         }
+        else if (result == 14) safe->exportCapsule(capsulePath, name);
         else if (result == 13) safe->confirmDelete(id, name);
     });
+}
+
+void SoundCapsuleAudioProcessorEditor::exportCapsule(
+    const juce::String& path, const juce::String& name)
+{
+    const juce::File source(path);
+    if (!source.existsAsFile())
+    {
+        status.setText("Capsule file was not found", juce::dontSendNotification);
+        return;
+    }
+
+    auto filename = juce::File::createLegalFileName(name.trim());
+    if (filename.isEmpty())
+        filename = "Sound Capsule";
+    filename = juce::File(filename).withFileExtension("flcapsule").getFileName();
+    const auto initial = juce::File::getSpecialLocation(
+        juce::File::userDocumentsDirectory).getChildFile(filename);
+    exportChooser = std::make_unique<juce::FileChooser>(
+        "Export Sound Capsule", initial, "*.flcapsule", true, false, this);
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    exportChooser->launchAsync(
+        juce::FileBrowserComponent::saveMode
+            | juce::FileBrowserComponent::canSelectFiles
+            | juce::FileBrowserComponent::warnAboutOverwriting,
+        [safe, source](const juce::FileChooser& chooser) {
+            if (safe == nullptr)
+                return;
+            auto destination = chooser.getResult();
+            if (destination == juce::File())
+                return;
+            destination = destination.withFileExtension("flcapsule");
+            safe->copyCapsuleForExport(source, destination);
+        });
+}
+
+void SoundCapsuleAudioProcessorEditor::copyCapsuleForExport(
+    const juce::File& source, const juce::File& destination)
+{
+    setBusy("Exporting capsule...");
+    ++requestsInFlight;
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    requestPool.addJob([safe, source, destination] {
+        auto succeeded = source == destination;
+        if (!succeeded && safe != nullptr && !safe->shuttingDown.load())
+        {
+            juce::TemporaryFile temporary(destination);
+            succeeded = source.copyFileTo(temporary.getFile())
+                     && temporary.overwriteTargetFileWithTemporary();
+        }
+        juce::MessageManager::callAsync([safe, succeeded, destination] {
+            if (safe == nullptr)
+                return;
+            --safe->requestsInFlight;
+            safe->status.setText(
+                succeeded ? "Exported " + destination.getFileName()
+                          : "Could not export capsule to " + destination.getFullPathName(),
+                juce::dontSendNotification);
+        });
+    });
+}
+
+void SoundCapsuleAudioProcessorEditor::addExternalCapsules(
+    const juce::StringArray& files)
+{
+    if (files.isEmpty())
+        return;
+    juce::Array<juce::var> paths;
+    for (const auto& path : files)
+        paths.add(path);
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    sendCommand(
+        "add_capsules", object({{"paths", paths}}),
+        [safe](juce::var response) {
+            if (safe != nullptr)
+                safe->showAddCapsulesResult(response);
+        },
+        120000);
+    setBusy(files.size() == 1 ? "Adding shared capsule..."
+                              : "Adding " + juce::String(files.size()) + " shared capsules...");
+}
+
+void SoundCapsuleAudioProcessorEditor::showAddCapsulesResult(const juce::var& response)
+{
+    const auto importedValue = response.getProperty("imported", juce::var());
+    const auto skippedValue = response.getProperty("skipped", juce::var());
+    const auto failedValue = response.getProperty("failed", juce::var());
+    const auto* imported = importedValue.getArray();
+    const auto* skipped = skippedValue.getArray();
+    const auto* failed = failedValue.getArray();
+    const auto importedCount = imported != nullptr ? imported->size() : 0;
+    const auto skippedCount = skipped != nullptr ? skipped->size() : 0;
+    const auto failedCount = failed != nullptr ? failed->size() : 0;
+
+    status.setText(
+        juce::String(importedCount) + (importedCount == 1 ? " capsule added"
+                                                          : " capsules added"),
+        juce::dontSendNotification);
+    if (importedCount > 0)
+        refreshLibrary();
+    if (skippedCount == 0 && failedCount == 0)
+        return;
+
+    juce::String details;
+    details << importedCount << " added, " << skippedCount << " skipped, "
+            << failedCount << " failed.\n\n";
+    auto issueCount = 0;
+    const auto appendIssues = [&details, &issueCount](
+                                  const juce::Array<juce::var>* issues,
+                                  const juce::Identifier& detailProperty) {
+        if (issues == nullptr)
+            return;
+        for (const auto& issue : *issues)
+        {
+            if (issueCount >= 12)
+                break;
+            const auto source = issue.getProperty("source", "").toString();
+            details << juce::File(source).getFileName() << ": "
+                    << issue.getProperty(detailProperty, "Unknown error").toString()
+                    << "\n";
+            ++issueCount;
+        }
+    };
+    appendIssues(skipped, juce::Identifier("reason"));
+    appendIssues(failed, juce::Identifier("error"));
+    if (skippedCount + failedCount > issueCount)
+        details << "...and " << skippedCount + failedCount - issueCount << " more";
+
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::MessageBoxIconType::WarningIcon,
+        importedCount > 0 ? "Some capsules were not added"
+                          : "Capsules could not be added",
+        details.trimEnd(), "OK", this);
 }
 
 void SoundCapsuleAudioProcessorEditor::promptRename(const juce::String& id,

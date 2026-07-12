@@ -14,6 +14,79 @@ from test_flp import fixture_project, write_silence
 
 
 class LibraryTests(unittest.TestCase):
+    def test_add_capsules_validates_copies_and_reports_partial_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming = root / "incoming"
+            library_dir = root / "library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            source = Capsule.build(
+                incoming / "Shared Lead.flcapsule",
+                name="Shared Lead",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                pattern_length_steps=16,
+                preview_wav=preview,
+            )
+            original = source.path.read_bytes()
+            corrupt = incoming / "Broken.flcapsule"
+            corrupt.write_bytes(b"not a capsule")
+            library = CapsuleLibrary(library_dir, root / "index.sqlite3")
+
+            first = library.add_capsules([source.path, corrupt])
+
+            self.assertEqual(len(first["imported"]), 1)
+            self.assertEqual(len(first["failed"]), 1)
+            self.assertFalse(first["skipped"])
+            destination = Path(first["imported"][0]["path"])
+            self.assertEqual(destination.read_bytes(), original)
+            self.assertEqual(source.path.read_bytes(), original)
+            self.assertEqual(library.list()[0]["id"], source.manifest.id)
+            self.assertFalse(list(library_dir.glob(".capsule-import-*.tmp")))
+
+            duplicate = library.add_capsules([source.path])
+
+            self.assertFalse(duplicate["imported"])
+            self.assertEqual(len(duplicate["skipped"]), 1)
+            self.assertIn("already", duplicate["skipped"][0]["reason"])
+            self.assertEqual(destination.read_bytes(), original)
+
+    def test_add_capsules_uses_collision_safe_manifest_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            first = Capsule.build(
+                root / "incoming" / "First.flcapsule",
+                name="Same Name",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                pattern_length_steps=16,
+                preview_wav=preview,
+            )
+            second = Capsule.build(
+                root / "incoming" / "Second.flcapsule",
+                name="Same Name",
+                project=fixture_project(),
+                channel_ids=[5],
+                pattern_id=3,
+                pattern_length_steps=16,
+                preview_wav=preview,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+
+            result = library.add_capsules([first.path, second.path])
+
+            self.assertEqual(len(result["imported"]), 2)
+            self.assertEqual(
+                {Path(item["path"]).name for item in result["imported"]},
+                {"Same-Name.flcapsule", "Same-Name-2.flcapsule"},
+            )
+            self.assertEqual(len(library.list()), 2)
+
     def test_index_search_and_metadata_updates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
