@@ -74,6 +74,7 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
             package / "fl-studio",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+        shutil.copytree(ROOT / "docs", package / "docs")
         (package / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts" / "install.py", package / "scripts" / "install.py")
         for filename in ("README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):

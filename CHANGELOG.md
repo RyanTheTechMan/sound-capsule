@@ -14,6 +14,8 @@ No changes yet.
 
 - A manual GitHub workflow that builds downloadable macOS and Windows packages
   and prepares a draft release.
+- Developer ID signing, hardened runtime, secure timestamps, and Apple
+  notarization for the macOS standalone app and VST3 release bundles.
 - A manual **Check for Updates** action, a persisted **Check for Updates on
   startup** setting, and an in-app notification linking to a newer published
   GitHub release's notes and downloads.

@@ -95,6 +95,13 @@ Run the helper test suite with:
 uv run --python 3.12 --project helper python -m unittest discover -s helper/tests -v
 ```
 
+## Releases
+
+The manual GitHub workflow builds Windows and universal macOS downloads, signs
+and notarizes the macOS app and VST3, and creates a draft release. Maintainer
+setup and the required encrypted Apple secrets are documented in
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## License
 
 Sound Capsule is licensed under [AGPL-3.0-only](LICENSE). See

@@ -73,6 +73,33 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate macOS signing configuration
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for variable in \
+            MACOS_CERTIFICATE_BASE64 \
+            MACOS_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_APP_SPECIFIC_PASSWORD \
+            APPLE_TEAM_ID; do
+            if [ -z "${!variable:-}" ]; then
+              missing+=("$variable")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'Missing required GitHub Actions secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
       - name: Test helper
         shell: bash
         run: PYTHONPATH=helper python -m unittest discover -s helper/tests -v
@@ -87,6 +114,122 @@ jobs:
 
       - name: Build app and VST3
         run: cmake --build build --config Release --parallel 4
+
+      - name: Sign macOS app and VST3
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP_PATH="build/plugin/SoundCapsule_artefacts/Release/Standalone/Sound Capsule.app"
+          VST3_PATH="build/plugin/SoundCapsule_artefacts/Release/VST3/Sound Capsule.vst3"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          test -d "$APP_PATH"
+          test -d "$VST3_PATH"
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" \
+            | base64 --decode -o "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          IDENTITY_LINE=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep 'Developer ID Application' | head -1 || true)
+          test -n "$IDENTITY_LINE" || {
+            echo 'The P12 does not contain a usable Developer ID Application identity.' >&2
+            exit 1
+          }
+          case "$IDENTITY_LINE" in
+            *"($APPLE_TEAM_ID)"*) ;;
+            *)
+              echo 'The Developer ID certificate does not match APPLE_TEAM_ID.' >&2
+              exit 1
+              ;;
+          esac
+          IDENTITY_HASH=$(printf '%s\n' "$IDENTITY_LINE" | awk '{print $2}')
+
+          codesign --force --deep \
+            --sign "$IDENTITY_HASH" \
+            --timestamp \
+            --options runtime \
+            "$VST3_PATH"
+          codesign --force --deep \
+            --sign "$IDENTITY_HASH" \
+            --timestamp \
+            --options runtime \
+            "$APP_PATH"
+
+          codesign --verify --deep --strict --verbose=2 "$VST3_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+      - name: Notarize and staple macOS app and VST3
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP_PATH="build/plugin/SoundCapsule_artefacts/Release/Standalone/Sound Capsule.app"
+          VST3_PATH="build/plugin/SoundCapsule_artefacts/Release/VST3/Sound Capsule.vst3"
+          NOTARY_STAGING="$RUNNER_TEMP/sound-capsule-notary"
+          NOTARY_ZIP="$RUNNER_TEMP/sound-capsule-notary.zip"
+          RESULT_FILE="$RUNNER_TEMP/notary-result.json"
+          LOG_FILE="$RUNNER_TEMP/notary-log.json"
+
+          mkdir -p "$NOTARY_STAGING"
+          ditto "$APP_PATH" "$NOTARY_STAGING/Sound Capsule.app"
+          ditto "$VST3_PATH" "$NOTARY_STAGING/Sound Capsule.vst3"
+          ditto -c -k --keepParent "$NOTARY_STAGING" "$NOTARY_ZIP"
+
+          set +e
+          xcrun notarytool submit "$NOTARY_ZIP" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --output-format json > "$RESULT_FILE"
+          submit_exit=$?
+          set -e
+
+          cat "$RESULT_FILE"
+          SUBMISSION_ID=$(jq -r '.id // empty' "$RESULT_FILE" 2>/dev/null || true)
+          NOTARY_STATUS=$(jq -r '.status // empty' "$RESULT_FILE" 2>/dev/null || true)
+          if [ -n "$SUBMISSION_ID" ]; then
+            xcrun notarytool log "$SUBMISSION_ID" "$LOG_FILE" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" || true
+            if [ -f "$LOG_FILE" ]; then
+              cat "$LOG_FILE"
+            fi
+          fi
+          if [ "$submit_exit" -ne 0 ] || [ "$NOTARY_STATUS" != 'Accepted' ]; then
+            echo "Apple notarization failed with status: ${NOTARY_STATUS:-unknown}" >&2
+            exit 1
+          fi
+
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          xcrun stapler staple "$VST3_PATH"
+          xcrun stapler validate "$VST3_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$VST3_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
       - name: Package release
         shell: bash
@@ -103,6 +246,13 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
           compression-level: 0
+
+      - name: Clean up macOS signing material
+        if: always() && matrix.platform == 'macos'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/developer-id-application.p12"
 
   draft:
     name: Create draft release
