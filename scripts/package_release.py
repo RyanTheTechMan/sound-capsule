@@ -21,10 +21,16 @@ def project_version() -> str:
     return match.group(1)
 
 
-def find_one(build: Path, name: str, required_part: str | None = None) -> Path:
+def find_one(
+    build: Path,
+    name: str,
+    required_part: str | None = None,
+    directory: bool | None = None,
+) -> Path:
     matches = [
         path for path in build.rglob(name)
-        if required_part is None or required_part in path.parts
+        if (required_part is None or required_part in path.parts)
+        and (directory is None or path.is_dir() == directory)
     ]
     if len(matches) != 1:
         raise FileNotFoundError(
@@ -50,7 +56,9 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
     label = "macOS" if platform_name == "macos" else "Windows"
     app_name = "Sound Capsule.app" if platform_name == "macos" else "Sound Capsule.exe"
     app = find_one(build, app_name, "Standalone")
-    vst3 = find_one(build, "Sound Capsule.vst3")
+    # A Windows VST3 bundle contains an inner binary with the same .vst3 name.
+    # Package the bundle directory, not that implementation binary.
+    vst3 = find_one(build, "Sound Capsule.vst3", "VST3", directory=True)
     output.mkdir(parents=True, exist_ok=True)
 
     package_name = f"Sound-Capsule-v{version}-{label}"
