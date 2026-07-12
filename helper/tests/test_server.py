@@ -7,14 +7,29 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from soundcapsule import __version__
 from soundcapsule.bridge import BridgeQueue
+from soundcapsule.capsule import Capsule
 from soundcapsule.config import Settings
 from soundcapsule.server import SoundCapsuleServer
+from test_flp import fixture_project, write_silence
 
 
 class ServerTests(unittest.TestCase):
+    @staticmethod
+    def _build_capsule(path: Path, name: str, preview: Path) -> Capsule:
+        return Capsule.build(
+            path,
+            name=name,
+            project=fixture_project(),
+            channel_ids=[2],
+            pattern_id=3,
+            pattern_length_steps=16,
+            preview_wav=preview,
+        )
+
     def test_missing_bridge_has_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(RuntimeError, "enable Sound Capsule Control"):
@@ -179,6 +194,257 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(persisted["volume_display"], "db")
             self.assertFalse(runtime_update_check)
             self.assertFalse(persisted["check_updates_on_startup"])
+
+    def test_library_location_switches_without_moving_existing_capsules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "old-library"
+            new_library = root / "new-library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(old_library / "Lead.flcapsule", "Lead", preview)
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+            settings.save()
+
+            with SoundCapsuleServer(settings) as server:
+                initial = server.dispatch({"command": "setup_status", "args": {}})
+                result = server.dispatch(
+                    {
+                        "command": "set_library_location",
+                        "args": {"path": str(new_library), "move_existing": False},
+                    }
+                )
+                visible = server.dispatch({"command": "list", "args": {}})["capsules"]
+
+            self.assertEqual(initial["library_dir"], str(old_library))
+            self.assertEqual(result["library_dir"], str(new_library.resolve()))
+            self.assertEqual(result["moved_count"], 0)
+            self.assertEqual(result["not_moved_count"], 0)
+            self.assertTrue(capsule.path.exists())
+            self.assertEqual(visible, [])
+            self.assertEqual(
+                Settings.load(root / "data").library_dir, new_library.resolve()
+            )
+
+    def test_library_location_merges_and_reports_relative_path_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "old-library"
+            new_library = root / "new-library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            moved = self._build_capsule(
+                old_library / "nested" / "Moved.flcapsule", "Moved", preview
+            )
+            conflict = self._build_capsule(
+                old_library / "nested" / "Conflict.flcapsule", "Old conflict", preview
+            )
+            destination_conflict = self._build_capsule(
+                new_library / "nested" / "Conflict.flcapsule", "New conflict", preview
+            )
+            destination_only = self._build_capsule(
+                new_library / "Destination.flcapsule", "Destination", preview
+            )
+            conflict_bytes = destination_conflict.path.read_bytes()
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+
+            with SoundCapsuleServer(settings) as server:
+                result = server.dispatch(
+                    {
+                        "command": "set_library_location",
+                        "args": {"path": str(new_library), "move_existing": True},
+                    }
+                )
+                visible_names = {
+                    row["name"]
+                    for row in server.dispatch({"command": "list", "args": {}})["capsules"]
+                }
+
+            self.assertEqual(result["moved_count"], 1)
+            self.assertEqual(result["not_moved_count"], 1)
+            self.assertEqual(result["previous_library_dir"], str(old_library.resolve()))
+            self.assertFalse(moved.path.exists())
+            self.assertTrue((new_library / "nested" / "Moved.flcapsule").exists())
+            self.assertTrue(conflict.path.exists())
+            self.assertEqual(destination_conflict.path.read_bytes(), conflict_bytes)
+            self.assertEqual(visible_names, {"Moved", "New conflict", "Destination"})
+            self.assertTrue(destination_only.path.exists())
+
+    def test_library_location_rejects_overlapping_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "library"
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+            with SoundCapsuleServer(settings) as server:
+                with self.assertRaisesRegex(ValueError, "cannot contain"):
+                    server.dispatch(
+                        {
+                            "command": "set_library_location",
+                            "args": {
+                                "path": str(old_library / "nested"),
+                                "move_existing": True,
+                            },
+                        }
+                    )
+
+    def test_library_location_copy_failure_keeps_old_library_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "old-library"
+            new_library = root / "new-library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(old_library / "Lead.flcapsule", "Lead", preview)
+            existing = new_library / "keep.txt"
+            existing.parent.mkdir(parents=True)
+            existing.write_text("keep", encoding="utf-8")
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+            settings.save()
+
+            with SoundCapsuleServer(settings) as server:
+                with mock.patch(
+                    "soundcapsule.server.shutil.copy2",
+                    side_effect=OSError("simulated copy failure"),
+                ):
+                    with self.assertRaisesRegex(OSError, "simulated copy failure"):
+                        server.dispatch(
+                            {
+                                "command": "set_library_location",
+                                "args": {
+                                    "path": str(new_library),
+                                    "move_existing": True,
+                                },
+                            }
+                        )
+                visible = server.dispatch({"command": "list", "args": {}})["capsules"]
+
+            self.assertTrue(capsule.path.exists())
+            self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(Settings.load(root / "data").library_dir, old_library)
+            self.assertEqual([row["name"] for row in visible], ["Lead"])
+            self.assertFalse(list(new_library.glob(".sound-capsule-move-*")))
+
+    def test_library_location_settings_failure_rolls_back_installed_capsules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "old-library"
+            new_library = root / "new-library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(old_library / "Lead.flcapsule", "Lead", preview)
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+            settings.save()
+
+            with SoundCapsuleServer(settings) as server:
+                with mock.patch.object(
+                    Settings, "save", side_effect=OSError("simulated settings failure")
+                ):
+                    with self.assertRaisesRegex(OSError, "simulated settings failure"):
+                        server.dispatch(
+                            {
+                                "command": "set_library_location",
+                                "args": {
+                                    "path": str(new_library),
+                                    "move_existing": True,
+                                },
+                            }
+                        )
+
+                self.assertEqual(server.settings.library_dir.resolve(), old_library.resolve())
+
+            self.assertTrue(capsule.path.exists())
+            self.assertFalse((new_library / "Lead.flcapsule").exists())
+            self.assertEqual(
+                Settings.load(root / "data").library_dir.resolve(), old_library.resolve()
+            )
+
+    def test_library_location_reindex_failure_restores_settings_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "old-library"
+            new_library = root / "new-library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(old_library / "Lead.flcapsule", "Lead", preview)
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+            settings.save()
+
+            with SoundCapsuleServer(settings) as server:
+                with mock.patch(
+                    "soundcapsule.server.CapsuleLibrary.reindex",
+                    side_effect=RuntimeError("simulated reindex failure"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "simulated reindex failure"):
+                        server.dispatch(
+                            {
+                                "command": "set_library_location",
+                                "args": {
+                                    "path": str(new_library),
+                                    "move_existing": True,
+                                },
+                            }
+                        )
+
+                self.assertEqual(server.settings.library_dir.resolve(), old_library.resolve())
+
+            self.assertTrue(capsule.path.exists())
+            self.assertFalse((new_library / "Lead.flcapsule").exists())
+            self.assertEqual(
+                Settings.load(root / "data").library_dir.resolve(), old_library.resolve()
+            )
+
+    def test_library_location_cleanup_failure_reports_source_as_not_moved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_library = root / "old-library"
+            new_library = root / "new-library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(old_library / "Lead.flcapsule", "Lead", preview)
+            settings = Settings(
+                data_dir=root / "data", library_dir=old_library, server_port=0
+            )
+            settings.save()
+            original_unlink = Path.unlink
+
+            def fail_source_unlink(path: Path, *args, **kwargs):
+                if path.resolve() == capsule.path.resolve():
+                    raise OSError("simulated source cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with SoundCapsuleServer(settings) as server:
+                with mock.patch.object(Path, "unlink", fail_source_unlink):
+                    result = server.dispatch(
+                        {
+                            "command": "set_library_location",
+                            "args": {
+                                "path": str(new_library),
+                                "move_existing": True,
+                            },
+                        }
+                    )
+
+                self.assertEqual(server.settings.library_dir.resolve(), new_library.resolve())
+
+            self.assertEqual(result["moved_count"], 0)
+            self.assertEqual(result["not_moved_count"], 1)
+            self.assertTrue(capsule.path.exists())
+            self.assertTrue((new_library / "Lead.flcapsule").exists())
+            self.assertEqual(
+                Settings.load(root / "data").library_dir.resolve(), new_library.resolve()
+            )
 
 
 if __name__ == "__main__":

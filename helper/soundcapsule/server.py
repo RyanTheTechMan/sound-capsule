@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import shutil
 import socketserver
 import threading
 import time
 import uuid
 
 from . import __version__
+from .capsule import Capsule
 from .config import Settings
+from .library import CapsuleLibrary
 from .project import CapsuleService
 from .project_locator import ProjectLocator
 
@@ -74,6 +78,129 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "updated_at": time.time(),
             }
 
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _remove_empty_parents(path: Path, root: Path) -> None:
+        directory = path.parent
+        while directory != root and root in directory.parents:
+            try:
+                directory.rmdir()
+            except OSError:
+                break
+            directory = directory.parent
+
+    def _set_library_location(self, raw_path: object, move_existing: bool) -> dict:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("Choose a capsule save location")
+
+        old_dir = self.settings.library_dir.resolve()
+        new_dir = Path(raw_path).expanduser().resolve()
+        if new_dir == old_dir:
+            return {
+                "library_dir": str(new_dir),
+                "previous_library_dir": str(old_dir),
+                "moved_count": 0,
+                "not_moved_count": 0,
+            }
+        if old_dir in new_dir.parents or new_dir in old_dir.parents:
+            raise ValueError(
+                "The new capsule location cannot contain, or be inside, the current location"
+            )
+
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise OSError(f"Could not create the capsule location: {error}") from error
+        if not new_dir.is_dir():
+            raise ValueError("The capsule save location must be a folder")
+
+        source_paths = sorted(old_dir.rglob("*.flcapsule")) if move_existing else []
+        conflicts: list[Path] = []
+        candidates: list[tuple[Path, Path, Path]] = []
+        staging_dir = new_dir / f".sound-capsule-move-{uuid.uuid4().hex}"
+        installed: list[tuple[Path, Path]] = []
+        settings_persisted = False
+
+        try:
+            # Creating the private staging folder also verifies that the chosen
+            # destination is writable before settings are changed.
+            staging_dir.mkdir()
+            if move_existing:
+                for source in source_paths:
+                    relative = source.relative_to(old_dir)
+                    destination = new_dir / relative
+                    if destination.exists():
+                        conflicts.append(source)
+                        continue
+                    staged = (staging_dir / relative).with_suffix(
+                        relative.suffix + ".pending"
+                    )
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, staged)
+                    Capsule(staged).verify()
+                    if self._file_digest(source) != self._file_digest(staged):
+                        raise RuntimeError(f"Copied capsule did not match its source: {relative}")
+                    candidates.append((source, staged, destination))
+
+                for source, staged, destination in candidates:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    # A file may have appeared while copies were being staged.
+                    if destination.exists():
+                        conflicts.append(source)
+                        continue
+                    staged.replace(destination)
+                    installed.append((source, destination))
+
+            current = Settings.load(self.settings.data_dir)
+            current.library_dir = new_dir
+            current.save()
+            settings_persisted = True
+
+            replacement = CapsuleLibrary(
+                new_dir, self.settings.data_dir / "library.sqlite3"
+            )
+            replacement.reindex()
+            self.settings.library_dir = new_dir
+            self.service.library = replacement
+        except Exception:
+            if settings_persisted:
+                try:
+                    current.library_dir = old_dir
+                    current.save()
+                except Exception:
+                    pass
+            for _, destination in reversed(installed):
+                try:
+                    destination.unlink()
+                    self._remove_empty_parents(destination, new_dir)
+                except OSError:
+                    pass
+            raise
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+        cleanup_failures: list[Path] = []
+        for source, _ in installed:
+            try:
+                source.unlink()
+                self._remove_empty_parents(source, old_dir)
+            except OSError:
+                cleanup_failures.append(source)
+
+        return {
+            "library_dir": str(new_dir),
+            "previous_library_dir": str(old_dir),
+            "moved_count": len(installed) - len(cleanup_failures),
+            "not_moved_count": len(conflicts) + len(cleanup_failures),
+        }
+
     def dispatch(self, request: dict) -> dict:
         if not isinstance(request, dict):
             raise ValueError("request must be a JSON object")
@@ -132,8 +259,14 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
                 "check_updates_on_startup": current.check_updates_on_startup,
+                "library_dir": str(current.library_dir),
                 "app_path": str(current.app_path) if current.app_path else None,
             }
+        if command == "set_library_location":
+            with self.operation_lock:
+                return self._set_library_location(
+                    args.get("path"), bool(args.get("move_existing", False))
+                )
         if command == "configure_setup":
             with self.operation_lock:
                 current = Settings.load(self.settings.data_dir)

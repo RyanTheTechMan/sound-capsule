@@ -86,14 +86,79 @@ private:
     juce::TextButton checkNow;
 };
 
+class LibraryLocationComponent final : public juce::Component
+{
+public:
+    explicit LibraryLocationComponent(const juce::String& currentLocation)
+        : choose("Choose...")
+    {
+        setSize(360, 62);
+        heading.setText("Capsule save location:", juce::dontSendNotification);
+        heading.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        location.setText(currentLocation, false);
+        location.setReadOnly(true);
+        location.setCaretVisible(false);
+        location.setTooltip(currentLocation);
+        choose.setTooltip("Choose where capsule files are saved");
+        choose.onClick = [this] { chooseFolder(); };
+        addAndMakeVisible(heading);
+        addAndMakeVisible(location);
+        addAndMakeVisible(choose);
+    }
+
+    juce::String getLocation() const { return location.getText(); }
+
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        heading.setBounds(bounds.removeFromTop(22));
+        bounds.removeFromTop(3);
+        choose.setBounds(bounds.removeFromRight(92));
+        bounds.removeFromRight(6);
+        location.setBounds(bounds);
+    }
+
+private:
+    void chooseFolder()
+    {
+        auto initial = juce::File(location.getText());
+        if (!initial.isDirectory())
+            initial = initial.getParentDirectory();
+        chooser = std::make_unique<juce::FileChooser>(
+            "Choose capsule save location", initial, juce::String(), true);
+        juce::Component::SafePointer<LibraryLocationComponent> safe(this);
+        chooser->launchAsync(
+            juce::FileBrowserComponent::openMode
+                | juce::FileBrowserComponent::canSelectDirectories,
+            [safe](const juce::FileChooser& completed) {
+                if (safe == nullptr) return;
+                const auto selected = completed.getResult();
+                if (selected != juce::File())
+                {
+                    safe->location.setText(selected.getFullPathName(), false);
+                    safe->location.setTooltip(selected.getFullPathName());
+                }
+                safe->chooser.reset();
+            });
+    }
+
+    juce::Label heading;
+    juce::TextEditor location;
+    juce::TextButton choose;
+    std::unique_ptr<juce::FileChooser> chooser;
+};
+
 class SettingsAlertWindow final : public juce::AlertWindow
 {
 public:
-    SettingsAlertWindow(const juce::String& title, bool checkOnStartup)
+    SettingsAlertWindow(const juce::String& title, bool checkOnStartup,
+                        const juce::String& libraryDirectory)
         : juce::AlertWindow(title, {}, juce::MessageBoxIconType::QuestionIcon),
           updateSettings(checkOnStartup),
+          libraryLocation(libraryDirectory),
           flSetup("FL Setup")
     {
+        addCustomComponent(&libraryLocation);
         addCustomComponent(&updateSettings);
         updateSettings.onCheckNow = [this] { exitModalState(3); };
         updateSettings.attachCallbacks();
@@ -102,9 +167,14 @@ public:
         flSetup.onClick = [this] { exitModalState(2); };
     }
 
-    ~SettingsAlertWindow() override { removeCustomComponent(0); }
+    ~SettingsAlertWindow() override
+    {
+        removeCustomComponent(1);
+        removeCustomComponent(0);
+    }
 
     bool shouldCheckOnStartup() const { return updateSettings.shouldCheckOnStartup(); }
+    juce::String getLibraryLocation() const { return libraryLocation.getLocation(); }
 
     void resized() override
     {
@@ -114,6 +184,7 @@ public:
 
 private:
     UpdateSettingsComponent updateSettings;
+    LibraryLocationComponent libraryLocation;
     juce::TextButton flSetup;
 };
 
@@ -1434,9 +1505,12 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
             response.getProperty("volume_display", "percent").toString();
         const auto currentCheckUpdatesOnStartup = static_cast<bool>(
             response.getProperty("check_updates_on_startup", true));
+        const auto currentLibraryDirectory =
+            response.getProperty("library_dir", "").toString();
         const auto appPath = response.getProperty("app_path", "").toString();
         const auto titleText = initial ? "Welcome to Sound Capsule" : "Sound Capsule settings";
-        auto* dialog = new SettingsAlertWindow(titleText, currentCheckUpdatesOnStartup);
+        auto* dialog = new SettingsAlertWindow(
+            titleText, currentCheckUpdatesOnStartup, currentLibraryDirectory);
         dialog->addTextEditor("undo_minutes", juce::String(currentUndoMinutes),
                               "Undo minutes (1-1440):");
         juce::StringArray waveformModes;
@@ -1471,7 +1545,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
         dialog->enterModalState(
             true,
             juce::ModalCallbackFunction::create(
-                [safe, dialog, appPath](int result) {
+                [safe, dialog, appPath, currentLibraryDirectory](int result) {
                     if (safe == nullptr) return;
                     if (result == 3)
                     {
@@ -1501,6 +1575,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                                        ? juce::String("db")
                                                        : juce::String("percent");
                     const auto checkUpdatesOnStartup = dialog->shouldCheckOnStartup();
+                    const auto selectedLibraryDirectory = dialog->getLibraryLocation();
                     if (undoMinutes < 1 || undoMinutes > 1440)
                     {
                         juce::AlertWindow::showMessageBoxAsync(
@@ -1510,15 +1585,20 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                             "OK", safe.getComponent());
                         return;
                     }
-                    safe->sendCommand(
-                        "configure_setup",
-                        object({{"undo_window_minutes", undoMinutes},
-                                {"waveform_channels", waveformSetting},
-                                {"import_destination", importSetting},
-                                {"volume_display", volumeDisplaySetting},
-                                {"check_updates_on_startup", checkUpdatesOnStartup}}),
-                        [safe, appPath, showInstructions, waveformSetting,
-                         importSetting, volumeDisplaySetting](juce::var) {
+                    auto saveSettings =
+                        [safe, appPath, showInstructions, undoMinutes, waveformSetting,
+                         importSetting, volumeDisplaySetting, checkUpdatesOnStartup]
+                        (juce::var libraryResult) {
+                        if (safe == nullptr) return;
+                        safe->sendCommand(
+                            "configure_setup",
+                            object({{"undo_window_minutes", undoMinutes},
+                                    {"waveform_channels", waveformSetting},
+                                    {"import_destination", importSetting},
+                                    {"volume_display", volumeDisplaySetting},
+                                    {"check_updates_on_startup", checkUpdatesOnStartup}}),
+                            [safe, appPath, showInstructions, waveformSetting,
+                             importSetting, volumeDisplaySetting, libraryResult](juce::var) {
                             if (safe == nullptr) return;
                             safe->waveformChannels = waveformSetting == "stereo"
                                                    ? WaveformChannels::stereo
@@ -1533,7 +1613,42 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                             safe->volumeDisplayDb = volumeDisplaySetting == "db";
                             safe->updateVolumeDisplay();
                             safe->list.repaint();
-                            safe->status.setText("Settings saved", juce::dontSendNotification);
+                            const auto locationChanged = libraryResult.isObject();
+                            const auto movedCount = locationChanged
+                                ? static_cast<int>(libraryResult.getProperty("moved_count", 0)) : 0;
+                            const auto notMovedCount = locationChanged
+                                ? static_cast<int>(libraryResult.getProperty("not_moved_count", 0)) : 0;
+                            safe->status.setText(
+                                movedCount > 0
+                                    ? "Settings saved; " + juce::String(movedCount)
+                                        + (movedCount == 1 ? " capsule moved" : " capsules moved")
+                                    : "Settings saved",
+                                juce::dontSendNotification);
+                            if (locationChanged)
+                            {
+                                safe->audioProcessor.stopPreview();
+                                safe->refreshLibrary();
+                            }
+                            if (notMovedCount > 0)
+                            {
+                                const auto previousDirectory = libraryResult.getProperty(
+                                    "previous_library_dir", "").toString();
+                                juce::AlertWindow::showAsync(
+                                    juce::MessageBoxOptions::makeOptionsOkCancel(
+                                        juce::MessageBoxIconType::WarningIcon,
+                                        "Some capsules were not moved",
+                                        juce::String(movedCount) + (movedCount == 1
+                                            ? " capsule moved. " : " capsules moved. ")
+                                            + juce::String(notMovedCount)
+                                            + (notMovedCount == 1
+                                                ? " was not moved and remains in the previous location."
+                                                : " were not moved and remain in the previous location."),
+                                        "Show Not Moved", "Dismiss", safe.getComponent()),
+                                    [previousDirectory](int choice) {
+                                        if (choice == 1 && previousDirectory.isNotEmpty())
+                                            juce::File(previousDirectory).revealToUser();
+                                    });
+                            }
                             if (!showInstructions)
                             {
                                 safe->refreshSessionStatus();
@@ -1559,6 +1674,35 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                 "Finish FL Studio setup", setupText,
                                 "Got it", safe.getComponent());
                             safe->refreshSessionStatus();
+                            });
+                        };
+
+                    const auto libraryChanged =
+                        juce::File(selectedLibraryDirectory)
+                            != juce::File(currentLibraryDirectory);
+                    if (!libraryChanged)
+                    {
+                        saveSettings(juce::var());
+                        return;
+                    }
+
+                    juce::AlertWindow::showAsync(
+                        juce::MessageBoxOptions::makeOptionsYesNoCancel(
+                            juce::MessageBoxIconType::QuestionIcon,
+                            "Change capsule save location",
+                            "Do you want to move existing capsules into the new location? "
+                            "Capsules already present there will be merged into the library.",
+                            "Move Existing", "Don't Move", "Cancel", safe.getComponent()),
+                        [safe, selectedLibraryDirectory, saveSettings](int choice) {
+                            if (safe == nullptr || choice == 0) return;
+                            safe->sendCommand(
+                                "set_library_location",
+                                object({{"path", selectedLibraryDirectory},
+                                        {"move_existing", choice == 1}}),
+                                [saveSettings](juce::var locationResult) {
+                                    saveSettings(locationResult);
+                                },
+                                120000);
                         });
                 }),
             true);

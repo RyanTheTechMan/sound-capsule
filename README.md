@@ -47,6 +47,12 @@ uv run --python 3.12 scripts/install.py --build . --with-vst
 On Windows, create a loopback MIDI input named **Sound Capsule Control** if
 one is not already available. The FL Setup guide explains the connection.
 
+In **Settings**, **Capsule save location** chooses where `.flcapsule` files are
+stored without moving Sound Capsule's program settings or cache. When changing
+locations, you can merge the current library into the new folder or leave the
+existing files where they are. Files with the same relative path are not
+overwritten and can be revealed from the result message.
+
 ## Save a capsule
 
 1. In FL Studio, select the generator channel or channels you want to save and
