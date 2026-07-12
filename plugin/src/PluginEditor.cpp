@@ -524,6 +524,8 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     undoImport.setVisible(false);
 
     saveGroup.setColour(juce::TextButton::buttonColourId, accent.darker(0.35f));
+    capsuleName.setVisible(false);
+    tagsInput.setVisible(false);
     saveGroup.setVisible(false);
     saveIndividual.setVisible(false);
     list.setRowHeight(64);
@@ -649,10 +651,15 @@ bool SoundCapsuleAudioProcessorEditor::isInterestedInFileDrag(
 {
     if (files.isEmpty())
         return false;
+    auto hasExternalCapsule = false;
     for (const auto& path : files)
+    {
         if (!juce::File(path).hasFileExtension("flcapsule"))
             return false;
-    return true;
+        if (!isLibraryCapsuleFile(path))
+            hasExternalCapsule = true;
+    }
+    return hasExternalCapsule;
 }
 
 void SoundCapsuleAudioProcessorEditor::fileDragEnter(
@@ -676,7 +683,11 @@ void SoundCapsuleAudioProcessorEditor::filesDropped(
     incomingFileCount = 0;
     inboundFileDragActive = false;
     repaint();
-    addExternalCapsules(files);
+    juce::StringArray externalFiles;
+    for (const auto& path : files)
+        if (!isLibraryCapsuleFile(path))
+            externalFiles.add(path);
+    addExternalCapsules(externalFiles);
 }
 
 void SoundCapsuleAudioProcessorEditor::resized()
@@ -732,22 +743,25 @@ void SoundCapsuleAudioProcessorEditor::resized()
     searchRow.removeFromRight(8);
     search.setBounds(searchRow);
     bounds.removeFromTop(8);
-    auto importRow = bounds.removeFromBottom(36);
-    if (saveIndividual.isVisible())
+    if (capsuleName.isVisible())
     {
-        saveIndividual.setBounds(importRow.removeFromRight(130).reduced(2, 0));
-        importRow.removeFromRight(6);
+        auto importRow = bounds.removeFromBottom(36);
+        if (saveIndividual.isVisible())
+        {
+            saveIndividual.setBounds(importRow.removeFromRight(130).reduced(2, 0));
+            importRow.removeFromRight(6);
+        }
+        if (saveGroup.isVisible())
+        {
+            saveGroup.setBounds(importRow.removeFromRight(130).reduced(2, 0));
+            importRow.removeFromRight(8);
+        }
+        const auto nameWidth = (importRow.getWidth() - 8) / 2;
+        capsuleName.setBounds(importRow.removeFromLeft(nameWidth).reduced(2, 0));
+        importRow.removeFromLeft(8);
+        tagsInput.setBounds(importRow.reduced(2, 0));
+        bounds.removeFromBottom(8);
     }
-    if (saveGroup.isVisible())
-    {
-        saveGroup.setBounds(importRow.removeFromRight(130).reduced(2, 0));
-        importRow.removeFromRight(8);
-    }
-    const auto nameWidth = (importRow.getWidth() - 8) / 2;
-    capsuleName.setBounds(importRow.removeFromLeft(nameWidth).reduced(2, 0));
-    importRow.removeFromLeft(8);
-    tagsInput.setBounds(importRow.reduced(2, 0));
-    bounds.removeFromBottom(8);
     list.setBounds(bounds);
     importProgress.setBounds(getLocalBounds());
     importProgress.toFront(false);
@@ -1450,8 +1464,11 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
 
         const auto dirty = static_cast<int>(response.getProperty("changed", 0)) != 0;
         const auto connectionWarningWasVisible = safe->connectionStatus.isVisible();
+        const auto importFieldsWereVisible = safe->capsuleName.isVisible();
         safe->connectionStatus.setVisible(false);
         safe->connectionSetup.setVisible(false);
+        safe->capsuleName.setVisible(true);
+        safe->tagsInput.setVisible(true);
         safe->projectStatus.setText("Project: " + projectTitle + (dirty ? " (unsaved)" : ""),
                                     juce::dontSendNotification);
         safe->projectStatus.setColour(juce::Label::textColourId,
@@ -1485,7 +1502,8 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
             "FL MIDI scripting API " + response.getProperty("midi_api_version", 0).toString());
         safe->patternStatus.setTooltip(patternName);
         safe->saveGroup.setTooltip(selectedNames.joinIntoString(", "));
-        if (connectionWarningWasVisible || undoVisibilityChanged || saveVisibilityChanged)
+        if (connectionWarningWasVisible || !importFieldsWereVisible
+            || undoVisibilityChanged || saveVisibilityChanged)
             safe->resized();
     }, 1500, true);
 }
@@ -2295,6 +2313,16 @@ void SoundCapsuleAudioProcessorEditor::showAddCapsulesResult(const juce::var& re
         details.trimEnd(), "OK", this);
 }
 
+bool SoundCapsuleAudioProcessorEditor::isLibraryCapsuleFile(
+    const juce::String& path) const
+{
+    const juce::File candidate(path);
+    for (const auto& row : rows)
+        if (candidate == juce::File(row.capsulePath))
+            return true;
+    return false;
+}
+
 void SoundCapsuleAudioProcessorEditor::promptRename(const juce::String& id,
                                                      const juce::String& currentName)
 {
@@ -2398,6 +2426,8 @@ void SoundCapsuleAudioProcessorEditor::sendCommand(const juce::String& command,
                     safe->projectStatus.setText("Project: Unknown", juce::dontSendNotification);
                     safe->patternStatus.setText("Pattern: Unknown", juce::dontSendNotification);
                     safe->status.setText("Waiting for FL Studio", juce::dontSendNotification);
+                    safe->capsuleName.setVisible(false);
+                    safe->tagsInput.setVisible(false);
                     safe->saveGroup.setVisible(false);
                     safe->saveIndividual.setVisible(false);
                     safe->undoImport.setVisible(false);

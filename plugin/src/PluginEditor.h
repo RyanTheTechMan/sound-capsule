@@ -124,6 +124,7 @@ private:
     void copyCapsuleForExport(const juce::File& source, const juce::File& destination);
     void addExternalCapsules(const juce::StringArray& files);
     void showAddCapsulesResult(const juce::var& response);
+    bool isLibraryCapsuleFile(const juce::String& path) const;
     void promptRename(const juce::String& id, const juce::String& currentName);
     void promptTags(const juce::String& id, const juce::String& currentTags);
     void confirmDelete(const juce::String& id, const juce::String& name);
