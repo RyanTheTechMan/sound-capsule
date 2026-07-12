@@ -33,7 +33,8 @@ std::unique_ptr<juce::InputStream> createCapsulePreviewStream(const juce::File& 
     if (source == nullptr)
         return {};
     juce::MemoryBlock data;
-    source->readIntoMemoryBlock(data, static_cast<ssize_t>(maximumPreviewBytes));
+    source->readIntoMemoryBlock(
+        data, static_cast<juce::pointer_sized_int>(maximumPreviewBytes));
     if (static_cast<juce::int64>(data.getSize()) != entry->uncompressedSize)
         return {};
     return std::make_unique<juce::MemoryInputStream>(std::move(data));

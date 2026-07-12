@@ -79,7 +79,8 @@ class ProjectServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(locator.find_current("Song"), current.resolve())
-            self.assertIn(str(current.resolve()), (root / "cache.json").read_text())
+            cache = json.loads((root / "cache.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache["song"]["path"], str(current.resolve()))
 
     def test_project_locator_uses_first_fl_recent_when_metadata_title_is_blank(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

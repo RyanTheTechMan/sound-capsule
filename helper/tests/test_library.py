@@ -4,7 +4,9 @@ import json
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from soundcapsule.capsule import Capsule
 from soundcapsule.library import CapsuleLibrary
@@ -83,24 +85,30 @@ class LibraryTests(unittest.TestCase):
             preview = root / "preview.wav"
             write_silence(preview)
             project = fixture_project()
-            alpha = Capsule.build(
-                library_dir / "Alpha.flcapsule",
-                name="Alpha",
-                project=project,
-                channel_ids=[2],
-                pattern_id=3,
-                pattern_length_steps=16,
-                preview_wav=preview,
-            )
-            Capsule.build(
-                library_dir / "Beta.flcapsule",
-                name="Beta",
-                project=project,
-                channel_ids=[2],
-                pattern_id=3,
-                pattern_length_steps=16,
-                preview_wav=preview,
-            )
+            created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            with patch("soundcapsule.capsule.datetime") as capsule_datetime:
+                capsule_datetime.now.side_effect = [
+                    created_at,
+                    created_at + timedelta(seconds=1),
+                ]
+                alpha = Capsule.build(
+                    library_dir / "Alpha.flcapsule",
+                    name="Alpha",
+                    project=project,
+                    channel_ids=[2],
+                    pattern_id=3,
+                    pattern_length_steps=16,
+                    preview_wav=preview,
+                )
+                Capsule.build(
+                    library_dir / "Beta.flcapsule",
+                    name="Beta",
+                    project=project,
+                    channel_ids=[2],
+                    pattern_id=3,
+                    pattern_length_steps=16,
+                    preview_wav=preview,
+                )
             library = CapsuleLibrary(library_dir, root / "index.sqlite3")
             library.reindex()
             library.record_use(alpha.manifest.id)
