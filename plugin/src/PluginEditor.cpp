@@ -900,6 +900,7 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
     };
     auto drawMidi = [&](juce::Rectangle<int> area)
     {
+        const auto midiScale = 1.0f / row.midiTimelineEnd;
         graphics.setColour(juce::Colours::grey.withAlpha(0.25f));
         graphics.drawRect(area, 1);
         const auto idleColour = [&](int channel) {
@@ -924,8 +925,10 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
             {
                 graphics.setColour(played ? playingColour(note.channel)
                                           : idleColour(note.channel));
-                const auto x = static_cast<float>(area.getX()) + note.start * static_cast<float>(area.getWidth());
-                const auto noteWidth = juce::jmax(2.0f, note.length * static_cast<float>(area.getWidth()));
+                const auto x = static_cast<float>(area.getX())
+                             + note.start * midiScale * static_cast<float>(area.getWidth());
+                const auto noteWidth = juce::jmax(
+                    2.0f, note.length * midiScale * static_cast<float>(area.getWidth()));
                 const auto y = static_cast<float>(area.getBottom() - 2)
                              - note.pitch * static_cast<float>(juce::jmax(1, area.getHeight() - 4));
                 graphics.fillRoundedRectangle(x, y - 1.5f, noteWidth, 3.0f, 1.0f);
@@ -934,8 +937,10 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         render(false);
         if (isPlaying || isCompleted)
         {
+            const auto midiProgress = juce::jlimit(
+                0.0, 1.0, previewProgress / static_cast<double>(row.midiTimelineEnd));
             const auto progressWidth = juce::roundToInt(
-                previewProgress * area.getWidth());
+                midiProgress * area.getWidth());
             juce::Graphics::ScopedSaveState state(graphics);
             graphics.reduceClipRegion(area.withWidth(progressWidth));
             render(true);
@@ -998,8 +1003,12 @@ void SoundCapsuleAudioProcessorEditor::listBoxItemClicked(int rowNumber, const j
         const auto previewX = 46;
         const auto previewWidth = actionsX - previewX - 8;
         auto normalized = 0.0;
+        auto clickedMidi = false;
         if (!(waveformToggle.getToggleState() && midiToggle.getToggleState()))
+        {
             normalized = static_cast<double>(event.x - previewX) / juce::jmax(1, previewWidth);
+            clickedMidi = midiToggle.getToggleState();
+        }
         else
         {
             const auto halfWidth = (previewWidth - 6) / 2;
@@ -1007,10 +1016,15 @@ void SoundCapsuleAudioProcessorEditor::listBoxItemClicked(int rowNumber, const j
             if (event.x < previewX + halfWidth)
                 normalized = static_cast<double>(event.x - previewX) / juce::jmax(1, halfWidth);
             else if (event.x >= rightStart)
+            {
                 normalized = static_cast<double>(event.x - rightStart) / juce::jmax(1, halfWidth);
+                clickedMidi = true;
+            }
             else
                 return;
         }
+        if (clickedMidi)
+            normalized *= rows[static_cast<size_t>(rowNumber)].midiTimelineEnd;
         startPreview(rowNumber, juce::jlimit(0.0, 1.0, normalized), false);
     }
     else if (event.x >= actionsX && event.x < actionsX + 36)
@@ -1331,6 +1345,14 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
                                                  static_cast<float>((*note)[2]),
                                                  note->size() >= 4
                                                      ? static_cast<int>((*note)[3]) : 0});
+                if (!row.notes.empty())
+                {
+                    row.midiTimelineEnd = 0.0f;
+                    for (const auto& note : row.notes)
+                        row.midiTimelineEnd = juce::jmax(
+                            row.midiTimelineEnd, note.start + note.length);
+                    row.midiTimelineEnd = juce::jlimit(0.000001f, 1.0f, row.midiTimelineEnd);
+                }
                 row.plugins = pluginNames.joinIntoString(", ");
                 row.tags = tagNames.joinIntoString(", ");
                 row.tagItems = tagNames;

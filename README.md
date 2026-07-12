@@ -68,6 +68,9 @@ overwritten and can be revealed from the result message.
 
 1. Find a capsule in the library. Use search, tags, favorites, and the preview
    controls to choose the sound you want.
+   MIDI previews preserve any opening rest but trim unused pattern space after
+   the final note. Their playback indicator and click-to-seek timeline can
+   therefore finish before the full audio waveform.
 2. Click its **Import** button to add it to the configured destination.
 3. Right-click **Import**, or use the three-dot menu, to choose a destination
    for this import:

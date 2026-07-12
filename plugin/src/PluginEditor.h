@@ -88,6 +88,7 @@ private:
         int useCount = 0;
         juce::String capsulePath;
         std::vector<NotePreview> notes;
+        float midiTimelineEnd = 1.0f;
         std::unique_ptr<juce::AudioThumbnail> thumbnail;
         bool preloadQueued = false;
     };
