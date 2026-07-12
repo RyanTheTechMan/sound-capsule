@@ -79,6 +79,8 @@ jobs:
         env:
           MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_BASE64 }}
+          MACOS_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -88,6 +90,8 @@ jobs:
           for variable in \
             MACOS_CERTIFICATE_BASE64 \
             MACOS_CERTIFICATE_PASSWORD \
+            MACOS_INSTALLER_CERTIFICATE_BASE64 \
+            MACOS_INSTALLER_CERTIFICATE_PASSWORD \
             APPLE_ID \
             APPLE_APP_SPECIFIC_PASSWORD \
             APPLE_TEAM_ID; do
@@ -111,6 +115,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DSOUNDCAPSULE_BUILD_PLUGIN=ON
           -DSOUNDCAPSULE_RELEASE_REPOSITORY=${{ github.repository }}
+          -DSOUNDCAPSULE_APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}
 
       - name: Build app and VST3
         run: cmake --build build --config Release --parallel 4
@@ -121,12 +126,15 @@ jobs:
         env:
           MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_BASE64 }}
+          MACOS_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           APP_PATH="build/plugin/SoundCapsule_artefacts/Release/Standalone/Sound Capsule.app"
           VST3_PATH="build/plugin/SoundCapsule_artefacts/Release/VST3/Sound Capsule.vst3"
           CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          INSTALLER_CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-installer.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
 
@@ -134,12 +142,17 @@ jobs:
           test -d "$VST3_PATH"
           printf '%s' "$MACOS_CERTIFICATE_BASE64" \
             | base64 --decode -o "$CERTIFICATE_PATH"
+          printf '%s' "$MACOS_INSTALLER_CERTIFICATE_BASE64" \
+            | base64 --decode -o "$INSTALLER_CERTIFICATE_PATH"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import "$CERTIFICATE_PATH" \
             -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security import "$INSTALLER_CERTIFICATE_PATH" \
+            -P "$MACOS_INSTALLER_CERTIFICATE_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
@@ -160,6 +173,19 @@ jobs:
               ;;
           esac
           IDENTITY_HASH=$(printf '%s\n' "$IDENTITY_LINE" | awk '{print $2}')
+          INSTALLER_IDENTITY_LINE=$(security find-identity -v "$KEYCHAIN_PATH" \
+            | grep 'Developer ID Installer' | head -1 || true)
+          test -n "$INSTALLER_IDENTITY_LINE" || {
+            echo 'The installer P12 does not contain a usable Developer ID Installer identity.' >&2
+            exit 1
+          }
+          case "$INSTALLER_IDENTITY_LINE" in
+            *"($APPLE_TEAM_ID)"*) ;;
+            *)
+              echo 'The Developer ID Installer certificate does not match APPLE_TEAM_ID.' >&2
+              exit 1
+              ;;
+          esac
 
           codesign --force --deep \
             --sign "$IDENTITY_HASH" \
@@ -240,10 +266,59 @@ jobs:
           --platform ${{ matrix.platform }}
           --version ${{ needs.validate.outputs.version }}
 
+      - name: Build signed macOS installer
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          INSTALLER_IDENTITY_LINE=$(security find-identity -v "$KEYCHAIN_PATH" \
+            | grep 'Developer ID Installer' | head -1)
+          INSTALLER_IDENTITY=$(printf '%s\n' "$INSTALLER_IDENTITY_LINE" | sed -E 's/.*"(.*)".*/\1/')
+          MACOS_INSTALLER_IDENTITY="$INSTALLER_IDENTITY" \
+          MACOS_INSTALLER_KEYCHAIN="$KEYCHAIN_PATH" \
+            python scripts/package_macos_installer.py \
+              --build build --output dist --version "${{ needs.validate.outputs.version }}"
+
+      - name: Notarize and staple macOS installer
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          PKG_PATH="dist/Sound-Capsule-v${{ needs.validate.outputs.version }}-macOS.pkg"
+          RESULT_FILE="$RUNNER_TEMP/pkg-notary-result.json"
+          xcrun notarytool submit "$PKG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --output-format json > "$RESULT_FILE"
+          cat "$RESULT_FILE"
+          test "$(jq -r '.status // empty' "$RESULT_FILE")" = 'Accepted'
+          xcrun stapler staple "$PKG_PATH"
+          xcrun stapler validate "$PKG_PATH"
+          pkgutil --check-signature "$PKG_PATH"
+          spctl --assess --type install --verbose=4 "$PKG_PATH"
+
+      - name: Build Windows MSI
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: >-
+          python scripts/package_windows_installer.py
+          --build build
+          --output dist
+          --version ${{ needs.validate.outputs.version }}
+
       - uses: actions/upload-artifact@v7
         with:
           name: sound-capsule-${{ matrix.platform }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.pkg
+            dist/*.msi
           if-no-files-found: error
           compression-level: 0
 
@@ -253,6 +328,7 @@ jobs:
         run: |
           security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/developer-id-application.p12"
+          rm -f "$RUNNER_TEMP/developer-id-installer.p12"
 
   draft:
     name: Create draft release
@@ -274,7 +350,7 @@ jobs:
 
       - name: Create checksums
         working-directory: dist
-        run: sha256sum *.zip > SHA256SUMS.txt
+        run: sha256sum *.zip *.pkg *.msi > SHA256SUMS.txt
 
       - name: Create GitHub draft
         env:
@@ -283,7 +359,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           gh release create "v$VERSION" \
-            dist/*.zip dist/SHA256SUMS.txt \
+            dist/*.zip dist/*.pkg dist/*.msi dist/SHA256SUMS.txt \
             --repo "${{ github.repository }}" \
             --target "$SOURCE_SHA" \
             --title "Sound Capsule v$VERSION" \

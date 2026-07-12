@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import platform as host_platform
 import re
@@ -39,11 +40,51 @@ def find_one(
     return matches[0]
 
 
+def copy_file_data(source: str | Path, destination: str | Path, *, follow_symlinks: bool = True) -> str:
+    """Copy bytes and mode without macOS resource-fork/provenance metadata."""
+    source_path = Path(source)
+    destination_path = Path(destination)
+    with source_path.open("rb") as source_file, destination_path.open("wb") as destination_file:
+        shutil.copyfileobj(source_file, destination_file, length=1024 * 1024)
+    shutil.copymode(source_path, destination_path, follow_symlinks=follow_symlinks)
+    return os.fspath(destination_path)
+
+
 def copy_artifact(source: Path, destination: Path) -> None:
     if source.is_dir():
-        shutil.copytree(source, destination, symlinks=True)
+        # Do not propagate Finder/provenance xattrs into ZIP/PKG staging. The
+        # code signature is stored in bundle files, not in those attributes.
+        shutil.copytree(source, destination, symlinks=True, copy_function=copy_file_data)
     else:
-        shutil.copy2(source, destination)
+        copy_file_data(source, destination)
+
+
+def copy_setup_payload(destination: Path, platform_name: str) -> None:
+    """Stage the files used by native installers and first-launch repair."""
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        ROOT / "helper",
+        destination / "helper",
+        copy_function=copy_file_data,
+        ignore=shutil.ignore_patterns(
+            "build", "dist", "tests", ".venv", "venv", "*.egg-info",
+            "__pycache__", "*.pyc", ".pytest_cache"
+        ),
+    )
+    shutil.copytree(
+        ROOT / "fl-studio",
+        destination / "fl-studio",
+        copy_function=copy_file_data,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    (destination / "scripts").mkdir()
+    copy_file_data(ROOT / "scripts" / "install.py", destination / "scripts" / "install.py")
+    bootstrap = (
+        ROOT / "packaging" / "windows" / "bootstrap-install.ps1"
+        if platform_name == "windows"
+        else ROOT / "packaging" / "macos" / "bootstrap-install.sh"
+    )
+    copy_file_data(bootstrap, destination / bootstrap.name)
 
 
 def package_release(build: Path, output: Path, version: str, platform_name: str) -> Path:
@@ -69,22 +110,8 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
         copy_artifact(app, package / app.name)
         copy_artifact(vst3, package / vst3.name)
 
-        shutil.copytree(
-            ROOT / "helper",
-            package / "helper",
-            ignore=shutil.ignore_patterns(
-                "build", "dist", "tests", ".venv", "venv", "*.egg-info",
-                "__pycache__", "*.pyc", ".pytest_cache"
-            ),
-        )
-        shutil.copytree(
-            ROOT / "fl-studio",
-            package / "fl-studio",
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
+        copy_setup_payload(package, platform_name)
         shutil.copytree(ROOT / "docs", package / "docs")
-        (package / "scripts").mkdir()
-        shutil.copy2(ROOT / "scripts" / "install.py", package / "scripts" / "install.py")
         for filename in ("README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
             shutil.copy2(ROOT / filename, package / filename)
 

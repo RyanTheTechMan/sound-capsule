@@ -58,7 +58,7 @@ def find_app(build: Path) -> Path:
     return matches[0]
 
 
-def install_helper(root: Path) -> Path:
+def install_helper(root: Path, uv_executable: Path | None = None) -> Path:
     helper_root = root / "Helper"
     if helper_root.exists():
         shutil.rmtree(helper_root)
@@ -69,8 +69,8 @@ def install_helper(root: Path) -> Path:
             "__pycache__", "*.pyc", ".pytest_cache",
         ),
     )
-    uv = shutil.which("uv")
-    if uv is None:
+    uv = str(uv_executable) if uv_executable is not None else shutil.which("uv")
+    if uv is None or not Path(uv).is_file():
         raise FileNotFoundError(
             "uv was not found; install it from https://docs.astral.sh/uv/ and rerun with `uv run scripts/install.py`"
         )
@@ -155,20 +155,37 @@ def record_app_path(root: Path, path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install Sound Capsule for the current user")
     parser.add_argument("--build", type=Path, default=ROOT / "build")
+    parser.add_argument(
+        "--uv-executable", type=Path,
+        help="use this uv executable (for native installers before PATH has refreshed)",
+    )
+    parser.add_argument(
+        "--installed-app", type=Path,
+        help="record an app already installed by a native package instead of copying one",
+    )
     parser.add_argument("--with-vst", action="store_true", help="install the optional in-FL library VST3")
     parser.add_argument("--no-app", action="store_true", help="install only the helper and FL script")
     args = parser.parse_args()
     if platform.system() not in ("Darwin", "Windows"):
         parser.error("Sound Capsule currently supports macOS and Windows")
+    if args.installed_app is not None and args.no_app:
+        parser.error("--installed-app and --no-app cannot be used together")
+    if args.uv_executable is not None and not args.uv_executable.is_file():
+        parser.error(f"uv executable does not exist: {args.uv_executable}")
 
     root = data_dir()
     if sys.version_info < (3, 10):
         parser.error("run the installer with `uv run --python 3.12 scripts/install.py`")
     configure(root)
-    python = install_helper(root)
+    python = install_helper(root, args.uv_executable)
     cli_launcher = install_cli_launcher(root, python)
     installed_app = None
-    if not args.no_app:
+    if args.installed_app is not None:
+        installed_app = args.installed_app.resolve()
+        if not installed_app.exists():
+            parser.error(f"installed app does not exist: {installed_app}")
+        record_app_path(root, installed_app)
+    elif not args.no_app:
         try:
             app_source = find_app(args.build)
         except FileNotFoundError:

@@ -1,0 +1,27 @@
+<Project Sdk="WixToolset.Sdk/4.0.6">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <DefineConstants>Version=$(SoundCapsuleVersion);AppSource=$(AppSource);SetupSource=$(SetupSource);VstSource=$(VstSource)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="4.0.6" />
+    <PackageReference Include="WixToolset.Heat" Version="4.0.6" />
+    <HarvestDirectory Include="$(SetupSource)">
+      <ComponentGroupName>SetupFiles</ComponentGroupName>
+      <DirectoryRefId>SETUPFOLDER</DirectoryRefId>
+      <SuppressRootDirectory>true</SuppressRootDirectory>
+      <SuppressRegistry>true</SuppressRegistry>
+      <SuppressCom>true</SuppressCom>
+      <KeepEmptyDirectories>false</KeepEmptyDirectories>
+    </HarvestDirectory>
+    <HarvestDirectory Include="$(VstSource)">
+      <ComponentGroupName>VstFiles</ComponentGroupName>
+      <DirectoryRefId>VSTFOLDER</DirectoryRefId>
+      <SuppressRootDirectory>true</SuppressRootDirectory>
+      <SuppressRegistry>true</SuppressRegistry>
+      <SuppressCom>true</SuppressCom>
+      <KeepEmptyDirectories>false</KeepEmptyDirectories>
+    </HarvestDirectory>
+  </ItemGroup>
+</Project>

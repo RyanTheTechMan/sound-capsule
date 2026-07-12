@@ -112,6 +112,9 @@ private:
     void captureSelected(bool individually);
     void checkInitialSetup();
     void checkForUpdates(bool userInitiated = false);
+    void downloadAndInstallUpdate();
+    void offerSetupRepair();
+    void runSetupRepair();
     void showSetup(bool initial);
     void runAfterProjectSaved(std::function<void()> action);
     void waitForFlSave(int previousSaveSequence, std::function<void()> action);
@@ -165,8 +168,15 @@ private:
     juce::String completedPreviewId;
     juce::String pendingPreviewId;
     juce::String importOperationId;
+    juce::String availableUpdateTag;
+    juce::String availableInstallerName;
+    juce::String availableInstallerUrl;
+    juce::String availableChecksumUrl;
+    juce::String availableReleaseUrl;
     std::atomic<bool> importProgressPollInFlight{false};
     std::atomic<bool> updateCheckInFlight{false};
+    std::atomic<bool> updateDownloadInFlight{false};
+    std::atomic<bool> setupRepairInFlight{false};
     double pendingPreviewStart = 0.0;
     int hoveredRow = -1;
     int dragCandidateRow = -1;

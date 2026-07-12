@@ -34,10 +34,12 @@ target_compile_definitions(SoundCapsule PUBLIC
 
 target_compile_definitions(SoundCapsule PRIVATE
     SOUNDCAPSULE_RELEASE_REPOSITORY="${SOUNDCAPSULE_RELEASE_REPOSITORY}"
+    SOUNDCAPSULE_APPLE_TEAM_ID="${SOUNDCAPSULE_APPLE_TEAM_ID}"
 )
 
 target_link_libraries(SoundCapsule PRIVATE
     juce::juce_audio_utils
+    juce::juce_cryptography
     juce::juce_gui_extra
     PUBLIC
     juce::juce_recommended_config_flags

@@ -21,9 +21,22 @@ also display the library inside FL Studio, but it is not required.
 
 ## Install
 
-Download the macOS or Windows ZIP from the
-[latest GitHub release](https://github.com/RyanTheTechMan/sound-capsule/releases/latest),
-extract it, open a terminal in the extracted folder, and run:
+Download the native installer from the
+[latest GitHub release](https://github.com/RyanTheTechMan/sound-capsule/releases/latest):
+
+- **macOS 13 or later:** open the signed and notarized `.pkg`. The app is installed
+  in `/Applications`.
+- **Windows 10/11 x64:** open the `.msi`. The app is installed in Program Files,
+  added to the Start Menu, and offers an optional desktop shortcut. The MSI is
+  currently unsigned, so Windows may show an unknown-publisher warning.
+
+The installers configure the FL Studio bridge automatically. The optional VST3
+can be selected from the installer component list. If uv is missing, setup explains
+that it is required and attempts to install the tested version for the current user.
+If that fails, launch Sound Capsule to retry or open the manual uv instructions.
+
+For a manual installation, download the macOS or Windows ZIP, extract it, open a
+terminal in the extracted folder, and run:
 
 ```sh
 uv run --python 3.12 scripts/install.py --build .
@@ -119,9 +132,9 @@ uv run --python 3.12 --project helper python -m unittest discover -s helper/test
 
 ## Releases
 
-The manual GitHub workflow builds Windows and universal macOS downloads, signs
-and notarizes the macOS app and VST3, and creates a draft release. Maintainer
-setup and the required encrypted Apple secrets are documented in
+The manual GitHub workflow builds ZIP downloads, a Windows x64 MSI, and a universal
+macOS PKG. It signs and notarizes the macOS app, VST3, and installer before creating
+a draft release. Maintainer setup and the required encrypted Apple secrets are documented in
 [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License

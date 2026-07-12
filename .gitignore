@@ -31,6 +31,7 @@ __pypackages__/
 
 # CMake, native builds, and plugin bundles
 build/
+/build-*/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -54,6 +55,7 @@ Makefile
 
 # Packaging, validation, and scratch output
 dist/
+/dist-*/
 outputs/
 work/
 *.log

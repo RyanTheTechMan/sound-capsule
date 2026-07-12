@@ -4,8 +4,13 @@ option(SOUNDCAPSULE_UNIVERSAL_MACOS "Build arm64+x86_64 on macOS" ON)
 option(SOUNDCAPSULE_BUILD_PLUGIN "Build the standalone library app and optional JUCE VST3" OFF)
 set(SOUNDCAPSULE_RELEASE_REPOSITORY "" CACHE STRING
     "GitHub owner/repository used by the in-app release check")
+set(SOUNDCAPSULE_APPLE_TEAM_ID "" CACHE STRING
+    "Apple Developer Team ID used to verify downloaded installer packages")
 if(APPLE AND SOUNDCAPSULE_UNIVERSAL_MACOS)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
+endif()
+if(APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/helper/soundcapsule/__init__.py" SOUNDCAPSULE_INIT)
@@ -21,12 +26,17 @@ if(SOUNDCAPSULE_RELEASE_REPOSITORY
    AND NOT SOUNDCAPSULE_RELEASE_REPOSITORY MATCHES "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     message(FATAL_ERROR "SOUNDCAPSULE_RELEASE_REPOSITORY must look like owner/repository")
 endif()
+string(LENGTH "${SOUNDCAPSULE_APPLE_TEAM_ID}" SOUNDCAPSULE_APPLE_TEAM_ID_LENGTH)
+if(SOUNDCAPSULE_APPLE_TEAM_ID
+   AND (NOT SOUNDCAPSULE_APPLE_TEAM_ID MATCHES "^[A-Z0-9]+$"
+        OR NOT SOUNDCAPSULE_APPLE_TEAM_ID_LENGTH EQUAL 10))
+    message(FATAL_ERROR "SOUNDCAPSULE_APPLE_TEAM_ID must be a 10-character Apple Team ID")
+endif()
 
 project(FLSoundCapsule VERSION "${SOUNDCAPSULE_VERSION}" LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
 if(SOUNDCAPSULE_BUILD_PLUGIN)
     include(FetchContent)

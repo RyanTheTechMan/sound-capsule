@@ -8,6 +8,28 @@ version's section is also used as its GitHub release notes.
 
 No changes yet.
 
+## [0.2.0] - 2026-07-12
+
+### Added
+
+- Native macOS PKG and Windows x64 MSI installers alongside the existing manual
+  ZIP downloads.
+- Signed and notarized macOS installer packaging for macOS 13+ with an optional
+  VST3 component.
+- Per-machine Windows installation in Program Files with Apps & Features,
+  Start Menu, optional desktop shortcut, major upgrades, and optional VST3.
+- Installer bootstrap setup that locates or installs uv 0.11.28 and provisions
+  the current user's helper environment and FL Studio MIDI bridge.
+- Standalone in-app downloading, checksum verification, and handoff to the
+  native PKG or MSI updater.
+
+### Changed
+
+- Native upgrades now preserve settings, capsule libraries, preferences, and
+  component choices while migrating legacy per-user app and VST3 locations.
+- The VST3 update action continues to open the GitHub release page so a loaded
+  FL Studio plug-in is never replaced underneath the host.
+
 ## [0.1.0] - 2026-07-12
 
 ### Added

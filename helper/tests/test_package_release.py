@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.package_release import find_one
+from scripts.package_release import copy_setup_payload, find_one
 
 
 class PackageReleaseTests(unittest.TestCase):
@@ -18,6 +18,19 @@ class PackageReleaseTests(unittest.TestCase):
                 find_one(build, "Sound Capsule.vst3", "VST3", directory=True),
                 bundle,
             )
+
+    def test_setup_payload_contains_installer_and_runtime_without_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "Setup"
+            copy_setup_payload(destination, "windows")
+
+            self.assertTrue((destination / "scripts" / "install.py").is_file())
+            self.assertTrue((destination / "bootstrap-install.ps1").is_file())
+            self.assertTrue((destination / "helper" / "soundcapsule" / "server.py").is_file())
+            self.assertTrue(
+                (destination / "fl-studio" / "SoundCapsule" / "device_SoundCapsule.py").is_file()
+            )
+            self.assertFalse((destination / "helper" / "tests").exists())
 
 
 if __name__ == "__main__":

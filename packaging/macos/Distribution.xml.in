@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Sound Capsule @VERSION@</title>
+  <organization>com.soundcapsule.fl</organization>
+  <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
+  <options customize="always" require-scripts="true" rootVolumeOnly="true"/>
+  <allowed-os-versions>
+    <os-version min="13.0"/>
+  </allowed-os-versions>
+  <welcome file="Welcome.txt" mime-type="text/plain"/>
+  <choices-outline>
+    <line choice="core"/>
+    <line choice="vst3"/>
+  </choices-outline>
+  <choice id="core" title="Sound Capsule application and FL Studio bridge"
+          description="Installs Sound Capsule in Applications and configures the current user's helper and FL Studio bridge. If uv is missing, setup will attempt to install it."
+          visible="true" start_selected="true" start_enabled="false">
+    <pkg-ref id="com.soundcapsule.fl.pkg.app"/>
+    <pkg-ref id="com.soundcapsule.fl.pkg.setup"/>
+  </choice>
+  <choice id="vst3" title="Optional Sound Capsule VST3"
+          description="Installs the optional in-FL library browser plug-in."
+          visible="true" start_selected="false">
+    <pkg-ref id="com.soundcapsule.fl.pkg.vst3"/>
+  </choice>
+  <pkg-ref id="com.soundcapsule.fl.pkg.app" version="@VERSION@">app.pkg</pkg-ref>
+  <pkg-ref id="com.soundcapsule.fl.pkg.setup" version="@VERSION@">setup.pkg</pkg-ref>
+  <pkg-ref id="com.soundcapsule.fl.pkg.vst3" version="@VERSION@">vst3.pkg</pkg-ref>
+</installer-gui-script>

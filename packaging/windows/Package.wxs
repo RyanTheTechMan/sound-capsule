@@ -1,0 +1,77 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Sound Capsule"
+           Manufacturer="Sound Capsule"
+           Version="$(var.Version)"
+           UpgradeCode="3E694C34-27C7-4C85-9D23-8D0AC7D49179"
+           Language="1033"
+           Scope="perMachine"
+           InstallerVersion="500">
+    <SummaryInformation Description="Sound Capsule for FL Studio" Manufacturer="Sound Capsule"/>
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Sound Capsule is already installed."
+                  MigrateFeatures="yes" Schedule="afterInstallInitialize"/>
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high"/>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Sound Capsule">
+        <Directory Id="SETUPFOLDER" Name="Setup"/>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonFiles64Folder">
+      <Directory Id="COMMONVSTROOT" Name="VST3">
+        <Directory Id="VSTFOLDER" Name="Sound Capsule.vst3"/>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder"/>
+    <StandardDirectory Id="DesktopFolder"/>
+
+    <Property Id="LEGACYVST3">
+      <DirectorySearch Id="LegacyVst3Search"
+                       Path="[LocalAppDataFolder]Programs\Common\VST3\Sound Capsule.vst3"/>
+    </Property>
+
+    <Component Id="Application" Directory="INSTALLFOLDER" Guid="A46948AC-63C2-4C7D-B5A0-BC53CDB905E4" Bitness="always64">
+      <File Id="SoundCapsuleExe" Source="$(var.AppSource)" KeyPath="yes"/>
+      <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Sound Capsule"
+                Description="Open Sound Capsule" Target="[#SoundCapsuleExe]" WorkingDirectory="INSTALLFOLDER"/>
+    </Component>
+    <Component Id="DesktopShortcutComponent" Directory="INSTALLFOLDER"
+               Guid="EFEBEE53-EA9E-4E78-B277-F0F6A7C478B8" Bitness="always64">
+      <RegistryValue Root="HKLM" Key="Software\Sound Capsule" Name="DesktopShortcut"
+                     Type="integer" Value="1" KeyPath="yes"/>
+      <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="Sound Capsule"
+                Description="Open Sound Capsule" Target="[#SoundCapsuleExe]" WorkingDirectory="INSTALLFOLDER"/>
+    </Component>
+
+    <Feature Id="Core" Title="Sound Capsule application and FL Studio bridge"
+             Description="Required app and FL bridge. If uv is missing, setup will attempt to install uv 0.11.28 for the current user; Sound Capsule offers manual instructions if that fails."
+             Level="1" Absent="disallow">
+      <ComponentRef Id="Application"/>
+      <ComponentGroupRef Id="SetupFiles"/>
+      <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut"
+               Description="Place a Sound Capsule shortcut on the desktop." Level="1">
+        <ComponentRef Id="DesktopShortcutComponent"/>
+      </Feature>
+      <Feature Id="VstFeature" Title="Optional Sound Capsule VST3"
+               Description="Install the optional Sound Capsule library browser inside FL Studio." Level="2">
+        <Level Condition="LEGACYVST3" Value="1"/>
+        <ComponentGroupRef Id="VstFiles"/>
+      </Feature>
+    </Feature>
+
+    <ui:WixUI Id="WixUI_FeatureTree" InstallDirectory="INSTALLFOLDER"/>
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)..\LICENSE.rtf"/>
+
+    <CustomAction Id="ProvisionCurrentUser" Directory="INSTALLFOLDER" Execute="immediate"
+                  Impersonate="yes" Return="ignore"
+                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -SetupRoot "[SETUPFOLDER]" -InstalledApp "[#SoundCapsuleExe]"'/>
+    <CustomAction Id="CleanupCurrentUser" Directory="INSTALLFOLDER" Execute="immediate"
+                  Impersonate="yes" Return="ignore"
+                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -SetupRoot "[SETUPFOLDER]" -Uninstall'/>
+    <InstallExecuteSequence>
+      <Custom Action="CleanupCurrentUser" Before="RemoveFiles"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>
+      <Custom Action="ProvisionCurrentUser" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;"/>
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

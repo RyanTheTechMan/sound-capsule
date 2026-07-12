@@ -1,6 +1,8 @@
 #include "PluginEditor.h"
 #include "CapsulePreviewSource.h"
 
+#include <juce_cryptography/juce_cryptography.h>
+
 #include <cmath>
 
 namespace
@@ -11,6 +13,10 @@ const auto accent = juce::Colour(0xff69d2a8);
 
 #ifndef SOUNDCAPSULE_RELEASE_REPOSITORY
  #define SOUNDCAPSULE_RELEASE_REPOSITORY ""
+#endif
+
+#ifndef SOUNDCAPSULE_APPLE_TEAM_ID
+ #define SOUNDCAPSULE_APPLE_TEAM_ID ""
 #endif
 
 std::array<int, 3> versionParts(juce::String version)
@@ -26,6 +32,15 @@ std::array<int, 3> versionParts(juce::String version)
 bool isNewerVersion(const juce::String& candidate, const juce::String& current)
 {
     return versionParts(candidate) > versionParts(current);
+}
+
+juce::String releaseAssetUrl(const juce::var& assets, const juce::String& wantedName)
+{
+    if (const auto* array = assets.getArray())
+        for (const auto& asset : *array)
+            if (asset.getProperty("name", "").toString() == wantedName)
+                return asset.getProperty("browser_download_url", "").toString();
+    return {};
 }
 
 int textWidth(const juce::Font& font, const juce::String& text)
@@ -439,7 +454,7 @@ void ImportProgressOverlay::resized()
 SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p)
 {
-    audioProcessor.ensureHelperRunning();
+    const auto helperReady = audioProcessor.ensureHelperRunning();
     thumbnailFormats.registerBasicFormats();
     setSize(860, 540);
     setResizable(true, true);
@@ -600,9 +615,10 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
         showSetup(false);
     };
     updateAvailable.onClick = [this] {
-        const auto url = updateAvailable.getProperties()["releaseUrl"].toString();
-        if (url.isNotEmpty())
-            juce::URL(url).launchInDefaultBrowser();
+        if (audioProcessor.isRunningStandalone() && availableInstallerUrl.isNotEmpty())
+            downloadAndInstallUpdate();
+        else if (availableReleaseUrl.isNotEmpty())
+            juce::URL(availableReleaseUrl).launchInDefaultBrowser();
     };
 
     // Playback progress is an animation, so update it at display-like cadence.
@@ -611,6 +627,14 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     refreshLibrary();
     refreshSessionStatus();
     checkInitialSetup();
+    if (!helperReady && audioProcessor.isRunningStandalone())
+    {
+        juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+        juce::MessageManager::callAsync([safe] {
+            if (safe != nullptr)
+                safe->offerSetupRepair();
+        });
+    }
 }
 
 SoundCapsuleAudioProcessorEditor::~SoundCapsuleAudioProcessorEditor()
@@ -1586,6 +1610,9 @@ void SoundCapsuleAudioProcessorEditor::checkForUpdates(bool userInitiated)
         juce::String error;
         juce::String tag;
         juce::String releaseUrl;
+        juce::String installerName;
+        juce::String installerUrl;
+        juce::String checksumUrl;
         const auto endpoint = juce::URL("https://api.github.com/repos/" + repository
                                         + "/releases/latest");
         auto stream = endpoint.createInputStream(
@@ -1607,12 +1634,25 @@ void SoundCapsuleAudioProcessorEditor::checkForUpdates(bool userInitiated)
                 releaseUrl = response.getProperty("html_url", "").toString();
                 if (tag.isEmpty() || releaseUrl.isEmpty())
                     error = "GitHub returned incomplete release information.";
+                else
+                {
+                    const auto version = tag.trimCharactersAtStart("vV");
+                   #if JUCE_MAC
+                    installerName = "Sound-Capsule-v" + version + "-macOS.pkg";
+                   #elif JUCE_WINDOWS
+                    installerName = "Sound-Capsule-v" + version + "-Windows-x64.msi";
+                   #endif
+                    const auto assets = response.getProperty("assets", juce::var());
+                    installerUrl = releaseAssetUrl(assets, installerName);
+                    checksumUrl = releaseAssetUrl(assets, "SHA256SUMS.txt");
+                }
             }
         }
 
         if (safe->shuttingDown.load())
             return;
-        juce::MessageManager::callAsync([safe, tag, releaseUrl, error, userInitiated] {
+        juce::MessageManager::callAsync([safe, tag, releaseUrl, installerName,
+                                         installerUrl, checksumUrl, error, userInitiated] {
             if (safe == nullptr)
                 return;
             safe->updateCheckInFlight.store(false);
@@ -1627,24 +1667,42 @@ void SoundCapsuleAudioProcessorEditor::checkForUpdates(bool userInitiated)
 
             if (isNewerVersion(tag, JucePlugin_VersionString))
             {
+                safe->availableUpdateTag = tag;
+                safe->availableInstallerName = installerName;
+                safe->availableInstallerUrl = installerUrl;
+                safe->availableChecksumUrl = checksumUrl;
+                safe->availableReleaseUrl = releaseUrl;
+                const auto canInstall = safe->audioProcessor.isRunningStandalone()
+                                     && installerUrl.isNotEmpty() && checksumUrl.isNotEmpty();
                 safe->updateAvailable.setButtonText(
-                    "Sound Capsule " + tag + " is available - View release notes");
+                    "Sound Capsule " + tag + " is available - "
+                    + (canInstall ? "Download and Install" : "View release notes"));
                 safe->updateAvailable.setTooltip(
-                    "Open the release notes and downloads for Sound Capsule " + tag + ".");
-                safe->updateAvailable.getProperties().set("releaseUrl", releaseUrl);
+                    canInstall ? "Download, verify, and launch the native Sound Capsule installer."
+                               : "Open the release notes and downloads for Sound Capsule " + tag + ".");
                 safe->updateAvailable.setVisible(true);
                 safe->resized();
                 if (userInitiated)
+                {
+                    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> promptSafe(safe);
                     juce::AlertWindow::showAsync(
                         juce::MessageBoxOptions::makeOptionsOkCancel(
                             juce::MessageBoxIconType::InfoIcon,
                             "Update available",
-                            "Sound Capsule " + tag + " is available.",
-                            "View Release", "Not now", safe.getComponent()),
-                        [releaseUrl](int result) {
-                            if (result == 1)
+                            "Sound Capsule " + tag + " is available."
+                                + (canInstall ? " The native installer is ready to download."
+                                              : " Open the release to download it manually."),
+                            canInstall ? "Download Update" : "View Release",
+                            "Not now", safe.getComponent()),
+                        [promptSafe, releaseUrl, canInstall](int result) {
+                            if (result != 1 || promptSafe == nullptr)
+                                return;
+                            if (canInstall)
+                                promptSafe->downloadAndInstallUpdate();
+                            else
                                 juce::URL(releaseUrl).launchInDefaultBrowser();
                         });
+                }
             }
             else if (userInitiated)
                 juce::AlertWindow::showMessageBoxAsync(
@@ -1652,6 +1710,278 @@ void SoundCapsuleAudioProcessorEditor::checkForUpdates(bool userInitiated)
                     "You are running the latest published version ("
                         + juce::String(JucePlugin_VersionString) + ").",
                     "OK", safe.getComponent());
+        });
+    });
+}
+
+void SoundCapsuleAudioProcessorEditor::downloadAndInstallUpdate()
+{
+    if (!audioProcessor.isRunningStandalone() || availableInstallerUrl.isEmpty()
+        || availableChecksumUrl.isEmpty() || updateDownloadInFlight.load())
+        return;
+
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    juce::AlertWindow::showAsync(
+        juce::MessageBoxOptions::makeOptionsOkCancel(
+            juce::MessageBoxIconType::InfoIcon,
+            "Install Sound Capsule " + availableUpdateTag + "?",
+            "Sound Capsule will download and verify the native installer, open it, and then quit. "
+            "Your capsule library and settings will be preserved.",
+            "Download and Install", "Cancel", this),
+        [safe](int result) {
+            if (safe == nullptr || result != 1 || safe->updateDownloadInFlight.exchange(true))
+                return;
+
+            safe->status.setText("Downloading " + safe->availableUpdateTag + "...",
+                                 juce::dontSendNotification);
+            const auto installerUrl = safe->availableInstallerUrl;
+            const auto checksumUrl = safe->availableChecksumUrl;
+            const auto installerName = safe->availableInstallerName;
+            const auto tag = safe->availableUpdateTag;
+            const auto releaseUrl = safe->availableReleaseUrl;
+            safe->requestPool.addJob([safe, installerUrl, checksumUrl, installerName, tag, releaseUrl] {
+                juce::String error;
+                const auto updateDirectory = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                    .getChildFile("SoundCapsule Updates").getChildFile(tag);
+                updateDirectory.deleteRecursively();
+                if (!updateDirectory.createDirectory())
+                    error = "Could not create the temporary update directory.";
+
+                const auto installer = updateDirectory.getChildFile(installerName);
+                if (error.isEmpty())
+                {
+                    int statusCode = 0;
+                    auto input = juce::URL(installerUrl).createInputStream(
+                        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                            .withConnectionTimeoutMs(15000)
+                            .withStatusCode(&statusCode)
+                            .withExtraHeaders("Accept: application/octet-stream\r\n"
+                                              "User-Agent: Sound-Capsule/" JucePlugin_VersionString "\r\n"));
+                    juce::FileOutputStream output(installer);
+                    if (input == nullptr || statusCode != 200 || !output.openedOk())
+                        error = "The installer download could not be started.";
+                    else
+                    {
+                        juce::HeapBlock<char> buffer(64 * 1024);
+                        const auto total = input->getTotalLength();
+                        juce::int64 downloaded = 0;
+                        int lastPercent = -1;
+                        while (!safe->shuttingDown.load())
+                        {
+                            const auto count = input->read(buffer.getData(), 64 * 1024);
+                            if (count <= 0)
+                                break;
+                            if (!output.write(buffer.getData(), static_cast<size_t>(count)))
+                            {
+                                error = "The downloaded installer could not be saved.";
+                                break;
+                            }
+                            downloaded += count;
+                            if (total > 0)
+                            {
+                                const auto percent = juce::roundToInt(100.0 * downloaded / total);
+                                if (percent >= lastPercent + 5)
+                                {
+                                    lastPercent = percent;
+                                    juce::MessageManager::callAsync([safe, percent] {
+                                        if (safe != nullptr)
+                                            safe->status.setText("Downloading update (" + juce::String(percent) + "%)...",
+                                                                 juce::dontSendNotification);
+                                    });
+                                }
+                            }
+                        }
+                        output.flush();
+                        if (error.isEmpty() && (safe->shuttingDown.load() || downloaded <= 0))
+                            error = "The installer download was interrupted.";
+                    }
+                }
+
+                juce::String checksumText;
+                if (error.isEmpty())
+                {
+                    int statusCode = 0;
+                    auto input = juce::URL(checksumUrl).createInputStream(
+                        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                            .withConnectionTimeoutMs(10000)
+                            .withStatusCode(&statusCode)
+                            .withExtraHeaders("User-Agent: Sound-Capsule/" JucePlugin_VersionString "\r\n"));
+                    if (input == nullptr || statusCode != 200)
+                        error = "The release checksum file could not be downloaded.";
+                    else
+                        checksumText = input->readEntireStreamAsString();
+                }
+
+                if (error.isEmpty())
+                {
+                    juce::String expected;
+                    juce::StringArray lines;
+                    lines.addLines(checksumText);
+                    for (const auto& line : lines)
+                    {
+                        juce::StringArray tokens;
+                        tokens.addTokens(line.trim(), " \t", "");
+                        if (tokens.size() >= 2
+                            && tokens[tokens.size() - 1].trimCharactersAtStart("*") == installerName)
+                        {
+                            expected = tokens[0].toLowerCase();
+                            break;
+                        }
+                    }
+                    const auto actual = juce::SHA256(installer).toHexString().toLowerCase();
+                    if (expected.length() != 64 || actual != expected)
+                        error = "The installer checksum did not match the published release.";
+                }
+
+               #if JUCE_MAC
+                if (error.isEmpty())
+                {
+                    juce::ChildProcess signatureCheck;
+                    const juce::StringArray arguments{
+                        "/usr/sbin/pkgutil", "--check-signature", installer.getFullPathName()
+                    };
+                    if (!signatureCheck.start(arguments) || !signatureCheck.waitForProcessToFinish(30000)
+                        || signatureCheck.getExitCode() != 0)
+                        error = "The macOS installer signature could not be verified.";
+                    else
+                    {
+                        const auto signature = signatureCheck.readAllProcessOutput();
+                        const auto expectedTeam = juce::String(SOUNDCAPSULE_APPLE_TEAM_ID).trim();
+                        if (!signature.contains("Developer ID Installer")
+                            || (expectedTeam.isNotEmpty() && !signature.contains(expectedTeam)))
+                            error = "The macOS installer was not signed by the expected developer.";
+                    }
+                }
+               #endif
+
+                bool launched = false;
+                if (error.isEmpty())
+                {
+                    juce::ChildProcess launcher;
+                   #if JUCE_MAC
+                    launched = launcher.start(juce::StringArray{
+                        "/usr/bin/open", installer.getFullPathName()
+                    });
+                   #elif JUCE_WINDOWS
+                    const auto msiexec = juce::File(
+                        juce::SystemStats::getEnvironmentVariable("SystemRoot", "C:\\Windows"))
+                        .getChildFile("System32").getChildFile("msiexec.exe");
+                    launched = launcher.start(juce::StringArray{
+                        msiexec.getFullPathName(), "/i", installer.getFullPathName()
+                    });
+                   #endif
+                    if (!launched)
+                        error = "The native installer could not be opened.";
+                }
+
+                juce::MessageManager::callAsync([safe, error, releaseUrl, launched] {
+                    if (safe == nullptr)
+                        return;
+                    safe->updateDownloadInFlight.store(false);
+                    if (launched && error.isEmpty())
+                    {
+                        juce::JUCEApplicationBase::quit();
+                        return;
+                    }
+                    safe->status.setText("Update was not installed", juce::dontSendNotification);
+                    juce::AlertWindow::showAsync(
+                        juce::MessageBoxOptions::makeOptionsOkCancel(
+                            juce::MessageBoxIconType::WarningIcon,
+                            "Could not install update", error,
+                            "Open Release", "Close", safe.getComponent()),
+                        [releaseUrl](int choice) {
+                            if (choice == 1)
+                                juce::URL(releaseUrl).launchInDefaultBrowser();
+                        });
+                });
+            });
+        });
+}
+
+void SoundCapsuleAudioProcessorEditor::offerSetupRepair()
+{
+    if (!audioProcessor.isRunningStandalone() || setupRepairInFlight.load())
+        return;
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    juce::AlertWindow::showAsync(
+        juce::MessageBoxOptions::makeOptionsOkCancel(
+            juce::MessageBoxIconType::WarningIcon,
+            "Finish Sound Capsule setup",
+            "The local helper is not ready. Sound Capsule can retry setup, including installing uv "
+            "for your user account if it is missing.",
+            "Retry Setup", "uv Instructions", this),
+        [safe](int result) {
+            if (safe == nullptr)
+                return;
+            if (result == 1)
+                safe->runSetupRepair();
+            else if (result == 0)
+                juce::URL("https://docs.astral.sh/uv/getting-started/installation/")
+                    .launchInDefaultBrowser();
+        });
+}
+
+void SoundCapsuleAudioProcessorEditor::runSetupRepair()
+{
+    if (setupRepairInFlight.exchange(true))
+        return;
+    status.setText("Finishing Sound Capsule setup...", juce::dontSendNotification);
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    requestPool.addJob([safe] {
+        juce::String error;
+        juce::StringArray arguments;
+       #if JUCE_MAC
+        const auto script = juce::File("/Library/Application Support/SoundCapsule/Setup/bootstrap-install.sh");
+        arguments = {script.getFullPathName()};
+       #elif JUCE_WINDOWS
+        const auto script = juce::File(
+            juce::SystemStats::getEnvironmentVariable("ProgramFiles", "C:\\Program Files"))
+            .getChildFile("Sound Capsule").getChildFile("Setup").getChildFile("bootstrap-install.ps1");
+        arguments = {
+            juce::File(juce::SystemStats::getEnvironmentVariable("SystemRoot", "C:\\Windows"))
+                .getChildFile("System32").getChildFile("WindowsPowerShell")
+                .getChildFile("v1.0").getChildFile("powershell.exe").getFullPathName(),
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.getFullPathName()
+        };
+       #endif
+        if (!script.existsAsFile())
+            error = "The native setup payload is missing. Reinstall Sound Capsule or install uv manually.";
+        else
+        {
+            juce::ChildProcess process;
+            if (!process.start(arguments))
+                error = "Sound Capsule could not start its setup helper.";
+            else if (!process.waitForProcessToFinish(10 * 60 * 1000))
+            {
+                process.kill();
+                error = "Sound Capsule setup timed out.";
+            }
+            else if (process.getExitCode() != 0)
+                error = "Automatic setup failed. Install uv manually, then choose Retry Setup.";
+        }
+        juce::MessageManager::callAsync([safe, error] {
+            if (safe == nullptr)
+                return;
+            safe->setupRepairInFlight.store(false);
+            if (error.isEmpty() && safe->audioProcessor.ensureHelperRunning())
+            {
+                safe->status.setText("Sound Capsule setup complete", juce::dontSendNotification);
+                safe->refreshLibrary();
+                safe->refreshSessionStatus();
+                return;
+            }
+            safe->status.setText("Sound Capsule setup needs attention", juce::dontSendNotification);
+            juce::AlertWindow::showAsync(
+                juce::MessageBoxOptions::makeOptionsOkCancel(
+                    juce::MessageBoxIconType::WarningIcon,
+                    "Setup could not finish",
+                    error.isNotEmpty() ? error : "The local helper still could not be started.",
+                    "Open uv Instructions", "Close", safe.getComponent()),
+                [](int result) {
+                    if (result == 1)
+                        juce::URL("https://docs.astral.sh/uv/getting-started/installation/")
+                            .launchInDefaultBrowser();
+                });
         });
     });
 }
