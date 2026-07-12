@@ -22,14 +22,28 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSOUNDCAPSULE_UNIVERSAL_MACOS=OFF -DSOUNDCAPSULE_BUILD_PLUGIN=ON
       - name: Build VST3
         run: cmake --build build --config Release --parallel 4
+
+  windows-installer:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Validate Windows setup script
-        if: runner.os == 'Windows'
         shell: powershell
         run: >-
           [void][scriptblock]::Create(
           (Get-Content -Raw packaging/windows/bootstrap-install.ps1))
+      - name: Stage installer test artifacts
+        shell: powershell
+        run: |
+          $standalone = "build/plugin/SoundCapsule_artefacts/Release/Standalone"
+          $vst = "build/plugin/SoundCapsule_artefacts/Release/VST3/Sound Capsule.vst3/Contents/x86_64-win"
+          New-Item -ItemType Directory -Force $standalone, $vst | Out-Null
+          Set-Content -NoNewline "$standalone/Sound Capsule.exe" "installer test"
+          Set-Content -NoNewline "$vst/Sound Capsule.vst3" "installer test"
       - name: Build Windows MSI
-        if: runner.os == 'Windows'
         shell: bash
         run: |
           VERSION=$(PYTHONPATH=helper python -c 'import soundcapsule; print(soundcapsule.__version__)')

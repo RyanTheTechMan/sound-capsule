@@ -10,6 +10,7 @@
     <HarvestDirectory Include="$(SetupSource)">
       <ComponentGroupName>SetupFiles</ComponentGroupName>
       <DirectoryRefId>SETUPFOLDER</DirectoryRefId>
+      <PreprocessorVariable>var.SetupSource</PreprocessorVariable>
       <SuppressRootDirectory>true</SuppressRootDirectory>
       <SuppressRegistry>true</SuppressRegistry>
       <SuppressCom>true</SuppressCom>
@@ -18,6 +19,7 @@
     <HarvestDirectory Include="$(VstSource)">
       <ComponentGroupName>VstFiles</ComponentGroupName>
       <DirectoryRefId>VSTFOLDER</DirectoryRefId>
+      <PreprocessorVariable>var.VstSource</PreprocessorVariable>
       <SuppressRootDirectory>true</SuppressRootDirectory>
       <SuppressRegistry>true</SuppressRegistry>
       <SuppressCom>true</SuppressCom>
