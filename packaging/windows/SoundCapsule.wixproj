@@ -2,6 +2,9 @@
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
+    <!-- Per-machine ProgramMenuFolder/DesktopFolder shortcuts intentionally
+         combine common shell locations with machine-owned components. -->
+    <SuppressIces>ICE43;ICE57</SuppressIces>
     <DefineConstants>Version=$(SoundCapsuleVersion);AppSource=$(AppSource);SetupSource=$(SetupSource);VstSource=$(VstSource)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>

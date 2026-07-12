@@ -33,14 +33,16 @@
     <Component Id="Application" Directory="INSTALLFOLDER" Guid="A46948AC-63C2-4C7D-B5A0-BC53CDB905E4" Bitness="always64">
       <File Id="SoundCapsuleExe" Source="$(var.AppSource)" KeyPath="yes"/>
       <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Sound Capsule"
-                Description="Open Sound Capsule" Target="[#SoundCapsuleExe]" WorkingDirectory="INSTALLFOLDER"/>
+                Description="Open Sound Capsule" Target="[INSTALLFOLDER]Sound Capsule.exe"
+                WorkingDirectory="INSTALLFOLDER"/>
     </Component>
     <Component Id="DesktopShortcutComponent" Directory="INSTALLFOLDER"
                Guid="EFEBEE53-EA9E-4E78-B277-F0F6A7C478B8" Bitness="always64">
       <RegistryValue Root="HKLM" Key="Software\Sound Capsule" Name="DesktopShortcut"
                      Type="integer" Value="1" KeyPath="yes"/>
       <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="Sound Capsule"
-                Description="Open Sound Capsule" Target="[#SoundCapsuleExe]" WorkingDirectory="INSTALLFOLDER"/>
+                Description="Open Sound Capsule" Target="[INSTALLFOLDER]Sound Capsule.exe"
+                WorkingDirectory="INSTALLFOLDER"/>
     </Component>
 
     <Feature Id="Core" Title="Sound Capsule application and FL Studio bridge"
