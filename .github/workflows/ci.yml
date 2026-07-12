@@ -1,0 +1,24 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test helper
+        shell: bash
+        run: PYTHONPATH=helper python -m unittest discover -s helper/tests -v
+      - name: Configure VST3
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSOUNDCAPSULE_UNIVERSAL_MACOS=OFF -DSOUNDCAPSULE_BUILD_PLUGIN=ON
+      - name: Build VST3
+        run: cmake --build build --config Release --parallel 4

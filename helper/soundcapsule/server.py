@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import socketserver
+import threading
+import time
+import uuid
+
+from .config import Settings
+from .project import CapsuleService
+from .project_locator import ProjectLocator
+
+
+class SoundCapsuleRequestHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        self.connection.settimeout(5.0)
+        raw = self.rfile.readline(2 * 1024 * 1024)
+        if not raw:
+            return
+        try:
+            if not raw.endswith(b"\n"):
+                raise ValueError("request is incomplete or exceeds 2 MiB")
+            request = json.loads(raw)
+            response = self.server.dispatch(request)  # type: ignore[attr-defined]
+            payload = {"ok": True, **response}
+        except Exception as error:
+            payload = {"ok": False, "error": str(error), "type": type(error).__name__}
+        self.wfile.write(json.dumps(payload).encode() + b"\n")
+
+
+class SoundCapsuleServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, settings: Settings):
+        import ipaddress
+        try:
+            if not ipaddress.ip_address(settings.server_host).is_loopback:
+                raise ValueError("Sound Capsule helper must bind to a loopback address")
+        except ValueError as error:
+            raise ValueError("server_host must be a numeric loopback address") from error
+        self.settings = settings
+        self.service = CapsuleService(settings)
+        self.operation_lock = threading.RLock()
+        self.progress_lock = threading.Lock()
+        self.import_progress: dict = {
+            "operation_id": None,
+            "active": False,
+            "progress": 0,
+            "step": "Idle",
+            "error": None,
+            "updated_at": time.time(),
+        }
+        super().__init__((settings.server_host, settings.server_port), SoundCapsuleRequestHandler)
+
+    def _update_import_progress(
+        self,
+        operation_id: str,
+        progress: int,
+        step: str,
+        *,
+        active: bool = True,
+        error: str | None = None,
+    ) -> None:
+        with self.progress_lock:
+            self.import_progress = {
+                "operation_id": operation_id,
+                "active": active,
+                "progress": max(0, min(100, int(progress))),
+                "step": str(step)[:300],
+                "error": error,
+                "updated_at": time.time(),
+            }
+
+    def dispatch(self, request: dict) -> dict:
+        if not isinstance(request, dict):
+            raise ValueError("request must be a JSON object")
+        command = request.get("command")
+        args = request.get("args", {})
+        if not isinstance(command, str) or not isinstance(args, dict):
+            raise ValueError("request command must be text and args must be an object")
+        if command == "ping":
+            return {"version": "0.1.0"}
+        if command == "session":
+            session = self.service.bridge.session()
+            project_path = None
+            try:
+                project_path = ProjectLocator(
+                    self.settings.project_roots,
+                    cache_path=self.settings.data_dir / "project-paths.json",
+                ).find_current(session.project_title)
+            except (OSError, RuntimeError, ValueError):
+                pass
+            undo = self.service.undo_status(project_path)
+            return {
+                "timestamp": session.timestamp,
+                "project_title": session.project_title or (project_path.stem if project_path else ""),
+                "project_path": str(project_path) if project_path else None,
+                "midi_api_version": session.midi_api_version,
+                "selected_channels": session.selected_channels,
+                "selected_channel_names": session.selected_channel_names,
+                "current_pattern": session.current_pattern,
+                "pattern_name": session.pattern_name,
+                "pattern_length_steps": session.pattern_length_steps,
+                "ppq": session.ppq,
+                "changed": session.changed,
+                "save_sequence": session.save_sequence,
+                "last_save_requested_at": session.last_save_requested_at,
+                "load_sequence": session.load_sequence,
+                "last_load_status": session.last_load_status,
+                "last_load_at": session.last_load_at,
+                "undo_available": undo["available"],
+                "undo_remaining_seconds": undo["remaining_seconds"],
+                "undo_window_minutes": undo["window_minutes"],
+            }
+        if command == "request_save":
+            # Verify that FL's script is alive before publishing a request that
+            # would otherwise sit unread until it expires.
+            self.service.bridge.session()
+            with self.operation_lock:
+                request_id = self.service.bridge.request_save(timeout=30.0)
+            return {"request_id": request_id, "timeout_seconds": 30}
+        if command == "setup_status":
+            current = Settings.load(self.settings.data_dir)
+            return {
+                "setup_complete": current.setup_complete and current.setup_version >= 2,
+                "setup_version": current.setup_version,
+                "undo_window_minutes": current.undo_window_minutes,
+                "waveform_channels": current.waveform_channels,
+                "import_destination": current.import_destination,
+                "volume_display": current.volume_display,
+                "app_path": str(current.app_path) if current.app_path else None,
+            }
+        if command == "configure_setup":
+            with self.operation_lock:
+                current = Settings.load(self.settings.data_dir)
+                undo_window_minutes = int(args.get("undo_window_minutes", current.undo_window_minutes))
+                waveform_channels = str(args.get("waveform_channels", current.waveform_channels))
+                import_destination = str(
+                    args.get("import_destination", current.import_destination)
+                )
+                volume_display = str(
+                    args.get("volume_display", current.volume_display)
+                )
+                if not 1 <= undo_window_minutes <= 1440:
+                    raise ValueError("Undo Import duration must be between 1 and 1440 minutes")
+                if waveform_channels not in ("mono", "stereo"):
+                    raise ValueError("Waveform display must be mono or stereo")
+                if import_destination not in (
+                    "current_pattern", "new_pattern", "override_selection"
+                ):
+                    raise ValueError("Invalid default import destination")
+                if volume_display not in ("percent", "db"):
+                    raise ValueError("Volume display must be Percentage or dB")
+                current.setup_complete = True
+                current.setup_version = 2
+                current.undo_window_minutes = undo_window_minutes
+                current.waveform_channels = waveform_channels
+                current.import_destination = import_destination
+                current.volume_display = volume_display
+                current.auto_open_with_fl = False  # Retired process-watcher preference.
+                current.save()
+                # CapsuleService shares the server's Settings instance. Keep it
+                # synchronized so a changed recovery window takes effect now,
+                # rather than only after the helper is restarted.
+                self.settings.setup_complete = current.setup_complete
+                self.settings.setup_version = current.setup_version
+                self.settings.undo_window_minutes = current.undo_window_minutes
+                self.settings.waveform_channels = current.waveform_channels
+                self.settings.import_destination = current.import_destination
+                self.settings.volume_display = current.volume_display
+                self.settings.auto_open_with_fl = current.auto_open_with_fl
+            return {
+                "setup_complete": True,
+                "setup_version": current.setup_version,
+                "undo_window_minutes": current.undo_window_minutes,
+                "waveform_channels": current.waveform_channels,
+                "import_destination": current.import_destination,
+                "volume_display": current.volume_display,
+            }
+        if command == "import_status":
+            requested_id = str(args.get("operation_id", ""))
+            with self.progress_lock:
+                progress = dict(self.import_progress)
+            if requested_id and progress.get("operation_id") != requested_id:
+                return {
+                    "operation_id": requested_id,
+                    "active": False,
+                    "progress": 0,
+                    "step": "Waiting to start",
+                    "error": None,
+                }
+            return progress
+        if command == "list":
+            search = str(args.get("search", ""))[:256]
+            return {
+                "capsules": self.service.library.list(
+                    search,
+                    favorites_only=bool(args.get("favorites_only", False)),
+                    sort_by=str(args.get("sort_by", "recent")),
+                    descending=bool(args.get("descending", True)),
+                    limit=args.get("limit", 1000),
+                    offset=args.get("offset", 0),
+                )
+            }
+        if command == "preview":
+            capsule = self.service.library.find(args["id"])
+            capsule.verify()
+            return {"path": str(capsule.path)}
+        if command == "favorite":
+            with self.operation_lock:
+                self.service.library.set_favorite(args["id"], bool(args["value"]))
+            return {}
+        if command == "rename":
+            with self.operation_lock:
+                self.service.library.rename(args["id"], args["name"])
+            return {}
+        if command == "tags":
+            with self.operation_lock:
+                self.service.library.set_tags(args["id"], list(args.get("tags", [])))
+            return {}
+        if command == "delete":
+            with self.operation_lock:
+                self.service.library.delete(args["id"])
+            return {}
+        if command == "capture":
+            raw_tags = args.get("tags", [])
+            if not isinstance(raw_tags, list):
+                raise ValueError("capture tags must be a list")
+            with self.operation_lock:
+                capsules = self.service.capture(
+                    str(args.get("name", "Sound Capsule"))[:200],
+                    project_path=Path(args["project"]) if args.get("project") else None,
+                    preview_wav=Path(args["preview"]) if args.get("preview") else None,
+                    individually=bool(args.get("individually", False)),
+                    tags=[str(tag)[:100] for tag in raw_tags][:100],
+                )
+            return {"capsules": [capsule.manifest.to_dict() for capsule in capsules]}
+        if command == "import":
+            operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
+            self._update_import_progress(operation_id, 1, "Starting import")
+            try:
+                with self.operation_lock:
+                    result = self.service.import_capsule(
+                        args["id"], mode=args.get("mode", "append"),
+                        project_path=Path(args["project"]) if args.get("project") else None,
+                        target_channels=args.get("target_channels"),
+                        pattern_id=args.get("pattern_id"),
+                        import_destination=args.get("import_destination"),
+                        open_project=bool(args.get("open", True)),
+                        in_place=bool(args.get("in_place", True)),
+                        progress_callback=lambda value, step: self._update_import_progress(
+                            operation_id, value, step
+                        ),
+                    )
+            except Exception as error:
+                self._update_import_progress(
+                    operation_id, 100, "Import failed", active=False, error=str(error)
+                )
+                raise
+            self._update_import_progress(
+                operation_id, 100, "Import complete", active=False
+            )
+            return {
+                "source": str(result.source_project), "merged": str(result.merged_project),
+                "mapping": result.channel_mapping, "pattern_id": result.pattern_id,
+                "transaction_id": result.transaction_id,
+                "in_place": result.in_place,
+                "backup": str(result.backup_project) if result.backup_project else None,
+                "reload_confirmed": result.reload_confirmed,
+                "import_destination": result.import_destination,
+                "operation_id": operation_id,
+            }
+        if command == "undo_import":
+            with self.operation_lock:
+                result = self.service.undo_last_import(
+                    project_path=Path(args["project"]) if args.get("project") else None,
+                    open_project=bool(args.get("open", True)),
+                )
+            return {
+                "project": str(result.project),
+                "restored_from": str(result.restored_from),
+                "safety_backup": str(result.safety_backup),
+                "restored_sha256": result.restored_sha256,
+                "import_transaction_id": result.import_transaction_id,
+                "reload_confirmed": result.reload_confirmed,
+            }
+        raise ValueError(f"unknown command {command!r}")
+
+
+def serve(settings: Settings) -> None:
+    with SoundCapsuleServer(settings) as server:
+        server.serve_forever(poll_interval=0.25)

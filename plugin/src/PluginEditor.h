@@ -1,0 +1,186 @@
+#pragma once
+
+#include "HelperClient.h"
+#include "PluginProcessor.h"
+
+#include <array>
+
+class IconToggleButton final : public juce::Button
+{
+public:
+    enum class Icon { waveform, midi, favorite, loop };
+    explicit IconToggleButton(Icon);
+    void paintButton(juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void setWaveformStereo(bool stereo) { stereoWaveform = stereo; repaint(); }
+    std::function<void()> onRightClick;
+
+private:
+    Icon icon;
+    bool stereoWaveform = false;
+    bool rightClickInProgress = false;
+};
+
+class SettingsIconButton final : public juce::Button
+{
+public:
+    SettingsIconButton();
+    void paintButton(juce::Graphics&, bool highlighted, bool down) override;
+};
+
+class ImportProgressOverlay final : public juce::Component
+{
+public:
+    ImportProgressOverlay();
+    void begin(const juce::String& initialStep);
+    void update(double progress, const juce::String& step);
+    void finish(bool succeeded, const juce::String& detail);
+    void paint(juce::Graphics&) override;
+    void resized() override;
+
+private:
+    double progressValue = 0.0;
+    juce::Label heading;
+    juce::Label stepLabel;
+    juce::ProgressBar progressBar{progressValue};
+};
+
+class SoundCapsuleAudioProcessorEditor final : public juce::AudioProcessorEditor,
+                                                private juce::ListBoxModel,
+                                                private juce::Timer
+{
+public:
+    explicit SoundCapsuleAudioProcessorEditor(SoundCapsuleAudioProcessor&);
+    ~SoundCapsuleAudioProcessorEditor() override;
+
+    void paint(juce::Graphics&) override;
+    void resized() override;
+
+private:
+    enum class WaveformChannels { mono = 1, stereo = 2 };
+    enum class RowHoverTarget { none, play, seek, favorite, append, menu };
+    enum class ImportMode { currentPattern, newPattern, overrideSelection };
+
+    struct NotePreview
+    {
+        float start = 0.0f;
+        float length = 0.0f;
+        float pitch = 0.0f;
+        int channel = 0;
+    };
+
+    struct CapsuleRow
+    {
+        juce::String id;
+        juce::String name;
+        juce::String plugins;
+        juce::String tags;
+        juce::StringArray tagItems;
+        bool favorite = false;
+        int channelCount = 0;
+        int useCount = 0;
+        juce::String capsulePath;
+        std::vector<NotePreview> notes;
+        std::unique_ptr<juce::AudioThumbnail> thumbnail;
+        bool preloadQueued = false;
+    };
+
+    int getNumRows() override;
+    void paintListBoxItem(int row, juce::Graphics&, int width, int height, bool selected) override;
+    void listBoxItemClicked(int row, const juce::MouseEvent&) override;
+    void selectedRowsChanged(int row) override;
+    void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override;
+    void timerCallback() override;
+    void mouseMove(const juce::MouseEvent&) override;
+    void mouseExit(const juce::MouseEvent&) override;
+
+    CapsuleRow* selected();
+    void refreshLibrary();
+    void preloadVisibleRows();
+    void refreshSessionStatus();
+    void captureSelected(bool individually);
+    void checkInitialSetup();
+    void showSetup(bool initial);
+    void runAfterProjectSaved(std::function<void()> action);
+    void waitForFlSave(int previousSaveSequence, std::function<void()> action);
+    void startPreview(int row, double normalizedStart, bool toggleIfPlaying);
+    void importCapsule(const juce::String& id, ImportMode mode);
+    void showImportMenu(const juce::String& id, juce::Point<int> screenPosition);
+    void pollImportProgress();
+    void showRowMenu(int row, juce::Point<int> screenPosition);
+    void promptRename(const juce::String& id, const juce::String& currentName);
+    void promptTags(const juce::String& id, const juce::String& currentTags);
+    void confirmDelete(const juce::String& id, const juce::String& name);
+    void updateRowHover(juce::Point<int> listPosition);
+    void updateSortDirectionButton();
+    void updateVolumeDisplay();
+    void toggleWaveformChannels();
+    void toggleTagSearch(const juce::String& tag);
+    std::vector<std::pair<juce::Rectangle<int>, juce::String>>
+        tagHitAreas(const CapsuleRow&, int rowWidth) const;
+    static RowHoverTarget hitTestRow(juce::Point<int> rowPosition, int rowWidth);
+    void sendCommand(const juce::String& command,
+                     const juce::var& arguments,
+                     std::function<void(juce::var)> onSuccess = {},
+                     int timeoutMs = 60000,
+                     bool quiet = false,
+                     std::function<void(const juce::String&)> onError = {});
+    void setBusy(const juce::String& message);
+    static juce::var object(std::initializer_list<std::pair<juce::Identifier, juce::var>> values);
+
+    SoundCapsuleAudioProcessor& audioProcessor;
+    juce::AudioFormatManager thumbnailFormats;
+    juce::AudioThumbnailCache thumbnailCache{64};
+    std::vector<CapsuleRow> rows;
+    std::atomic<int> requestsInFlight{0};
+    std::atomic<bool> shuttingDown{false};
+    juce::ThreadPool requestPool{3};
+    juce::ThreadPool previewPreloadPool{1};
+    uint32_t searchDueAt = 0;
+    uint32_t lastSessionPollAt = 0;
+    uint32_t lastVisiblePreloadAt = 0;
+    uint32_t lastImportProgressPollAt = 0;
+    uint32_t importOverlayHideAt = 0;
+    uint64_t listGeneration = 0;
+    uint64_t previewGeneration = 0;
+    juce::String suggestedCapsuleName;
+    juce::String playingCapsuleId;
+    juce::String completedPreviewId;
+    juce::String pendingPreviewId;
+    juce::String importOperationId;
+    std::atomic<bool> importProgressPollInFlight{false};
+    double pendingPreviewStart = 0.0;
+    int hoveredRow = -1;
+    RowHoverTarget hoveredTarget = RowHoverTarget::none;
+
+    juce::Label title;
+    juce::Label status;
+    juce::Label connectionStatus;
+    juce::TextButton connectionSetup{"Open Setup"};
+    juce::Label projectStatus;
+    juce::Label patternStatus;
+    juce::TextEditor search;
+    juce::TextEditor capsuleName;
+    juce::TextEditor tagsInput;
+    IconToggleButton favoritesOnly{IconToggleButton::Icon::favorite};
+    juce::ComboBox sortBy;
+    juce::TextButton sortDirection;
+    IconToggleButton waveformToggle{IconToggleButton::Icon::waveform};
+    IconToggleButton midiToggle{IconToggleButton::Icon::midi};
+    IconToggleButton loopToggle{IconToggleButton::Icon::loop};
+    juce::ListBox list{"Capsule library", this};
+    juce::TextButton saveGroup{"Import selected"};
+    juce::TextButton saveIndividual{"Import individually"};
+    juce::TextButton undoImport{"Undo import"};
+    SettingsIconButton setup;
+    juce::Label volumeLabel{{}, "Volume"};
+    juce::Slider previewVolume;
+    ImportProgressOverlay importProgress;
+    std::array<bool, 3> sortDescendingByMode{{true, false, true}};
+    WaveformChannels waveformChannels = WaveformChannels::mono;
+    ImportMode defaultImportMode = ImportMode::currentPattern;
+    bool volumeDisplayDb = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SoundCapsuleAudioProcessorEditor)
+};

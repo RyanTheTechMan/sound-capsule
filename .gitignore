@@ -1,0 +1,74 @@
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Editors and local tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.env
+.env.*
+!.env.example
+
+# Python / uv
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+__pypackages__/
+
+# CMake, native builds, and plugin bundles
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+Makefile
+*.o
+*.obj
+*.a
+*.lib
+*.dylib
+*.so
+*.dll
+*.exe
+*.app/
+*.vst3/
+
+# Packaging, validation, and scratch output
+dist/
+outputs/
+work/
+*.log
+*.tmp
+
+# Local Sound Capsule libraries and helper state
+*.flcapsule
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+/Bridge/
+/Cache/
+/Library/
+/Staging/
+/ImportedAssets/
+/settings.json
+/project-paths.json
+/transactions.jsonl
