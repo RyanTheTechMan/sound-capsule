@@ -66,10 +66,10 @@
 
     <CustomAction Id="ProvisionCurrentUser" Directory="INSTALLFOLDER" Execute="immediate"
                   Impersonate="yes" Return="ignore"
-                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -SetupRoot "[SETUPFOLDER]" -InstalledApp "[#SoundCapsuleExe]"'/>
+                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -InstalledApp "[#SoundCapsuleExe]"'/>
     <CustomAction Id="CleanupCurrentUser" Directory="INSTALLFOLDER" Execute="immediate"
                   Impersonate="yes" Return="ignore"
-                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -SetupRoot "[SETUPFOLDER]" -Uninstall'/>
+                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -Uninstall'/>
     <InstallExecuteSequence>
       <Custom Action="CleanupCurrentUser" Before="RemoveFiles"
               Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>

@@ -19,6 +19,12 @@ class PackageReleaseTests(unittest.TestCase):
             self.assertIn(instructions, source)
             self.assertNotIn("astral.sh/uv/install.", source)
 
+    def test_windows_custom_actions_do_not_quote_a_trailing_setup_directory(self) -> None:
+        source = (ROOT / "packaging/windows/Package.wxs").read_text(encoding="utf-8")
+        self.assertNotIn('-SetupRoot "[SETUPFOLDER]"', source)
+        self.assertEqual(source.count("-WindowStyle Hidden"), 2)
+        self.assertIn('-File "[SETUPFOLDER]bootstrap-install.ps1"', source)
+
     def test_find_one_can_select_vst3_bundle_over_inner_windows_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary)

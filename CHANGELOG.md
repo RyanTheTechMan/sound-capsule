@@ -8,6 +8,16 @@ version's section is also used as its GitHub release notes.
 
 No changes yet.
 
+## [0.2.1] - 2026-07-12
+
+### Fixed
+
+- Windows MSI helper provisioning no longer passes a quoted setup-directory
+  argument ending in a backslash, which caused PowerShell to receive broken
+  positional arguments after installation.
+- The Windows helper bootstrap now runs with its console window hidden, avoiding
+  a terminal flash during successful install and uninstall operations.
+
 ## [0.2.0] - 2026-07-12
 
 ### Added
