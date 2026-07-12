@@ -41,8 +41,12 @@ jobs:
           $standalone = "build/plugin/SoundCapsule_artefacts/Release/Standalone"
           $vst = "build/plugin/SoundCapsule_artefacts/Release/VST3/Sound Capsule.vst3/Contents/x86_64-win"
           New-Item -ItemType Directory -Force $standalone, $vst | Out-Null
-          Set-Content -NoNewline "$standalone/Sound Capsule.exe" "installer test"
-          Set-Content -NoNewline "$vst/Sound Capsule.vst3" "installer test"
+          $appFile = Join-Path $standalone "Sound Capsule.exe"
+          $vstFile = Join-Path $vst "Sound Capsule.vst3"
+          New-Item -ItemType File -Force $appFile, $vstFile | Out-Null
+          if (-not (Test-Path $appFile) -or -not (Test-Path $vstFile)) {
+            throw "Could not stage installer test artifacts"
+          }
       - name: Build Windows MSI
         shell: bash
         run: |
