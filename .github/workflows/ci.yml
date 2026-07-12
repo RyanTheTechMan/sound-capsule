@@ -22,3 +22,16 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSOUNDCAPSULE_UNIVERSAL_MACOS=OFF -DSOUNDCAPSULE_BUILD_PLUGIN=ON
       - name: Build VST3
         run: cmake --build build --config Release --parallel 4
+      - name: Validate Windows setup script
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          [void][scriptblock]::Create(
+          (Get-Content -Raw packaging/windows/bootstrap-install.ps1))
+      - name: Build Windows MSI
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VERSION=$(PYTHONPATH=helper python -c 'import soundcapsule; print(soundcapsule.__version__)')
+          python scripts/package_windows_installer.py \
+            --build build --output dist --version "$VERSION"
