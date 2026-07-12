@@ -1,8 +1,7 @@
 #!/bin/sh
 set -u
 
-UV_VERSION="0.11.28"
-UV_INSTALL_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
+UV_INSTALL_URL="https://astral.sh/uv/install.sh"
 SETUP_ROOT=${SOUNDCAPSULE_SETUP_ROOT:-"/Library/Application Support/SoundCapsule/Setup"}
 INSTALLED_APP=${SOUNDCAPSULE_INSTALLED_APP:-"/Applications/Sound Capsule.app"}
 
@@ -47,7 +46,7 @@ find_uv() {
 
 uv_path=$(find_uv || true)
 if [ -z "$uv_path" ]; then
-    echo "uv was not found; attempting the official uv ${UV_VERSION} installer"
+    echo "uv was not found; attempting the official latest uv installer"
     installer=$(mktemp -t sound-capsule-uv.XXXXXX)
     if ! curl --proto '=https' --tlsv1.2 -LsSf "$UV_INSTALL_URL" -o "$installer" \
         || ! sh "$installer"; then

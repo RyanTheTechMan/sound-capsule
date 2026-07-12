@@ -44,7 +44,7 @@
     </Component>
 
     <Feature Id="Core" Title="Sound Capsule application and FL Studio bridge"
-             Description="Required app and FL bridge. If uv is missing, setup will attempt to install uv 0.11.28 for the current user; Sound Capsule offers manual instructions if that fails."
+             Description="Required app and FL bridge. If uv is missing, setup will attempt to install the latest uv for the current user; Sound Capsule offers manual instructions if that fails."
              Level="1" Absent="disallow">
       <ComponentRef Id="Application"/>
       <ComponentGroupRef Id="SetupFiles"/>

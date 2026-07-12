@@ -6,8 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$UvVersion = "0.11.28"
-$UvInstallUrl = "https://astral.sh/uv/$UvVersion/install.ps1"
+$UvInstallUrl = "https://astral.sh/uv/install.ps1"
 $DataRoot = Join-Path $env:LOCALAPPDATA "SoundCapsule"
 $LogRoot = Join-Path $DataRoot "Logs"
 $LogFile = Join-Path $LogRoot "install.log"
@@ -46,7 +45,7 @@ try {
     Write-Host "Provisioning Sound Capsule"
     $uv = Find-Uv
     if (-not $uv) {
-        Write-Host "uv was not found; attempting the official uv $UvVersion installer"
+        Write-Host "uv was not found; attempting the official latest uv installer"
         $installer = Join-Path $env:TEMP "sound-capsule-uv-install.ps1"
         Invoke-WebRequest -UseBasicParsing -Uri $UvInstallUrl -OutFile $installer
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
