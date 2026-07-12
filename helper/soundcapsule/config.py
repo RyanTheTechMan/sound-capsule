@@ -39,6 +39,7 @@ class Settings:
     waveform_channels: str = "mono"
     import_destination: str = "current_pattern"
     volume_display: str = "percent"
+    check_updates_on_startup: bool = True
     server_host: str = "127.0.0.1"
     server_port: int = 51943
 

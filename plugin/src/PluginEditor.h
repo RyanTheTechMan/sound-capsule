@@ -101,6 +101,7 @@ private:
     void refreshSessionStatus();
     void captureSelected(bool individually);
     void checkInitialSetup();
+    void checkForUpdates(bool userInitiated = false);
     void showSetup(bool initial);
     void runAfterProjectSaved(std::function<void()> action);
     void waitForFlSave(int previousSaveSequence, std::function<void()> action);
@@ -150,6 +151,7 @@ private:
     juce::String pendingPreviewId;
     juce::String importOperationId;
     std::atomic<bool> importProgressPollInFlight{false};
+    std::atomic<bool> updateCheckInFlight{false};
     double pendingPreviewStart = 0.0;
     int hoveredRow = -1;
     RowHoverTarget hoveredTarget = RowHoverTarget::none;
@@ -158,6 +160,7 @@ private:
     juce::Label status;
     juce::Label connectionStatus;
     juce::TextButton connectionSetup{"Open Setup"};
+    juce::TextButton updateAvailable;
     juce::Label projectStatus;
     juce::Label patternStatus;
     juce::TextEditor search;

@@ -64,7 +64,10 @@ def install_helper(root: Path) -> Path:
         shutil.rmtree(helper_root)
     shutil.copytree(
         ROOT / "helper", helper_root,
-        ignore=shutil.ignore_patterns("build", "dist", "*.egg-info", "__pycache__", "*.pyc"),
+        ignore=shutil.ignore_patterns(
+            "build", "dist", "tests", ".venv", "venv", "*.egg-info",
+            "__pycache__", "*.pyc", ".pytest_cache",
+        ),
     )
     uv = shutil.which("uv")
     if uv is None:
@@ -130,6 +133,7 @@ def configure(root: Path) -> None:
         "waveform_channels": existing.get("waveform_channels", "mono"),
         "import_destination": existing.get("import_destination", "current_pattern"),
         "volume_display": existing.get("volume_display", "percent"),
+        "check_updates_on_startup": existing.get("check_updates_on_startup", True),
         "server_host": "127.0.0.1",
         "server_port": 51943,
     })

@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
+from soundcapsule import __version__
 from soundcapsule.bridge import BridgeQueue
 from soundcapsule.config import Settings
 from soundcapsule.server import SoundCapsuleServer
@@ -34,7 +35,7 @@ class ServerTests(unittest.TestCase):
                 thread.join(timeout=2)
             payload = json.loads(response)
             self.assertTrue(payload["ok"])
-            self.assertEqual(payload["version"], "0.1.0")
+            self.assertEqual(payload["version"], __version__)
 
     def test_import_progress_can_be_polled_while_operation_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -153,6 +154,7 @@ class ServerTests(unittest.TestCase):
                             "waveform_channels": "stereo",
                             "import_destination": "new_pattern",
                             "volume_display": "db",
+                            "check_updates_on_startup": False,
                         },
                     }
                 )
@@ -160,9 +162,11 @@ class ServerTests(unittest.TestCase):
                 runtime_waveform = server.service.settings.waveform_channels
                 runtime_destination = server.service.settings.import_destination
                 runtime_volume_display = server.service.settings.volume_display
+                runtime_update_check = server.service.settings.check_updates_on_startup
                 persisted = server.dispatch({"command": "setup_status", "args": {}})
 
             self.assertFalse(initial["setup_complete"])
+            self.assertTrue(initial["check_updates_on_startup"])
             self.assertTrue(persisted["setup_complete"])
             self.assertEqual(persisted["setup_version"], 2)
             self.assertEqual(persisted["undo_window_minutes"], 25)
@@ -173,6 +177,8 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(persisted["import_destination"], "new_pattern")
             self.assertEqual(runtime_volume_display, "db")
             self.assertEqual(persisted["volume_display"], "db")
+            self.assertFalse(runtime_update_check)
+            self.assertFalse(persisted["check_updates_on_startup"])
 
 
 if __name__ == "__main__":

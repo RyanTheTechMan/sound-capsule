@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fl-sound-capsule"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Event-preserving FL Studio sound capsule helper"
 requires-python = ">=3.10"
-license = { text = "AGPL-3.0-only" }
+license = "AGPL-3.0-only"
 authors = [{ name = "Sound Capsule contributors" }]
 dependencies = []
 
@@ -17,6 +17,9 @@ soundcapsule = "soundcapsule.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["soundcapsule*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "soundcapsule.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

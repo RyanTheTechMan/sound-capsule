@@ -9,6 +9,25 @@ const auto background = juce::Colour(0xff101318);
 const auto panel = juce::Colour(0xff1b2028);
 const auto accent = juce::Colour(0xff69d2a8);
 
+#ifndef SOUNDCAPSULE_RELEASE_REPOSITORY
+ #define SOUNDCAPSULE_RELEASE_REPOSITORY ""
+#endif
+
+std::array<int, 3> versionParts(juce::String version)
+{
+    version = version.trim().trimCharactersAtStart("vV");
+    const auto tokens = juce::StringArray::fromTokens(version, ".-+", "");
+    std::array<int, 3> result{};
+    for (int index = 0; index < static_cast<int>(result.size()) && index < tokens.size(); ++index)
+        result[static_cast<size_t>(index)] = tokens[index].getIntValue();
+    return result;
+}
+
+bool isNewerVersion(const juce::String& candidate, const juce::String& current)
+{
+    return versionParts(candidate) > versionParts(current);
+}
+
 int textWidth(const juce::Font& font, const juce::String& text)
 {
     juce::GlyphArrangement glyphs;
@@ -33,17 +52,59 @@ juce::Path starPath(juce::Point<float> centre, float outerRadius, float innerRad
     return path;
 }
 
+class UpdateSettingsComponent final : public juce::Component
+{
+public:
+    explicit UpdateSettingsComponent(bool checkOnStartup)
+        : checkNow("Check for Updates")
+    {
+        setSize(360, 64);
+        startup.setButtonText("Check for Updates on startup");
+        startup.setToggleState(checkOnStartup, juce::dontSendNotification);
+        addAndMakeVisible(startup);
+        addAndMakeVisible(checkNow);
+    }
+
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        startup.setBounds(bounds.removeFromTop(28));
+        bounds.removeFromTop(4);
+        checkNow.setBounds(bounds.removeFromTop(28).removeFromLeft(150));
+    }
+
+    bool shouldCheckOnStartup() const { return startup.getToggleState(); }
+    std::function<void()> onCheckNow;
+
+    void attachCallbacks()
+    {
+        checkNow.onClick = [this] { if (onCheckNow) onCheckNow(); };
+    }
+
+private:
+    juce::ToggleButton startup;
+    juce::TextButton checkNow;
+};
+
 class SettingsAlertWindow final : public juce::AlertWindow
 {
 public:
-    SettingsAlertWindow(const juce::String& title)
+    SettingsAlertWindow(const juce::String& title, bool checkOnStartup)
         : juce::AlertWindow(title, {}, juce::MessageBoxIconType::QuestionIcon),
+          updateSettings(checkOnStartup),
           flSetup("FL Setup")
     {
+        addCustomComponent(&updateSettings);
+        updateSettings.onCheckNow = [this] { exitModalState(3); };
+        updateSettings.attachCallbacks();
         addAndMakeVisible(flSetup);
         flSetup.setTooltip("Show FL Studio auto-open and MIDI setup steps");
         flSetup.onClick = [this] { exitModalState(2); };
     }
+
+    ~SettingsAlertWindow() override { removeCustomComponent(0); }
+
+    bool shouldCheckOnStartup() const { return updateSettings.shouldCheckOnStartup(); }
 
     void resized() override
     {
@@ -52,6 +113,7 @@ public:
     }
 
 private:
+    UpdateSettingsComponent updateSettings;
     juce::TextButton flSetup;
 };
 
@@ -332,6 +394,9 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     connectionStatus.setVisible(false);
     connectionSetup.setVisible(false);
     connectionSetup.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff5b3b1c));
+    updateAvailable.setVisible(false);
+    updateAvailable.setColour(juce::TextButton::buttonColourId, accent.darker(0.55f));
+    updateAvailable.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     search.setTextToShowWhenEmpty("Search names, plugins, or tags", juce::Colours::grey);
     capsuleName.setTextToShowWhenEmpty("Capsule name", juce::Colours::grey);
     tagsInput.setTextToShowWhenEmpty("Tags (comma-separated)", juce::Colours::grey);
@@ -377,11 +442,12 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
              &sortBy, &sortDirection, &waveformToggle, &midiToggle, &loopToggle,
              &list, &saveGroup, &saveIndividual,
              &connectionStatus, &projectStatus, &patternStatus,
-             &connectionSetup, &setup, &volumeLabel, &previewVolume})
+             &connectionSetup, &updateAvailable, &setup, &volumeLabel, &previewVolume})
         addAndMakeVisible(component);
     addAndMakeVisible(importProgress);
     connectionStatus.setVisible(false);
     connectionSetup.setVisible(false);
+    updateAvailable.setVisible(false);
     importProgress.setVisible(false);
     addAndMakeVisible(undoImport);
     undoImport.setVisible(false);
@@ -460,6 +526,11 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
         audioProcessor.ensureHelperRunning();
         showSetup(false);
     };
+    updateAvailable.onClick = [this] {
+        const auto url = updateAvailable.getProperties()["releaseUrl"].toString();
+        if (url.isNotEmpty())
+            juce::URL(url).launchInDefaultBrowser();
+    };
 
     // Playback progress is an animation, so update it at display-like cadence.
     // Slower housekeeping work is gated inside timerCallback.
@@ -505,6 +576,11 @@ void SoundCapsuleAudioProcessorEditor::resized()
         connectionSetup.setBounds(warningRow.removeFromRight(104).reduced(2, 1));
         warningRow.removeFromRight(6);
         connectionStatus.setBounds(warningRow);
+        bounds.removeFromTop(6);
+    }
+    if (updateAvailable.isVisible())
+    {
+        updateAvailable.setBounds(bounds.removeFromTop(32));
         bounds.removeFromTop(6);
     }
     auto sessionRow = bounds.removeFromTop(28);
@@ -1237,8 +1313,109 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
         safe->waveformToggle.setWaveformStereo(safe->waveformChannels == WaveformChannels::stereo);
         safe->list.repaint();
         if (safe->audioProcessor.isRunningStandalone()
+            && static_cast<bool>(response.getProperty("check_updates_on_startup", true)))
+            safe->checkForUpdates();
+        if (safe->audioProcessor.isRunningStandalone()
             && !static_cast<bool>(response.getProperty("setup_complete", false)))
             safe->showSetup(true);
+    });
+}
+
+void SoundCapsuleAudioProcessorEditor::checkForUpdates(bool userInitiated)
+{
+    const auto repository = juce::String(SOUNDCAPSULE_RELEASE_REPOSITORY).trim();
+    if (repository.isEmpty())
+    {
+        if (userInitiated)
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::InfoIcon, "Updates unavailable",
+                "This development build is not connected to a GitHub release repository.",
+                "OK", this);
+        return;
+    }
+    if (updateCheckInFlight.exchange(true))
+    {
+        if (userInitiated)
+            status.setText("Already checking for updates", juce::dontSendNotification);
+        return;
+    }
+
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    requestPool.addJob([safe, repository, userInitiated] {
+        if (safe == nullptr || safe->shuttingDown.load())
+            return;
+
+        int statusCode = 0;
+        juce::String error;
+        juce::String tag;
+        juce::String releaseUrl;
+        const auto endpoint = juce::URL("https://api.github.com/repos/" + repository
+                                        + "/releases/latest");
+        auto stream = endpoint.createInputStream(
+            juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                .withConnectionTimeoutMs(5000)
+                .withStatusCode(&statusCode)
+                .withExtraHeaders("Accept: application/vnd.github+json\r\n"
+                                  "User-Agent: Sound-Capsule/" JucePlugin_VersionString "\r\n"));
+        if (stream == nullptr || statusCode != 200)
+            error = "GitHub did not return a published release.";
+        else
+        {
+            const auto response = juce::JSON::parse(stream->readEntireStreamAsString());
+            if (!response.isObject())
+                error = "GitHub returned an invalid update response.";
+            else
+            {
+                tag = response.getProperty("tag_name", "").toString();
+                releaseUrl = response.getProperty("html_url", "").toString();
+                if (tag.isEmpty() || releaseUrl.isEmpty())
+                    error = "GitHub returned incomplete release information.";
+            }
+        }
+
+        if (safe->shuttingDown.load())
+            return;
+        juce::MessageManager::callAsync([safe, tag, releaseUrl, error, userInitiated] {
+            if (safe == nullptr)
+                return;
+            safe->updateCheckInFlight.store(false);
+            if (error.isNotEmpty())
+            {
+                if (userInitiated)
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::MessageBoxIconType::WarningIcon, "Could not check for updates",
+                        error, "OK", safe.getComponent());
+                return;
+            }
+
+            if (isNewerVersion(tag, JucePlugin_VersionString))
+            {
+                safe->updateAvailable.setButtonText(
+                    "Sound Capsule " + tag + " is available - View release notes");
+                safe->updateAvailable.setTooltip(
+                    "Open the release notes and downloads for Sound Capsule " + tag + ".");
+                safe->updateAvailable.getProperties().set("releaseUrl", releaseUrl);
+                safe->updateAvailable.setVisible(true);
+                safe->resized();
+                if (userInitiated)
+                    juce::AlertWindow::showAsync(
+                        juce::MessageBoxOptions::makeOptionsOkCancel(
+                            juce::MessageBoxIconType::InfoIcon,
+                            "Update available",
+                            "Sound Capsule " + tag + " is available.",
+                            "View Release", "Not now", safe.getComponent()),
+                        [releaseUrl](int result) {
+                            if (result == 1)
+                                juce::URL(releaseUrl).launchInDefaultBrowser();
+                        });
+            }
+            else if (userInitiated)
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::InfoIcon, "Sound Capsule is up to date",
+                    "You are running the latest published version ("
+                        + juce::String(JucePlugin_VersionString) + ").",
+                    "OK", safe.getComponent());
+        });
     });
 }
 
@@ -1255,9 +1432,11 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
             response.getProperty("import_destination", "current_pattern").toString();
         const auto currentVolumeDisplay =
             response.getProperty("volume_display", "percent").toString();
+        const auto currentCheckUpdatesOnStartup = static_cast<bool>(
+            response.getProperty("check_updates_on_startup", true));
         const auto appPath = response.getProperty("app_path", "").toString();
         const auto titleText = initial ? "Welcome to Sound Capsule" : "Sound Capsule settings";
-        auto* dialog = new SettingsAlertWindow(titleText);
+        auto* dialog = new SettingsAlertWindow(titleText, currentCheckUpdatesOnStartup);
         dialog->addTextEditor("undo_minutes", juce::String(currentUndoMinutes),
                               "Undo minutes (1-1440):");
         juce::StringArray waveformModes;
@@ -1293,7 +1472,13 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
             true,
             juce::ModalCallbackFunction::create(
                 [safe, dialog, appPath](int result) {
-                    if (safe == nullptr || (result != 1 && result != 2)) return;
+                    if (safe == nullptr) return;
+                    if (result == 3)
+                    {
+                        safe->checkForUpdates(true);
+                        return;
+                    }
+                    if (result != 1 && result != 2) return;
                     const auto showInstructions = result == 2;
                     const auto* undoEditor = dialog->getTextEditor("undo_minutes");
                     const auto* waveformMode = dialog->getComboBoxComponent("waveform_channels");
@@ -1315,6 +1500,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                                            && volumeDisplay->getSelectedId() == 2
                                                        ? juce::String("db")
                                                        : juce::String("percent");
+                    const auto checkUpdatesOnStartup = dialog->shouldCheckOnStartup();
                     if (undoMinutes < 1 || undoMinutes > 1440)
                     {
                         juce::AlertWindow::showMessageBoxAsync(
@@ -1329,7 +1515,8 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                         object({{"undo_window_minutes", undoMinutes},
                                 {"waveform_channels", waveformSetting},
                                 {"import_destination", importSetting},
-                                {"volume_display", volumeDisplaySetting}}),
+                                {"volume_display", volumeDisplaySetting},
+                                {"check_updates_on_startup", checkUpdatesOnStartup}}),
                         [safe, appPath, showInstructions, waveformSetting,
                          importSetting, volumeDisplaySetting](juce::var) {
                             if (safe == nullptr) return;

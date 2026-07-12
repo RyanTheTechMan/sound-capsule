@@ -32,6 +32,10 @@ target_compile_definitions(SoundCapsule PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
+target_compile_definitions(SoundCapsule PRIVATE
+    SOUNDCAPSULE_RELEASE_REPOSITORY="${SOUNDCAPSULE_RELEASE_REPOSITORY}"
+)
+
 target_link_libraries(SoundCapsule PRIVATE
     juce::juce_audio_utils
     juce::juce_gui_extra

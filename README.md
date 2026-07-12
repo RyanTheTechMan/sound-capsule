@@ -85,12 +85,16 @@ the app's backup-and-replace behavior.
 ## Install and first-time setup
 
 [uv](https://docs.astral.sh/uv/) is required. It supplies a managed Python 3.12
-when the computer does not already have a compatible interpreter. From the
-source or development package:
+when the computer does not already have a compatible interpreter. Download the
+macOS or Windows ZIP from the latest GitHub release, extract it, open a terminal
+in that folder, and run:
 
 ```sh
-uv run --python 3.12 scripts/install.py
+uv run --python 3.12 scripts/install.py --build .
 ```
+
+The same command works from a source checkout by omitting `--build .`. Add
+`--with-vst` to install the optional VST3 bundle included in the download.
 
 There is no install-location or project-folder prompt. The app uses the
 standard per-user application location. Projects may live anywhere: Sound
@@ -101,7 +105,7 @@ Then:
 
 1. Launch **Sound Capsule** once. The gear icon opens Settings for the Undo
    duration, default import destination, volume readout, and Mono/Stereo
-   waveform preference.
+   waveform preference, plus manual and startup update checks.
    Use **FL Setup** whenever you want the
    guided FL Studio connection steps; its button sits at the top-right of
    Settings, and opening mode is not stored by the app.
@@ -235,6 +239,29 @@ distribution still requires an Apple Developer ID signature and notarization.
 
 See [docs/VALIDATION.md](docs/VALIDATION.md) for the automated and host-level
 acceptance gates.
+
+## Releases and updates
+
+The standalone app checks the repository's public `latest` GitHub release when
+it opens if **Check for Updates on startup** is enabled in Settings (it is on by
+default). Settings also has a **Check for Updates** button for an immediate
+manual check. When a newer published version exists, a banner links to that
+release's notes and downloads. Draft and prerelease versions are not offered,
+and Sound Capsule never installs an update automatically.
+
+For maintainers, the release version has one source of truth:
+`helper/soundcapsule/__init__.py`. To prepare a release:
+
+1. Update `__version__`, move the finished entries under `Unreleased` into a
+   dated version section in `CHANGELOG.md`, and push that commit.
+2. In GitHub Actions, run **Build draft release** from the commit or branch to
+   release and enter the same version without a leading `v`.
+3. Review the generated draft, its changelog-based release notes, the macOS and
+   Windows ZIPs, and `SHA256SUMS.txt`, then publish it. The draft targets the
+   exact workflow commit and uses the `v<version>` tag.
+
+Publishing the draft makes it visible to the app's update check. The workflow
+never publishes a release on its own.
 
 ## Capsule contents
 

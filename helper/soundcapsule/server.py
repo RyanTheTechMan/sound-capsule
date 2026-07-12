@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 
+from . import __version__
 from .config import Settings
 from .project import CapsuleService
 from .project_locator import ProjectLocator
@@ -81,7 +82,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         if not isinstance(command, str) or not isinstance(args, dict):
             raise ValueError("request command must be text and args must be an object")
         if command == "ping":
-            return {"version": "0.1.0"}
+            return {"version": __version__}
         if command == "session":
             session = self.service.bridge.session()
             project_path = None
@@ -130,6 +131,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "waveform_channels": current.waveform_channels,
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
+                "check_updates_on_startup": current.check_updates_on_startup,
                 "app_path": str(current.app_path) if current.app_path else None,
             }
         if command == "configure_setup":
@@ -142,6 +144,9 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 )
                 volume_display = str(
                     args.get("volume_display", current.volume_display)
+                )
+                check_updates_on_startup = bool(
+                    args.get("check_updates_on_startup", current.check_updates_on_startup)
                 )
                 if not 1 <= undo_window_minutes <= 1440:
                     raise ValueError("Undo Import duration must be between 1 and 1440 minutes")
@@ -159,6 +164,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 current.waveform_channels = waveform_channels
                 current.import_destination = import_destination
                 current.volume_display = volume_display
+                current.check_updates_on_startup = check_updates_on_startup
                 current.auto_open_with_fl = False  # Retired process-watcher preference.
                 current.save()
                 # CapsuleService shares the server's Settings instance. Keep it
@@ -170,6 +176,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.settings.waveform_channels = current.waveform_channels
                 self.settings.import_destination = current.import_destination
                 self.settings.volume_display = current.volume_display
+                self.settings.check_updates_on_startup = current.check_updates_on_startup
                 self.settings.auto_open_with_fl = current.auto_open_with_fl
             return {
                 "setup_complete": True,
@@ -178,6 +185,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "waveform_channels": current.waveform_channels,
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
+                "check_updates_on_startup": current.check_updates_on_startup,
             }
         if command == "import_status":
             requested_id = str(args.get("operation_id", ""))
