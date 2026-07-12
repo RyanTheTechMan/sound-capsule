@@ -203,6 +203,199 @@ private:
     juce::TextButton flSetup;
 };
 
+class PinToggleButton final : public juce::Button
+{
+public:
+    PinToggleButton()
+        : juce::Button("Keep setup window on top")
+    {
+        setClickingTogglesState(true);
+        setToggleState(true, juce::dontSendNotification);
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        updateTooltip();
+    }
+
+    void updateTooltip()
+    {
+        setTooltip(getToggleState()
+                       ? "Allow this setup window to move behind other windows"
+                       : "Keep this setup window on top");
+    }
+
+    void paintButton(juce::Graphics& graphics, bool highlighted, bool down) override
+    {
+        const auto bounds = getLocalBounds().toFloat().reduced(2.0f);
+        if (getToggleState() || highlighted)
+        {
+            const auto alpha = down ? 0.28f : (getToggleState() ? 0.20f : 0.10f);
+            graphics.setColour(accent.withAlpha(alpha));
+            graphics.fillRoundedRectangle(bounds, 5.0f);
+        }
+
+        graphics.setColour(getToggleState()
+                               ? accent
+                               : juce::Colours::lightgrey.withAlpha(highlighted ? 0.9f : 0.65f));
+        const auto centreX = bounds.getCentreX();
+        const auto top = bounds.getY() + 4.0f;
+        graphics.fillRoundedRectangle(centreX - 5.0f, top, 10.0f, 4.0f, 1.5f);
+        graphics.fillRect(centreX - 1.0f, top + 3.0f, 2.0f, 8.0f);
+        graphics.drawLine(centreX - 5.0f, top + 10.0f,
+                          centreX + 5.0f, top + 10.0f, 1.5f);
+        graphics.drawLine(centreX, top + 10.0f,
+                          centreX, top + 17.0f, 1.5f);
+    }
+};
+
+class SetupAppPathComponent final : public juce::Component,
+                                    private juce::Timer
+{
+public:
+    explicit SetupAppPathComponent(juce::String path)
+        : appPath(std::move(path)), copyPath("Copy Path")
+    {
+        setSize(440, 76);
+
+        copyStatus.setText("Copying application path...", juce::dontSendNotification);
+        copyStatus.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+        pathField.setText(appPath, false);
+        pathField.setReadOnly(true);
+        pathField.setCaretVisible(true);
+        pathField.setSelectAllWhenFocused(true);
+        pathField.setEscapeAndReturnKeysConsumed(false);
+        pathField.setTooltip(appPath);
+
+        copyPath.setTooltip("Copy the Sound Capsule application path");
+        copyPath.onClick = [this] { beginClipboardCopy(); };
+
+        addAndMakeVisible(copyStatus);
+        addAndMakeVisible(pathField);
+        addAndMakeVisible(copyPath);
+    }
+
+    void beginClipboardCopy()
+    {
+        stopTimer();
+        copyAttempt = 0;
+        copyStatus.setText("Copying application path...", juce::dontSendNotification);
+        attemptClipboardCopy();
+    }
+
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        copyStatus.setBounds(bounds.removeFromTop(24));
+        bounds.removeFromTop(4);
+        copyPath.setBounds(bounds.removeFromRight(96));
+        bounds.removeFromRight(6);
+        pathField.setBounds(bounds.removeFromTop(30));
+    }
+
+private:
+    void timerCallback() override
+    {
+        stopTimer();
+        attemptClipboardCopy();
+    }
+
+    void attemptClipboardCopy()
+    {
+        ++copyAttempt;
+        juce::SystemClipboard::copyTextToClipboard(appPath);
+        if (juce::SystemClipboard::getTextFromClipboard() == appPath)
+        {
+            copyStatus.setText("Application path copied to clipboard.",
+                               juce::dontSendNotification);
+            return;
+        }
+
+        if (copyAttempt >= maxCopyAttempts)
+        {
+            copyStatus.setText("Could not confirm the copy. Choose Copy Path to retry.",
+                               juce::dontSendNotification);
+            return;
+        }
+
+        startTimer(copyRetryDelayMs);
+    }
+
+    static constexpr int maxCopyAttempts = 5;
+    static constexpr int copyRetryDelayMs = 100;
+    juce::String appPath;
+    juce::Label copyStatus;
+    juce::TextEditor pathField;
+    juce::TextButton copyPath;
+    int copyAttempt = 0;
+};
+
+class FinishSetupAlertWindow final : public juce::AlertWindow
+{
+public:
+    FinishSetupAlertWindow(const juce::String& message, const juce::String& appPath,
+                           juce::Component* associatedComponent)
+        : juce::AlertWindow("Finish FL Studio setup", message,
+                            juce::MessageBoxIconType::InfoIcon, associatedComponent),
+          pathComponent(appPath), hasAppPath(appPath.isNotEmpty())
+    {
+        if (hasAppPath)
+            addCustomComponent(&pathComponent);
+
+        addAndMakeVisible(pin);
+        pin.onClick = [this] {
+            setAlwaysOnTop(pin.getToggleState());
+            pin.updateTooltip();
+        };
+        setAlwaysOnTop(true);
+        addButton("Got it", 1, juce::KeyPress(juce::KeyPress::returnKey),
+                  juce::KeyPress(juce::KeyPress::escapeKey));
+    }
+
+    ~FinishSetupAlertWindow() override
+    {
+        if (hasAppPath)
+            removeCustomComponent(0);
+    }
+
+    void beginClipboardCopy()
+    {
+        if (hasAppPath)
+            pathComponent.beginClipboardCopy();
+    }
+
+    void resized() override
+    {
+        juce::AlertWindow::resized();
+        pin.setBounds(getWidth() - 40, 8, 28, 28);
+        pin.toFront(false);
+    }
+
+private:
+    SetupAppPathComponent pathComponent;
+    PinToggleButton pin;
+    bool hasAppPath = false;
+};
+
+juce::String finishSetupInstructions()
+{
+   #if JUCE_WINDOWS
+    const auto appName = juce::String("Sound Capsule.exe");
+   #elif JUCE_MAC
+    const auto appName = juce::String("Sound Capsule.app");
+   #else
+    const auto appName = juce::String("Sound Capsule application");
+   #endif
+
+    return juce::String("Optional auto-open with FL Studio:\n\n")
+         + "1. Open Options > File settings > External tools.\n"
+           "2. Choose an empty row and browse to " + appName + ".\n"
+           "3. Name it Sound Capsule and enable Launch at startup.\n\n"
+           "This FL option launches Sound Capsule with FL Studio, not at system login.\n\n"
+           "Required MIDI bridge:\n\n"
+           "Open Options > MIDI Settings, enable the Sound Capsule Control input, "
+           "and choose Sound Capsule (user) as its Controller type.\n\n"
+           "These FL assignments only need to be done once.";
+}
+
 class DarkMenuSectionHeader final : public juce::PopupMenu::CustomComponent
 {
 public:
@@ -2150,25 +2343,10 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                 safe->refreshSessionStatus();
                                 return;
                             }
-                            if (appPath.isNotEmpty())
-                                juce::SystemClipboard::copyTextToClipboard(appPath);
-                            auto setupText =
-                                juce::String("Optional auto-open with FL Studio:\n\n")
-                                + "1. Open Options > File settings > External tools.\n"
-                                  "2. Choose an empty row and browse to Sound Capsule.app.\n"
-                                  "3. Name it Sound Capsule and enable Launch at startup.\n\n"
-                                  "This FL option launches Sound Capsule with FL Studio, not at system login.\n\n";
-                            if (appPath.isNotEmpty())
-                                setupText += "The app path is on your clipboard:\n" + appPath + "\n\n";
-                            setupText +=
-                                "Required MIDI bridge:\n\n"
-                                "Open Options > MIDI Settings, enable the Sound Capsule Control input, "
-                                "and choose Sound Capsule (user) as its Controller type.\n\n"
-                                "These FL assignments only need to be done once.";
-                            juce::AlertWindow::showMessageBoxAsync(
-                                juce::MessageBoxIconType::InfoIcon,
-                                "Finish FL Studio setup", setupText,
-                                "Got it", safe.getComponent());
+                            auto* setupDialog = new FinishSetupAlertWindow(
+                                finishSetupInstructions(), appPath, safe.getComponent());
+                            setupDialog->enterModalState(true, nullptr, true);
+                            setupDialog->beginClipboardCopy();
                             safe->refreshSessionStatus();
                             });
                         };
