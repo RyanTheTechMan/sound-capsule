@@ -1907,8 +1907,8 @@ void SoundCapsuleAudioProcessorEditor::offerSetupRepair()
         juce::MessageBoxOptions::makeOptionsOkCancel(
             juce::MessageBoxIconType::WarningIcon,
             "Finish Sound Capsule setup",
-            "The local helper is not ready. Sound Capsule can retry setup, including installing uv "
-            "for your user account if it is missing.",
+            "The local helper is not ready. uv must be installed before Sound Capsule can finish "
+            "setup. Sound Capsule will never download or install uv automatically.",
             "Retry Setup", "uv Instructions", this),
         [safe](int result) {
             if (safe == nullptr)
@@ -1957,7 +1957,7 @@ void SoundCapsuleAudioProcessorEditor::runSetupRepair()
                 error = "Sound Capsule setup timed out.";
             }
             else if (process.getExitCode() != 0)
-                error = "Automatic setup failed. Install uv manually, then choose Retry Setup.";
+                error = "Setup failed. Install uv from the official instructions, then choose Retry Setup.";
         }
         juce::MessageManager::callAsync([safe, error] {
             if (safe == nullptr)

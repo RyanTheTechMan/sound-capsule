@@ -118,7 +118,7 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
         (package / "INSTALL.txt").write_text(
             "Sound Capsule installation\n"
             "==========================\n\n"
-            "1. Install uv from https://docs.astral.sh/uv/.\n"
+            "1. Install uv from https://docs.astral.sh/uv/getting-started/installation/.\n"
             "2. Open a terminal in this extracted folder.\n"
             "3. Run: uv run --python 3.12 scripts/install.py --build .\n\n"
             "Add --with-vst to install the optional VST3 as well. The standalone app,\n"

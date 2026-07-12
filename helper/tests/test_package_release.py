@@ -5,7 +5,20 @@ import unittest
 from scripts.package_release import copy_setup_payload, find_one
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
 class PackageReleaseTests(unittest.TestCase):
+    def test_native_bootstraps_never_download_or_install_uv(self) -> None:
+        instructions = "https://docs.astral.sh/uv/getting-started/installation/"
+        for relative in (
+            "packaging/macos/bootstrap-install.sh",
+            "packaging/windows/bootstrap-install.ps1",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn(instructions, source)
+            self.assertNotIn("astral.sh/uv/install.", source)
+
     def test_find_one_can_select_vst3_bundle_over_inner_windows_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary)

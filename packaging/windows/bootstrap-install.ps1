@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$UvInstallUrl = "https://astral.sh/uv/install.ps1"
+$UvInstructionsUrl = "https://docs.astral.sh/uv/getting-started/installation/"
 $DataRoot = Join-Path $env:LOCALAPPDATA "SoundCapsule"
 $LogRoot = Join-Path $DataRoot "Logs"
 $LogFile = Join-Path $LogRoot "install.log"
@@ -27,6 +27,24 @@ function Find-Uv {
     return $null
 }
 
+function Show-UvRequired {
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $answer = $shell.Popup(
+            "Sound Capsule setup needs uv before it can configure the local helper and FL Studio bridge.`n`nWould you like to open the uv installation page?",
+            0,
+            "uv is required",
+            0x34
+        )
+        if ($answer -eq 6) {
+            Start-Process $UvInstructionsUrl
+        }
+    }
+    catch {
+        Write-Warning "Could not show the uv instructions popup: $($_.Exception.Message)"
+    }
+}
+
 try {
     if ($Uninstall) {
         Write-Host "Removing Sound Capsule per-user runtime integrations"
@@ -45,15 +63,11 @@ try {
     Write-Host "Provisioning Sound Capsule"
     $uv = Find-Uv
     if (-not $uv) {
-        Write-Host "uv was not found; attempting the official latest uv installer"
-        $installer = Join-Path $env:TEMP "sound-capsule-uv-install.ps1"
-        Invoke-WebRequest -UseBasicParsing -Uri $UvInstallUrl -OutFile $installer
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
-        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
-        $uv = Find-Uv
-    }
-    if (-not $uv) {
-        throw "uv could not be located after installation"
+        $message = "uv is required. Install it from $UvInstructionsUrl, then launch Sound Capsule and choose Retry Setup."
+        Set-Content -LiteralPath $FailureFile -Value $message -Encoding UTF8
+        Show-UvRequired
+        Write-Error $message
+        exit 1
     }
 
     $installScript = Join-Path $SetupRoot "scripts\install.py"

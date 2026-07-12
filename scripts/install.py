@@ -72,7 +72,9 @@ def install_helper(root: Path, uv_executable: Path | None = None) -> Path:
     uv = str(uv_executable) if uv_executable is not None else shutil.which("uv")
     if uv is None or not Path(uv).is_file():
         raise FileNotFoundError(
-            "uv was not found; install it from https://docs.astral.sh/uv/ and rerun with `uv run scripts/install.py`"
+            "uv was not found; install it from "
+            "https://docs.astral.sh/uv/getting-started/installation/ "
+            "and rerun with `uv run scripts/install.py`"
         )
     environment = root / "venv"
     subprocess.run(

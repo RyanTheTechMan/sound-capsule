@@ -32,8 +32,9 @@ Download the native installer from the
 
 The installers configure the FL Studio bridge automatically. The optional VST3
 can be selected from the installer component list. If uv is missing, setup explains
-that it is required and attempts to install the latest version for the current user.
-If that fails, launch Sound Capsule to retry or open the manual uv instructions.
+that it is required and offers to open the official installation page. Sound Capsule
+never downloads or installs uv automatically. After installing uv, launch Sound Capsule
+and choose **Retry Setup**.
 
 For a manual installation, download the macOS or Windows ZIP, extract it, open a
 terminal in the extracted folder, and run:

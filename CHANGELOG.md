@@ -18,8 +18,9 @@ No changes yet.
   VST3 component.
 - Per-machine Windows installation in Program Files with Apps & Features,
   Start Menu, optional desktop shortcut, major upgrades, and optional VST3.
-- Installer bootstrap setup that locates or installs the latest uv and provisions
-  the current user's helper environment and FL Studio MIDI bridge.
+- Installer bootstrap setup that requires an existing uv installation, links to
+  the official instructions when it is missing, and provisions the current user's
+  helper environment and FL Studio MIDI bridge without automatically installing uv.
 - Standalone in-app downloading, checksum verification, and handoff to the
   native PKG or MSI updater.
 

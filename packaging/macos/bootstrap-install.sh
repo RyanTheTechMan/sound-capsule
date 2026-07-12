@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-UV_INSTALL_URL="https://astral.sh/uv/install.sh"
+UV_INSTRUCTIONS_URL="https://docs.astral.sh/uv/getting-started/installation/"
 SETUP_ROOT=${SOUNDCAPSULE_SETUP_ROOT:-"/Library/Application Support/SoundCapsule/Setup"}
 INSTALLED_APP=${SOUNDCAPSULE_INSTALLED_APP:-"/Applications/Sound Capsule.app"}
 
@@ -44,22 +44,19 @@ find_uv() {
     return 1
 }
 
+show_uv_required() {
+    result=$(/usr/bin/osascript -e \
+        'display alert "uv is required" message "Sound Capsule setup needs uv before it can configure the local helper and FL Studio bridge. Install uv, then launch Sound Capsule and choose Retry Setup." as warning buttons {"Cancel", "Open uv Installation Page"} default button "Open uv Installation Page"' \
+        2>/dev/null || true)
+    case "$result" in
+        *"Open uv Installation Page"*) /usr/bin/open "$UV_INSTRUCTIONS_URL" >/dev/null 2>&1 || true ;;
+    esac
+}
+
 uv_path=$(find_uv || true)
 if [ -z "$uv_path" ]; then
-    echo "uv was not found; attempting the official latest uv installer"
-    installer=$(mktemp -t sound-capsule-uv.XXXXXX)
-    if ! curl --proto '=https' --tlsv1.2 -LsSf "$UV_INSTALL_URL" -o "$installer" \
-        || ! sh "$installer"; then
-        rm -f "$installer"
-        printf '%s\n' "uv installation failed. Install uv from https://docs.astral.sh/uv/getting-started/installation/ and retry setup." >"$failure_file"
-        exit 1
-    fi
-    rm -f "$installer"
-    uv_path=$(find_uv || true)
-fi
-
-if [ -z "$uv_path" ]; then
-    printf '%s\n' "uv could not be located after installation. Install it from https://docs.astral.sh/uv/getting-started/installation/ and retry setup." >"$failure_file"
+    printf '%s\n' "uv is required. Install it from $UV_INSTRUCTIONS_URL, then launch Sound Capsule and choose Retry Setup." >"$failure_file"
+    show_uv_required
     exit 1
 fi
 
