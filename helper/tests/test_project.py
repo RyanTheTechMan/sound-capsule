@@ -793,7 +793,7 @@ class ProjectServiceTests(unittest.TestCase):
             with self.assertRaises(FLPUnsupportedError):
                 service.capture("Future", project_path=source, preview_wav=preview)
 
-    def test_fl25_windows_range_allows_capture(self) -> None:
+    def test_fl25_windows_build_allows_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             project = fixture_project()
@@ -951,12 +951,19 @@ class ProjectServiceTests(unittest.TestCase):
                 ["Serum Lead", "Kick"],
             )
 
-    def test_mutation_profiles_cover_verified_major_ranges(self) -> None:
+    def test_mutation_profiles_cover_only_verified_host_builds(self) -> None:
+        self.assertEqual(require_mutation_profile("25.2.5.5055").name, "fl25")
         self.assertEqual(require_mutation_profile("25.2.5.5319").name, "fl25")
-        self.assertEqual(require_mutation_profile("25.9.0.1").name, "fl25")
+        self.assertEqual(require_mutation_profile("26.1.0.5294").name, "fl26")
         self.assertEqual(require_mutation_profile("26.1.0.5530").name, "fl26")
-        self.assertEqual(require_mutation_profile("26.9.0.1").name, "fl26")
-        for unsupported in ("25.2.5.5054", "26.1.0.5293", "27.0.0", "unknown"):
+        for unsupported in (
+            "25.2.5.5054",
+            "25.9.0.1",
+            "26.1.0.5293",
+            "26.9.0.1",
+            "27.0.0",
+            "unknown",
+        ):
             with self.subTest(unsupported=unsupported), self.assertRaises(
                 FLPUnsupportedError
             ):

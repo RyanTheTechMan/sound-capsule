@@ -189,7 +189,7 @@ class BridgeQueue:
         windows_host_alive = sys.platform == "win32" and _windows_process_is_running(
             session.host_pid, session.host_executable
         )
-        if sys.platform == "win32" and not session.bridge_active:
+        if not session.bridge_active:
             raise RuntimeError("FL Studio bridge is disabled; enable the Sound Capsule MIDI script")
         if time.time() - session.timestamp > maximum_age and not windows_host_alive:
             raise RuntimeError("FL Studio bridge session is stale; enable the Sound Capsule MIDI script")
