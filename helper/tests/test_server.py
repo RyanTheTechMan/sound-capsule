@@ -208,12 +208,12 @@ class ServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             settings = Settings(data_dir=Path(temporary), server_port=0)
             with SoundCapsuleServer(settings) as server:
-                server._update_import_progress(
+                server._update_operation_progress(
                     "operation-1", 72, "Writing and validating the updated project"
                 )
                 payload = server.dispatch(
                     {
-                        "command": "import_status",
+                        "command": "operation_status",
                         "args": {"operation_id": "operation-1"},
                     }
                 )
@@ -222,6 +222,50 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(payload["progress"], 72)
             self.assertEqual(payload["operation_id"], "operation-1")
             self.assertIn("validating", payload["step"])
+
+    def test_capture_progress_reports_success_and_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            with SoundCapsuleServer(settings) as server:
+                def successful_capture(*_args, progress_callback, **_kwargs):
+                    progress_callback(18, "Reading and validating the FL Studio project")
+                    progress_callback(94, "Indexing the capsule library")
+                    return []
+
+                with mock.patch.object(
+                    server.service, "capture", side_effect=successful_capture
+                ):
+                    result = server.dispatch({
+                        "command": "capture",
+                        "args": {"name": "Lead", "operation_id": "capture-success"},
+                    })
+                success = server.dispatch({
+                    "command": "operation_status",
+                    "args": {"operation_id": "capture-success"},
+                })
+                self.assertEqual(result["operation_id"], "capture-success")
+                self.assertFalse(success["active"])
+                self.assertEqual(success["progress"], 100)
+                self.assertEqual(success["step"], "Capsule saved")
+
+                def failed_capture(*_args, progress_callback, **_kwargs):
+                    progress_callback(24, "Reading the selected channels and pattern")
+                    raise RuntimeError("render failed")
+
+                with mock.patch.object(
+                    server.service, "capture", side_effect=failed_capture
+                ), self.assertRaisesRegex(RuntimeError, "render failed"):
+                    server.dispatch({
+                        "command": "capture",
+                        "args": {"name": "Lead", "operation_id": "capture-failure"},
+                    })
+                failure = server.dispatch({
+                    "command": "operation_status",
+                    "args": {"operation_id": "capture-failure"},
+                })
+                self.assertFalse(failure["active"])
+                self.assertEqual(failure["step"], "Capture failed")
+                self.assertEqual(failure["error"], "render failed")
 
     def test_save_request_is_atomic_and_short_lived(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -472,6 +516,9 @@ class ServerTests(unittest.TestCase):
                             "waveform_channels": "stereo",
                             "import_destination": "new_pattern",
                             "volume_display": "db",
+                            "start_preview_at_first_audio": False,
+                            "normalize_waveform_display": True,
+                            "show_single_channel_name_in_rename": True,
                             "check_updates_on_startup": False,
                         },
                     }
@@ -480,11 +527,17 @@ class ServerTests(unittest.TestCase):
                 runtime_waveform = server.service.settings.waveform_channels
                 runtime_destination = server.service.settings.import_destination
                 runtime_volume_display = server.service.settings.volume_display
+                runtime_start_at_audio = server.service.settings.start_preview_at_first_audio
+                runtime_normalize = server.service.settings.normalize_waveform_display
+                runtime_show_single = server.service.settings.show_single_channel_name_in_rename
                 runtime_update_check = server.service.settings.check_updates_on_startup
                 persisted = server.dispatch({"command": "setup_status", "args": {}})
 
             self.assertFalse(initial["setup_complete"])
             self.assertTrue(initial["check_updates_on_startup"])
+            self.assertTrue(initial["start_preview_at_first_audio"])
+            self.assertFalse(initial["normalize_waveform_display"])
+            self.assertFalse(initial["show_single_channel_name_in_rename"])
             self.assertTrue(persisted["setup_complete"])
             self.assertEqual(persisted["setup_version"], 2)
             self.assertEqual(persisted["undo_window_minutes"], 25)
@@ -495,6 +548,12 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(persisted["import_destination"], "new_pattern")
             self.assertEqual(runtime_volume_display, "db")
             self.assertEqual(persisted["volume_display"], "db")
+            self.assertFalse(runtime_start_at_audio)
+            self.assertFalse(persisted["start_preview_at_first_audio"])
+            self.assertTrue(runtime_normalize)
+            self.assertTrue(persisted["normalize_waveform_display"])
+            self.assertTrue(runtime_show_single)
+            self.assertTrue(persisted["show_single_channel_name_in_rename"])
             self.assertFalse(runtime_update_check)
             self.assertFalse(persisted["check_updates_on_startup"])
 

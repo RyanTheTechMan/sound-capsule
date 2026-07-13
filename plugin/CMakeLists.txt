@@ -47,6 +47,20 @@ target_link_libraries(SoundCapsule PRIVATE
     juce::juce_recommended_warning_flags
 )
 
+juce_add_console_app(SoundCapsulePreviewTests
+    PRODUCT_NAME "Sound Capsule Preview Tests"
+)
+target_sources(SoundCapsulePreviewTests PRIVATE
+    tests/PreviewMathTests.cpp
+    src/PreviewMath.h
+)
+target_include_directories(SoundCapsulePreviewTests PRIVATE src)
+target_link_libraries(SoundCapsulePreviewTests PRIVATE
+    juce::juce_audio_basics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags
+)
+
 if(APPLE)
     add_custom_command(TARGET SoundCapsule_VST3 POST_BUILD
         COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:SoundCapsule_VST3>"

@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "PreviewMath.h"
 #include "CapsulePreviewSource.h"
 
 #include <cmath>
@@ -96,6 +97,8 @@ SoundCapsuleAudioProcessor::decodePreviewFile(const juce::File& file)
     if (!reader->read(&decoded->audio, 0, decoded->audio.getNumSamples(), 0, true, true))
         return {};
     decoded->sampleRate = reader->sampleRate;
+    decoded->firstAudibleProportion = soundcapsule::preview::firstAudibleProportion(
+        decoded->audio, decoded->sampleRate);
     return decoded;
 }
 
@@ -162,11 +165,14 @@ bool SoundCapsuleAudioProcessor::loadPreviewFile(const juce::File& file, bool de
     return true;
 }
 
-void SoundCapsuleAudioProcessor::playPreview(double normalizedStart)
+void SoundCapsuleAudioProcessor::playPreview(double normalizedStart, bool startAtFirstAudio)
 {
     const juce::ScopedLock lock(previewLock);
+    normalizedStart = soundcapsule::preview::startProportion(
+        normalizedStart, startAtFirstAudio,
+        activePreview != nullptr ? activePreview->firstAudibleProportion : 0.0);
     const auto length = previewTransport.getLengthInSeconds();
-    previewTransport.setPosition(length * juce::jlimit(0.0, 1.0, normalizedStart));
+    previewTransport.setPosition(length * normalizedStart);
     previewTransport.start();
 }
 

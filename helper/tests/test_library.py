@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -127,7 +129,92 @@ class LibraryTests(unittest.TestCase):
                 (note for note in project.pattern_notes()[3] if note.rack_channel == 2),
                 key=lambda note: (note.position, note.key),
             )[0]
-            self.assertAlmostEqual(note_preview[0][0], source_note.position / (4 * project.ppq), places=6)
+            note_end = source_note.position + source_note.length
+            self.assertAlmostEqual(note_preview[0][0], source_note.position / note_end, places=6)
+            self.assertEqual(json.loads(row["channel_names"]), ["Lead"])
+
+    def test_v2_midi_preview_uses_tempo_and_audio_tail_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview, duration_seconds=4.0)
+            project = fixture_project()
+            capsule = Capsule.build(
+                root / "library" / "Lead.flcapsule", name="Lead",
+                project=project, channel_ids=[2], pattern_id=3,
+                pattern_length_steps=16, preview_wav=preview,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+            library.reindex()
+
+            row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
+            notes = json.loads(row["note_preview"])
+            note_end = 24 + 96
+            midi_seconds = note_end * 60.0 / (project.ppq * project.tempo_bpm)
+
+            self.assertAlmostEqual(notes[0][0], 24 / note_end, places=6)
+            self.assertAlmostEqual(notes[0][1], 96 / note_end, places=6)
+            self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
+
+    def test_v1_midi_preview_keeps_legacy_pattern_length_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview, duration_seconds=4.0)
+            capsule = Capsule.build(
+                root / "library" / "Legacy.flcapsule", name="Legacy",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                pattern_length_steps=16, preview_wav=preview,
+            )
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist() if name != "checksums.json"
+                }
+            manifest = json.loads(members["manifest.json"])
+            manifest["schema_version"] = 1
+            manifest.pop("source_tempo_bpm", None)
+            members["manifest.json"] = json.dumps(manifest).encode()
+            checksums = {
+                name: hashlib.sha256(data).hexdigest() for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+                target.writestr("checksums.json", json.dumps(checksums))
+
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+            library.reindex()
+            row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
+            notes = json.loads(row["note_preview"])
+            legacy_end = 16 * fixture_project().ppq / 4
+
+            self.assertAlmostEqual(notes[0][0], 24 / legacy_end, places=6)
+            self.assertAlmostEqual(row["midi_playback_end"], 120 / legacy_end, places=6)
+
+    def test_grouped_rename_updates_title_and_every_channel_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "library" / "Group.flcapsule", name="Group",
+                project=fixture_project(), channel_ids=[2, 5], pattern_id=3,
+                preview_wav=preview,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+            library.reindex()
+
+            library.rename(capsule.manifest.id, "New title", ["Lead layer", "Kick layer"])
+
+            updated = library.find(capsule.manifest.id).manifest
+            self.assertEqual(updated.name, "New title")
+            self.assertEqual(
+                [channel.name for channel in updated.channels],
+                ["Lead layer", "Kick layer"],
+            )
+            with self.assertRaisesRegex(ValueError, "match every capsule channel"):
+                library.rename(capsule.manifest.id, "Invalid", ["Only one"])
 
     def test_grouped_note_preview_retains_channel_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

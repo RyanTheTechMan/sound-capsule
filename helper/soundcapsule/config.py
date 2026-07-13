@@ -39,6 +39,9 @@ class Settings:
     waveform_channels: str = "mono"
     import_destination: str = "current_pattern"
     volume_display: str = "percent"
+    start_preview_at_first_audio: bool = True
+    normalize_waveform_display: bool = False
+    show_single_channel_name_in_rename: bool = False
     check_updates_on_startup: bool = True
     server_host: str = "127.0.0.1"
     server_port: int = 51943

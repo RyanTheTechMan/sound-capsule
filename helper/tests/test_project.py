@@ -14,9 +14,11 @@ from soundcapsule.compatibility import require_mutation_profile
 from soundcapsule.config import Settings
 from soundcapsule.flp import (
     EVENT_FL_VERSION,
+    EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PROJECT_DATA_PATH,
     FLPFile,
     FLPUnsupportedError,
+    parse_text,
     text_event,
 )
 from soundcapsule.project import CapsuleService, ProjectLocator
@@ -33,7 +35,16 @@ class ProjectServiceTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "Song.flp"
             source.write_bytes(fixture_project().to_bytes())
-            settings = Settings(data_dir=root / "data", project_roots=[root])
+            connected_executable = root / "FL Studio 2025" / "FL64.exe"
+            connected_executable.parent.mkdir()
+            connected_executable.write_bytes(b"connected FL")
+            configured_executable = root / "FL Studio 2026" / "FL64.exe"
+            configured_executable.parent.mkdir()
+            configured_executable.write_bytes(b"configured latest FL")
+            settings = Settings(
+                data_dir=root / "data", project_roots=[root],
+                fl_executable=configured_executable,
+            )
             service = CapsuleService(settings)
             session = BridgeSession(
                 timestamp=time.time(), project_title="Song", midi_api_version=42,
@@ -42,18 +53,20 @@ class ProjectServiceTests(unittest.TestCase):
                 ppq=96, changed=0, save_sequence=1,
                 last_save_requested_at=time.time(), load_sequence=1,
                 last_load_status=100, last_load_at=time.time(),
-                host_name="FL Studio 2026", host_executable="C:/FL64.exe",
+                host_name="FL Studio 2025", host_executable=str(connected_executable),
                 host_pid=1234,
             )
 
             def fake_render(_project, output, *, fl_executable, host_pid):
                 self.assertEqual(host_pid, session.host_pid)
+                self.assertEqual(fl_executable, connected_executable)
+                self.assertNotEqual(fl_executable, configured_executable)
                 write_silence(output)
                 return output
 
             with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
-                "soundcapsule.project.render_project", side_effect=fake_render
-            ):
+                "soundcapsule.project.platform.system", return_value="Windows"
+            ), mock.patch("soundcapsule.project.render_project", side_effect=fake_render):
                 capsules = service.capture("Lead")
 
             self.assertEqual(len(capsules), 1)
@@ -447,6 +460,65 @@ class ProjectServiceTests(unittest.TestCase):
             merged = FLPFile.read(result.merged_project)
             self.assertEqual(merged.channel_count, 3)
             self.assertEqual(result.channel_mapping, {2: 6})
+            self.assertEqual(merged.channel_sections()[-1].name, "Lead")
+
+    def test_import_applies_saved_channel_names_for_append_and_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Layers.flcapsule", name="Layer capsule",
+                project=fixture_project(), channel_ids=[2, 5], pattern_id=3,
+                preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+            service.library.reindex()
+            service.library.rename(
+                capsule.manifest.id, "Layer capsule", ["Saved lead", "Saved kick"]
+            )
+
+            append_target = root / "Append.flp"
+            append_target.write_bytes(fixture_project().to_bytes())
+            appended = service.import_capsule(
+                capsule.manifest.id, mode="append", project_path=append_target,
+                open_project=False,
+            )
+            appended_sections = FLPFile.read(appended.merged_project).channel_sections()
+            self.assertEqual(
+                [section.name for section in appended_sections[-2:]],
+                ["Saved lead", "Saved kick"],
+            )
+
+            override_target = root / "Override.flp"
+            override_target.write_bytes(fixture_project().to_bytes())
+            overridden = service.import_capsule(
+                capsule.manifest.id, mode="override", project_path=override_target,
+                target_channels=[2, 5], pattern_id=3, open_project=False,
+            )
+            overridden_sections = FLPFile.read(overridden.merged_project).channel_sections()
+            self.assertEqual(
+                [section.name for section in overridden_sections],
+                ["Saved lead", "Saved kick"],
+            )
+            self.assertEqual(
+                [
+                    next(
+                        parse_text(event.payload) for event in section.events
+                        if event.id == EVENT_PLUGIN_INTERNAL_NAME
+                    )
+                    for section in overridden_sections
+                ],
+                [
+                    next(
+                        parse_text(event.payload) for event in section.events
+                        if event.id == EVENT_PLUGIN_INTERNAL_NAME
+                    )
+                    for section in fixture_project().channel_sections()
+                ],
+            )
 
     def test_newer_fl_capsule_can_be_tried_after_ui_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -655,6 +727,90 @@ class ProjectServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(len(capsules), 1)
+
+    def test_windows_capture_never_falls_back_to_another_fl_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            configured_executable = root / "FL Studio 2026" / "FL64.exe"
+            configured_executable.parent.mkdir()
+            configured_executable.write_bytes(b"configured latest FL")
+            service = CapsuleService(Settings(
+                data_dir=root / "data", project_roots=[root],
+                fl_executable=configured_executable,
+            ))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+                ppq=96, changed=0, save_sequence=1,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                host_name="", host_executable=str(root / "missing" / "FL64.exe"),
+                host_pid=1234,
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.platform.system", return_value="Windows"
+            ), mock.patch("soundcapsule.project.render_project") as render:
+                with self.assertRaisesRegex(
+                    FLPUnsupportedError, "connected FL Studio executable"
+                ):
+                    service.capture("Lead")
+
+            render.assert_not_called()
+
+    def test_capture_reports_detailed_progress_and_single_channel_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            updates: list[tuple[int, str]] = []
+
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+                ppq=96, changed=0, save_sequence=1,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(), channel_count=2,
+                channel_names=["Serum Lead", "Kick"],
+            )
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                capsules = service.capture(
+                    "Custom capture", preview_wav=preview,
+                    progress_callback=lambda value, step: updates.append((value, step)),
+                )
+
+            self.assertEqual(updates[0], (3, "Locating the current FL Studio project"))
+            self.assertIn("validating", " ".join(step for _, step in updates))
+            self.assertIn("Packaging", " ".join(step for _, step in updates))
+            self.assertEqual(updates[-1], (100, "Capsule saved"))
+            self.assertEqual(capsules[0].manifest.name, "Custom capture")
+            self.assertEqual(capsules[0].manifest.channels[0].name, "Custom capture")
+
+            individual_updates: list[tuple[int, str]] = []
+            individual = service.capture(
+                "Ignored group title", project_path=source, preview_wav=preview,
+                individually=True,
+                progress_callback=lambda value, step: individual_updates.append(
+                    (value, step)
+                ),
+            )
+            individual_steps = " ".join(step for _, step in individual_updates)
+            self.assertIn("Packaging Serum Lead", individual_steps)
+            self.assertIn("Packaging Kick", individual_steps)
+            self.assertEqual(
+                [capsule.manifest.name for capsule in individual],
+                ["Serum Lead", "Kick"],
+            )
 
     def test_mutation_profiles_cover_verified_major_ranges(self) -> None:
         self.assertEqual(require_mutation_profile("25.2.5.5319").name, "fl25")

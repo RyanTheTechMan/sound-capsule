@@ -23,6 +23,7 @@ from soundcapsule.flp import (
     EVENT_PADDING,
     EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PLUGIN_NAME,
+    EVENT_TEMPO,
     FLPFile,
     FORMAT_PROJECT,
     NOTE_STRUCT,
@@ -59,6 +60,7 @@ def fixture_project(*, ppq: int = 96) -> FLPFile:
     note_b = note(5, position=192, length=48, key=67)
     events = [
         text_event(EVENT_FL_VERSION, "25.2.5.5055", unicode_text=False),
+        scalar_event(EVENT_TEMPO, 130_000),
         scalar_event(EVENT_CURRENT_PATTERN, 3),
         scalar_event(EVENT_CHANNEL_NEW, 2),
         scalar_event(EVENT_CHANNEL_TYPE, 2),
@@ -87,15 +89,38 @@ def fixture_project(*, ppq: int = 96) -> FLPFile:
     return FLPFile(FORMAT_PROJECT, 2, ppq, events)
 
 
-def write_silence(path: Path) -> None:
+def write_silence(path: Path, duration_seconds: float | None = None) -> None:
     with wave.open(str(path), "wb") as output:
         output.setnchannels(2)
         output.setsampwidth(2)
         output.setframerate(44_100)
-        output.writeframes(b"\0\0\0\0" * 256)
+        frames = 256 if duration_seconds is None else round(44_100 * duration_seconds)
+        output.writeframes(b"\0\0\0\0" * frames)
 
 
 class FLPRoundTripTests(unittest.TestCase):
+    def test_tempo_and_user_channel_rename_preserve_plugin_identity(self) -> None:
+        project = fixture_project()
+        original = project.channel_sections()[0]
+        renamed = original.with_name("Saved Capsule Title")
+
+        self.assertEqual(project.tempo_bpm, 130.0)
+        self.assertEqual(renamed.name, "Saved Capsule Title")
+        self.assertEqual(
+            next(
+                event.payload for event in renamed.events
+                if event.id == EVENT_PLUGIN_INTERNAL_NAME
+            ),
+            next(
+                event.payload for event in original.events
+                if event.id == EVENT_PLUGIN_INTERNAL_NAME
+            ),
+        )
+        self.assertEqual(
+            next(event.payload for event in renamed.events if event.id == 213),
+            next(event.payload for event in original.events if event.id == 213),
+        )
+
     def test_fl26_three_byte_event_172_does_not_hide_pattern_notes(self) -> None:
         expected_note = note(4, position=48, length=48, key=65, flags=0x4000)
         source = FLPFile(
@@ -363,8 +388,13 @@ class CapsuleTests(unittest.TestCase):
             capsule.verify()
             manifest = capsule.manifest
             self.assertEqual(manifest.name, "Lead")
+            self.assertEqual(manifest.schema_version, 2)
+            self.assertEqual(manifest.source_tempo_bpm, 130.0)
             self.assertEqual(manifest.tags, ["dark", "lead"])
             self.assertEqual([channel.source_iid for channel in manifest.channels], [2, 5])
+            self.assertEqual(
+                [channel.name for channel in manifest.channels], ["Serum Lead", "Kick"]
+            )
             self.assertEqual(capsule.read_channel_state(manifest.channels[0]).format, 0x20)
             self.assertEqual(capsule.read_notes(manifest.channels[0])[0].to_dict()["mod_y"], 55)
             self.assertTrue(capsule.extract_preview(root / "cache").is_file())
@@ -373,6 +403,51 @@ class CapsuleTests(unittest.TestCase):
                     archive.getinfo(manifest.preview_path).compress_type,
                     zipfile.ZIP_STORED,
                 )
+
+    def test_single_channel_title_is_stored_as_the_channel_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+
+            capsule = Capsule.build(
+                root / "Custom.flcapsule", name="Custom title",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+
+            self.assertEqual(capsule.manifest.name, "Custom title")
+            self.assertEqual(capsule.manifest.channels[0].name, "Custom title")
+
+    def test_schema_one_capsule_remains_readable_without_tempo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Legacy.flcapsule", name="Legacy", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist() if name != "checksums.json"
+                }
+            manifest = json.loads(members["manifest.json"])
+            manifest["schema_version"] = 1
+            manifest.pop("source_tempo_bpm", None)
+            members["manifest.json"] = json.dumps(manifest).encode()
+            checksums = {
+                name: hashlib.sha256(data).hexdigest() for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+                target.writestr("checksums.json", json.dumps(checksums))
+
+            capsule.verify()
+            self.assertEqual(capsule.manifest.schema_version, 1)
+            self.assertIsNone(capsule.manifest.source_tempo_bpm)
 
     def test_capsule_rejects_newer_schema_even_with_valid_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -386,7 +461,7 @@ class CapsuleTests(unittest.TestCase):
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist() if name != "checksums.json"}
             manifest = json.loads(members["manifest.json"])
-            manifest["schema_version"] = 2
+            manifest["schema_version"] = 3
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
             with zipfile.ZipFile(capsule.path, "w") as target:

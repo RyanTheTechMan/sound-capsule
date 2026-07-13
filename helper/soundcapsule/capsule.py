@@ -11,12 +11,13 @@ import re
 import shutil
 import tempfile
 import uuid
+import wave
 import zipfile
 
 from .flp import FLPFile, NoteRecord
 
 
-CAPSULE_SCHEMA_VERSION = 1
+CAPSULE_SCHEMA_VERSION = 2
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
@@ -53,6 +54,7 @@ class CapsuleManifest:
     save_mode: str
     channels: list[ChannelManifest]
     source_pattern_length_steps: int | None = None
+    source_tempo_bpm: float | None = None
     preview_path: str = "preview.wav"
     tags: list[str] = field(default_factory=list)
     favorite: bool = False
@@ -80,6 +82,7 @@ class CapsuleManifest:
             save_mode=save_mode,
             channels=channels,
             source_pattern_length_steps=pattern_length_steps,
+            source_tempo_bpm=project.tempo_bpm,
         )
 
     def to_dict(self) -> dict:
@@ -103,7 +106,7 @@ class CapsuleManifest:
         return manifest
 
     def validate(self) -> None:
-        if self.schema_version != CAPSULE_SCHEMA_VERSION:
+        if self.schema_version not in {1, CAPSULE_SCHEMA_VERSION}:
             relation = "newer" if self.schema_version > CAPSULE_SCHEMA_VERSION else "unsupported legacy"
             raise ValueError(f"{relation} capsule schema {self.schema_version}; supported schema is {CAPSULE_SCHEMA_VERSION}")
         try:
@@ -116,6 +119,10 @@ class CapsuleManifest:
             raise ValueError("capsule PPQ must be positive")
         if self.source_pattern_length_steps is not None and self.source_pattern_length_steps <= 0:
             raise ValueError("capsule pattern length must be positive")
+        if self.schema_version >= 2 and (
+            self.source_tempo_bpm is None or not 10.0 <= self.source_tempo_bpm <= 999.0
+        ):
+            raise ValueError("capsule source tempo must be between 10 and 999 BPM")
         if self.save_mode not in {"group", "individual"}:
             raise ValueError("capsule save_mode must be group or individual")
         if not self.channels:
@@ -196,6 +203,16 @@ class Capsule:
         manifest = self.manifest
         with zipfile.ZipFile(self.path) as archive:
             return str(json.loads(archive.read("checksums.json"))[manifest.preview_path])
+
+    def preview_duration_seconds(self) -> float | None:
+        manifest = self.manifest
+        try:
+            with zipfile.ZipFile(self.path) as archive, archive.open(manifest.preview_path) as source:
+                with wave.open(source, "rb") as reader:
+                    rate = reader.getframerate()
+                    return reader.getnframes() / rate if rate > 0 else None
+        except (KeyError, OSError, ValueError, wave.Error):
+            return None
 
     def export_preview(self, destination: Path) -> Path:
         manifest = self.manifest
@@ -292,6 +309,9 @@ class Capsule:
                     sample_asset=asset_path,
                 )
             )
+
+        if len(channel_manifests) == 1:
+            channel_manifests[0].name = name
 
         manifest = CapsuleManifest.create(
             name=name,

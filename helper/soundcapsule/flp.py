@@ -30,6 +30,7 @@ EVENT_CHANNEL_ENABLED = 0
 EVENT_PROJECT_LOOP_MODE = 9
 EVENT_PATTERN_NEW = 65
 EVENT_CURRENT_PATTERN = 67
+EVENT_TEMPO = 156
 EVENT_CHANNEL_TYPE = 21
 EVENT_CHANNEL_ROUTED_TO = 22
 EVENT_CHANNEL_NAME_LEGACY = 192
@@ -370,6 +371,24 @@ class ChannelSection:
         events.append(replacement)
         return ChannelSection(self.iid, tuple(events))
 
+    def with_name(self, name: str, *, unicode_text: bool = True) -> "ChannelSection":
+        name = name.strip()
+        if not name:
+            raise ValueError("channel name cannot be empty")
+        replacement = text_event(EVENT_PLUGIN_NAME, name, unicode_text=unicode_text)
+        events = list(self.events)
+        for index, event in enumerate(events):
+            if event.id == EVENT_PLUGIN_NAME:
+                events[index] = replacement
+                return ChannelSection(self.iid, tuple(events))
+        insert_at = next(
+            (index + 1 for index, event in enumerate(events)
+             if event.id == EVENT_PLUGIN_INTERNAL_NAME),
+            len(events),
+        )
+        events.insert(insert_at, replacement)
+        return ChannelSection(self.iid, tuple(events))
+
     def with_enabled(self, enabled: bool) -> "ChannelSection":
         events = list(self.events)
         for index, event in enumerate(events):
@@ -433,6 +452,14 @@ class FLPFile:
             if event.id == EVENT_FL_VERSION:
                 return parse_text(event.payload)
         return ""
+
+    @property
+    def tempo_bpm(self) -> float | None:
+        for event in self.events:
+            if event.id == EVENT_TEMPO:
+                tempo = event.scalar / 1000.0
+                return tempo if 10.0 <= tempo <= 999.0 else None
+        return None
 
     @property
     def current_pattern(self) -> int:

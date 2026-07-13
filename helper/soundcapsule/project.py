@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import platform
 import sqlite3
 import tempfile
 import time
@@ -163,30 +164,55 @@ class CapsuleService:
         preview_wav: Path | None = None,
         individually: bool = False,
         tags: list[str] | None = None,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> list[Capsule]:
+        def progress(value: int, step: str) -> None:
+            if progress_callback is not None:
+                progress_callback(value, step)
+
+        progress(3, "Locating the current FL Studio project")
         session = self.bridge.session() if project_path is None else None
         project_path = self._resolve_project(project_path, session)
+        progress(12, "Staging the saved project")
         staged_source, _ = self._stage_project(project_path, "capture")
+        progress(18, "Reading and validating the FL Studio project")
         project = FLPFile.read(staged_source)
         require_mutation_profile(project.fl_version)
+        if project.tempo_bpm is None:
+            raise FLPUnsupportedError("the project does not contain a supported static tempo")
+        progress(24, "Reading the selected channels and pattern")
         channel_ids = self._session_channel_ids(project, session) if session else [section.iid for section in project.channel_sections()]
         pattern_id = session.current_pattern if session else project.current_pattern
         if not channel_ids:
             raise FLPUnsupportedError("select at least one Channel Rack channel")
 
+        render_executable = self.settings.fl_executable
+        if preview_wav is None and session is not None and platform.system() == "Windows":
+            render_executable = self._windows_host_executable(session)
+            if render_executable is None:
+                raise FLPUnsupportedError(
+                    "could not identify the connected FL Studio executable; "
+                    "reload the updated Sound Capsule MIDI script"
+                )
+
         captures = [[iid] for iid in channel_ids] if individually else [channel_ids]
         results: list[Capsule] = []
-        for selected in captures:
+        for capture_index, selected in enumerate(captures):
+            start = 28 + round(capture_index * 62 / len(captures))
+            finish = 28 + round((capture_index + 1) * 62 / len(captures))
             selected_name = name if not individually else next(section.name for section in project.channel_sections() if section.iid == selected[0])
             selected_preview = preview_wav
             if selected_preview is None:
+                progress(start, f"Preparing preview for {selected_name}")
                 staged = self._build_preview_project(project, selected, pattern_id, selected_name)
+                progress(start + max(1, (finish - start) // 8), f"Rendering preview for {selected_name}")
                 selected_preview = render_project(
                     staged,
                     self.settings.staging_dir / f"{slugify(selected_name)}.wav",
-                    fl_executable=self.settings.fl_executable,
+                    fl_executable=render_executable,
                     host_pid=session.host_pid if session is not None else None,
                 )
+            progress(max(start + 1, finish - 8), f"Packaging {selected_name}")
             destination = unique_capsule_path(self.settings.library_dir, selected_name)
             results.append(
                 Capsule.build(
@@ -201,7 +227,10 @@ class CapsuleService:
                     tags=tags,
                 )
             )
+            progress(finish, f"Saved {selected_name}")
+        progress(94, "Indexing the capsule library")
         self.library.reindex()
+        progress(100, "Capsule saved")
         return results
 
     def _build_preview_project(self, source: FLPFile, channel_ids: list[int], pattern_id: int, name: str) -> Path:
@@ -250,6 +279,7 @@ class CapsuleService:
             )
             if asset is not None:
                 state_section = state_section.with_sample_path(str(asset), unicode_text=True)
+            state_section = state_section.with_name(channel.name, unicode_text=True)
             # Restore the original ID stored in the manifest for deterministic mapping.
             section = state_section.remap(channel.source_iid)
             sections.append(section)
@@ -632,7 +662,6 @@ class CapsuleService:
         return None
 
     def _open(self, path: Path, session: BridgeSession | None = None) -> None:
-        import platform
         import subprocess
         if platform.system() == "Darwin":
             application = (

@@ -52,7 +52,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         self.session_project_token: str | None = None
         self.session_project_path: Path | None = None
         self.session_project_resolution: str | None = None
-        self.import_progress: dict = {
+        self.operation_progress: dict = {
             "operation_id": None,
             "active": False,
             "progress": 0,
@@ -131,7 +131,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         ).start()
         return None
 
-    def _update_import_progress(
+    def _update_operation_progress(
         self,
         operation_id: str,
         progress: int,
@@ -141,7 +141,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         error: str | None = None,
     ) -> None:
         with self.progress_lock:
-            self.import_progress = {
+            self.operation_progress = {
                 "operation_id": operation_id,
                 "active": active,
                 "progress": max(0, min(100, int(progress))),
@@ -325,6 +325,9 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "waveform_channels": current.waveform_channels,
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
+                "start_preview_at_first_audio": current.start_preview_at_first_audio,
+                "normalize_waveform_display": current.normalize_waveform_display,
+                "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
                 "check_updates_on_startup": current.check_updates_on_startup,
                 "library_dir": str(current.library_dir),
                 "app_path": str(current.app_path) if current.app_path else None,
@@ -345,6 +348,16 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 volume_display = str(
                     args.get("volume_display", current.volume_display)
                 )
+                start_preview_at_first_audio = bool(args.get(
+                    "start_preview_at_first_audio", current.start_preview_at_first_audio
+                ))
+                normalize_waveform_display = bool(args.get(
+                    "normalize_waveform_display", current.normalize_waveform_display
+                ))
+                show_single_channel_name_in_rename = bool(args.get(
+                    "show_single_channel_name_in_rename",
+                    current.show_single_channel_name_in_rename,
+                ))
                 check_updates_on_startup = bool(
                     args.get("check_updates_on_startup", current.check_updates_on_startup)
                 )
@@ -364,6 +377,9 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 current.waveform_channels = waveform_channels
                 current.import_destination = import_destination
                 current.volume_display = volume_display
+                current.start_preview_at_first_audio = start_preview_at_first_audio
+                current.normalize_waveform_display = normalize_waveform_display
+                current.show_single_channel_name_in_rename = show_single_channel_name_in_rename
                 current.check_updates_on_startup = check_updates_on_startup
                 current.auto_open_with_fl = False  # Retired process-watcher preference.
                 current.save()
@@ -376,6 +392,9 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.settings.waveform_channels = current.waveform_channels
                 self.settings.import_destination = current.import_destination
                 self.settings.volume_display = current.volume_display
+                self.settings.start_preview_at_first_audio = current.start_preview_at_first_audio
+                self.settings.normalize_waveform_display = current.normalize_waveform_display
+                self.settings.show_single_channel_name_in_rename = current.show_single_channel_name_in_rename
                 self.settings.check_updates_on_startup = current.check_updates_on_startup
                 self.settings.auto_open_with_fl = current.auto_open_with_fl
             return {
@@ -385,12 +404,15 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "waveform_channels": current.waveform_channels,
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
+                "start_preview_at_first_audio": current.start_preview_at_first_audio,
+                "normalize_waveform_display": current.normalize_waveform_display,
+                "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
                 "check_updates_on_startup": current.check_updates_on_startup,
             }
-        if command == "import_status":
+        if command in {"operation_status", "import_status"}:
             requested_id = str(args.get("operation_id", ""))
             with self.progress_lock:
-                progress = dict(self.import_progress)
+                progress = dict(self.operation_progress)
             if requested_id and progress.get("operation_id") != requested_id:
                 return {
                     "operation_id": requested_id,
@@ -421,8 +443,15 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.service.library.set_favorite(args["id"], bool(args["value"]))
             return {}
         if command == "rename":
+            channel_names = args.get("channel_names")
+            if channel_names is not None and not isinstance(channel_names, list):
+                raise ValueError("channel_names must be a list")
             with self.operation_lock:
-                self.service.library.rename(args["id"], args["name"])
+                self.service.library.rename(
+                    args["id"], str(args["name"]).strip(),
+                    [str(name).strip() for name in channel_names]
+                    if channel_names is not None else None,
+                )
             return {}
         if command == "tags":
             with self.operation_lock:
@@ -446,18 +475,35 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             raw_tags = args.get("tags", [])
             if not isinstance(raw_tags, list):
                 raise ValueError("capture tags must be a list")
-            with self.operation_lock:
-                capsules = self.service.capture(
-                    str(args.get("name", "Sound Capsule"))[:200],
-                    project_path=Path(args["project"]) if args.get("project") else None,
-                    preview_wav=Path(args["preview"]) if args.get("preview") else None,
-                    individually=bool(args.get("individually", False)),
-                    tags=[str(tag)[:100] for tag in raw_tags][:100],
+            operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
+            self._update_operation_progress(operation_id, 1, "Starting capture")
+            try:
+                with self.operation_lock:
+                    capsules = self.service.capture(
+                        str(args.get("name", "Sound Capsule"))[:200],
+                        project_path=Path(args["project"]) if args.get("project") else None,
+                        preview_wav=Path(args["preview"]) if args.get("preview") else None,
+                        individually=bool(args.get("individually", False)),
+                        tags=[str(tag)[:100] for tag in raw_tags][:100],
+                        progress_callback=lambda value, step: self._update_operation_progress(
+                            operation_id, value, step
+                        ),
+                    )
+            except Exception as error:
+                self._update_operation_progress(
+                    operation_id, 100, "Capture failed", active=False, error=str(error)
                 )
-            return {"capsules": [capsule.manifest.to_dict() for capsule in capsules]}
+                raise
+            self._update_operation_progress(
+                operation_id, 100, "Capsule saved", active=False
+            )
+            return {
+                "capsules": [capsule.manifest.to_dict() for capsule in capsules],
+                "operation_id": operation_id,
+            }
         if command == "import":
             operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
-            self._update_import_progress(operation_id, 1, "Starting import")
+            self._update_operation_progress(operation_id, 1, "Starting import")
             try:
                 with self.operation_lock:
                     result = self.service.import_capsule(
@@ -468,16 +514,16 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                         import_destination=args.get("import_destination"),
                         open_project=bool(args.get("open", True)),
                         in_place=bool(args.get("in_place", True)),
-                        progress_callback=lambda value, step: self._update_import_progress(
+                        progress_callback=lambda value, step: self._update_operation_progress(
                             operation_id, value, step
                         ),
                     )
             except Exception as error:
-                self._update_import_progress(
+                self._update_operation_progress(
                     operation_id, 100, "Import failed", active=False, error=str(error)
                 )
                 raise
-            self._update_import_progress(
+            self._update_operation_progress(
                 operation_id, 100, "Import complete", active=False
             )
             return {

@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "CapsulePreviewSource.h"
+#include "PreviewMath.h"
 
 #include <juce_cryptography/juce_cryptography.h>
 
@@ -153,6 +154,42 @@ private:
     juce::TextButton checkNow;
 };
 
+class PreviewSettingsComponent final : public juce::Component
+{
+public:
+    PreviewSettingsComponent(bool startAtAudio, bool normalizeDisplay,
+                             bool showSingleChannelName)
+    {
+        setSize(360, 84);
+        startAtFirstAudio.setButtonText("Start previews at the first audible sample");
+        normalizeWaveform.setButtonText("Normalize waveform display");
+        showSingleChannel.setButtonText(
+            "Show channel name when renaming one-channel capsules");
+        startAtFirstAudio.setToggleState(startAtAudio, juce::dontSendNotification);
+        normalizeWaveform.setToggleState(normalizeDisplay, juce::dontSendNotification);
+        showSingleChannel.setToggleState(showSingleChannelName, juce::dontSendNotification);
+        for (auto* toggle : {&startAtFirstAudio, &normalizeWaveform, &showSingleChannel})
+            addAndMakeVisible(toggle);
+    }
+
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        startAtFirstAudio.setBounds(bounds.removeFromTop(28));
+        normalizeWaveform.setBounds(bounds.removeFromTop(28));
+        showSingleChannel.setBounds(bounds.removeFromTop(28));
+    }
+
+    bool shouldStartAtFirstAudio() const { return startAtFirstAudio.getToggleState(); }
+    bool shouldNormalizeWaveform() const { return normalizeWaveform.getToggleState(); }
+    bool shouldShowSingleChannel() const { return showSingleChannel.getToggleState(); }
+
+private:
+    juce::ToggleButton startAtFirstAudio;
+    juce::ToggleButton normalizeWaveform;
+    juce::ToggleButton showSingleChannel;
+};
+
 class LibraryLocationComponent final : public juce::Component
 {
 public:
@@ -270,13 +307,16 @@ class SettingsAlertWindow final : public juce::AlertWindow
 {
 public:
     SettingsAlertWindow(const juce::String& title, bool checkOnStartup,
-                        const juce::String& libraryDirectory)
+                        const juce::String& libraryDirectory, bool startAtFirstAudio,
+                        bool normalizeWaveform, bool showSingleChannel)
         : juce::AlertWindow(title, {}, juce::MessageBoxIconType::QuestionIcon),
+          previewSettings(startAtFirstAudio, normalizeWaveform, showSingleChannel),
           updateSettings(checkOnStartup),
           libraryLocation(libraryDirectory),
           flSetup("FL Setup")
     {
         addCustomComponent(&libraryLocation);
+        addCustomComponent(&previewSettings);
         addCustomComponent(&updateSettings);
         updateSettings.onCheckNow = [this] { exitModalState(3); };
         updateSettings.attachCallbacks();
@@ -287,12 +327,16 @@ public:
 
     ~SettingsAlertWindow() override
     {
+        removeCustomComponent(2);
         removeCustomComponent(1);
         removeCustomComponent(0);
     }
 
     bool shouldCheckOnStartup() const { return updateSettings.shouldCheckOnStartup(); }
     juce::String getLibraryLocation() const { return libraryLocation.getLocation(); }
+    bool shouldStartAtFirstAudio() const { return previewSettings.shouldStartAtFirstAudio(); }
+    bool shouldNormalizeWaveform() const { return previewSettings.shouldNormalizeWaveform(); }
+    bool shouldShowSingleChannel() const { return previewSettings.shouldShowSingleChannel(); }
 
     void resized() override
     {
@@ -301,9 +345,107 @@ public:
     }
 
 private:
+    PreviewSettingsComponent previewSettings;
     UpdateSettingsComponent updateSettings;
     LibraryLocationComponent libraryLocation;
     juce::TextButton flSetup;
+};
+
+class RenameFieldsComponent final : public juce::Component
+{
+public:
+    RenameFieldsComponent(const juce::String& currentTitle,
+                          const juce::StringArray& channelNames)
+    {
+        titleLabel.setText("Capsule title:", juce::dontSendNotification);
+        titleLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        titleEditor.setText(currentTitle, false);
+        addAndMakeVisible(titleLabel);
+        addAndMakeVisible(titleEditor);
+
+        for (int index = 0; index < channelNames.size(); ++index)
+        {
+            auto label = std::make_unique<juce::Label>();
+            label->setText("Channel " + juce::String(index + 1) + ":",
+                           juce::dontSendNotification);
+            label->setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            auto editor = std::make_unique<juce::TextEditor>();
+            editor->setText(channelNames[index], false);
+            channelContent.addAndMakeVisible(*label);
+            channelContent.addAndMakeVisible(*editor);
+            channelLabels.push_back(std::move(label));
+            channelEditors.push_back(std::move(editor));
+        }
+        if (!channelEditors.empty())
+        {
+            channelViewport.setViewedComponent(&channelContent, false);
+            channelViewport.setScrollBarsShown(true, false);
+            addAndMakeVisible(channelViewport);
+        }
+        setSize(390, channelEditors.empty()
+                         ? 62 : 70 + juce::jmin(260, static_cast<int>(channelEditors.size()) * 54));
+    }
+
+    juce::String getTitle() const { return titleEditor.getText().trim(); }
+
+    juce::StringArray getChannelNames() const
+    {
+        juce::StringArray names;
+        for (const auto& editor : channelEditors)
+            names.add(editor->getText().trim());
+        return names;
+    }
+
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        titleLabel.setBounds(bounds.removeFromTop(22));
+        titleEditor.setBounds(bounds.removeFromTop(34));
+        bounds.removeFromTop(8);
+        if (!channelEditors.empty())
+        {
+            channelViewport.setBounds(bounds);
+            channelContent.setSize(juce::jmax(100, bounds.getWidth() - 14),
+                                   static_cast<int>(channelEditors.size()) * 54);
+            auto rows = channelContent.getLocalBounds();
+            for (size_t index = 0; index < channelEditors.size(); ++index)
+            {
+                auto row = rows.removeFromTop(54);
+                channelLabels[index]->setBounds(row.removeFromTop(20));
+                channelEditors[index]->setBounds(row.removeFromTop(32));
+            }
+        }
+    }
+
+private:
+    juce::Label titleLabel;
+    juce::TextEditor titleEditor;
+    juce::Viewport channelViewport;
+    juce::Component channelContent;
+    std::vector<std::unique_ptr<juce::Label>> channelLabels;
+    std::vector<std::unique_ptr<juce::TextEditor>> channelEditors;
+};
+
+class RenameAlertWindow final : public juce::AlertWindow
+{
+public:
+    RenameAlertWindow(const juce::String& currentTitle,
+                      const juce::StringArray& channelNames, juce::Component* parent)
+        : juce::AlertWindow("Rename capsule", {}, juce::MessageBoxIconType::NoIcon, parent),
+          fields(currentTitle, channelNames)
+    {
+        addCustomComponent(&fields);
+        addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    }
+
+    ~RenameAlertWindow() override { removeCustomComponent(0); }
+
+    juce::String getTitleValue() const { return fields.getTitle(); }
+    juce::StringArray getChannelNames() const { return fields.getChannelNames(); }
+
+private:
+    RenameFieldsComponent fields;
 };
 
 class PinToggleButton final : public juce::Button
@@ -694,7 +836,7 @@ void SettingsIconButton::paintButton(juce::Graphics& graphics, bool highlighted,
     }
 }
 
-ImportProgressOverlay::ImportProgressOverlay()
+OperationProgressOverlay::OperationProgressOverlay()
 {
     setVisible(false);
     setInterceptsMouseClicks(true, true);
@@ -711,10 +853,11 @@ ImportProgressOverlay::ImportProgressOverlay()
     addAndMakeVisible(progressBar);
 }
 
-void ImportProgressOverlay::begin(const juce::String& initialStep)
+void OperationProgressOverlay::begin(const juce::String& titleText,
+                                     const juce::String& initialStep)
 {
     progressValue = 0.01;
-    heading.setText("Importing", juce::dontSendNotification);
+    heading.setText(titleText, juce::dontSendNotification);
     heading.setColour(juce::Label::textColourId, juce::Colours::white);
     stepLabel.setText(initialStep, juce::dontSendNotification);
     setVisible(true);
@@ -722,25 +865,25 @@ void ImportProgressOverlay::begin(const juce::String& initialStep)
     repaint();
 }
 
-void ImportProgressOverlay::update(double progress, const juce::String& step)
+void OperationProgressOverlay::update(double progress, const juce::String& step)
 {
     progressValue = juce::jlimit(0.0, 1.0, progress);
     stepLabel.setText(step, juce::dontSendNotification);
     progressBar.repaint();
 }
 
-void ImportProgressOverlay::finish(bool succeeded, const juce::String& detail)
+void OperationProgressOverlay::finish(bool succeeded, const juce::String& titleText,
+                                      const juce::String& detail)
 {
     progressValue = succeeded ? 1.0 : progressValue;
-    heading.setText(succeeded ? "Import complete" : "Import failed",
-                    juce::dontSendNotification);
+    heading.setText(titleText, juce::dontSendNotification);
     heading.setColour(juce::Label::textColourId,
                       succeeded ? accent : juce::Colour(0xffff6b6b));
     stepLabel.setText(detail, juce::dontSendNotification);
     progressBar.repaint();
 }
 
-void ImportProgressOverlay::paint(juce::Graphics& graphics)
+void OperationProgressOverlay::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colours::black.withAlpha(0.70f));
     auto card = getLocalBounds().withSizeKeepingCentre(
@@ -751,7 +894,7 @@ void ImportProgressOverlay::paint(juce::Graphics& graphics)
     graphics.drawRoundedRectangle(card, 12.0f, 1.0f);
 }
 
-void ImportProgressOverlay::resized()
+void OperationProgressOverlay::resized()
 {
     auto card = getLocalBounds().withSizeKeepingCentre(
         juce::jmin(480, getWidth() - 40), 178).reduced(28, 22);
@@ -798,6 +941,16 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     search.setTextToShowWhenEmpty("Search names, plugins, or tags", juce::Colours::grey);
     capsuleName.setTextToShowWhenEmpty("Capsule name", juce::Colours::grey);
     tagsInput.setTextToShowWhenEmpty("Tags (comma-separated)", juce::Colours::grey);
+    for (auto* clear : {&capsuleNameClear, &tagsInputClear})
+    {
+        clear->setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+        clear->setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
+        clear->setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
+        clear->setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        clear->setVisible(false);
+    }
+    capsuleNameClear.setTooltip("Use the selected FL Studio channel name");
+    tagsInputClear.setTooltip("Clear tags");
     waveformToggle.setToggleState(true, juce::dontSendNotification);
     midiToggle.setToggleState(true, juce::dontSendNotification);
     loopToggle.setToggleState(audioProcessor.getPreviewLooping(), juce::dontSendNotification);
@@ -836,17 +989,20 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     updateSortDirectionButton();
 
     for (auto* component : std::initializer_list<juce::Component*>{
-             &title, &status, &search, &capsuleName, &tagsInput, &favoritesOnly,
+             &title, &status, &search, &capsuleName, &capsuleNameClear,
+             &tagsInput, &tagsInputClear, &favoritesOnly,
              &sortBy, &sortDirection, &waveformToggle, &midiToggle, &loopToggle,
              &list, &saveGroup, &saveIndividual,
              &connectionStatus, &projectStatus, &patternStatus,
              &connectionSetup, &updateAvailable, &setup, &volumeLabel, &previewVolume})
         addAndMakeVisible(component);
-    addAndMakeVisible(importProgress);
+    addAndMakeVisible(operationProgress);
     connectionStatus.setVisible(false);
     connectionSetup.setVisible(false);
     updateAvailable.setVisible(false);
-    importProgress.setVisible(false);
+    operationProgress.setVisible(false);
+    capsuleNameClear.setVisible(false);
+    tagsInputClear.setVisible(false);
     addAndMakeVisible(undoImport);
     undoImport.setVisible(false);
 
@@ -860,6 +1016,20 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     list.addMouseListener(this, true);
 
     search.onTextChange = [this] { searchDueAt = juce::Time::getMillisecondCounter() + 250; };
+    capsuleName.onTextChange = [this] {
+        capsuleNameCustom = capsuleName.getText().trim().isNotEmpty();
+        capsuleNameClear.setVisible(capsuleNameCustom && capsuleName.isVisible());
+    };
+    capsuleNameClear.onClick = [this] {
+        capsuleNameCustom = false;
+        capsuleName.setText(suggestedCapsuleName, false);
+        capsuleNameClear.setVisible(false);
+    };
+    tagsInput.onTextChange = [this] {
+        tagsInputClear.setVisible(tagsInput.getText().trim().isNotEmpty()
+                                  && tagsInput.isVisible());
+    };
+    tagsInputClear.onClick = [this] { tagsInput.clear(); };
     waveformToggle.onClick = [this] {
         if (!waveformToggle.getToggleState() && !midiToggle.getToggleState())
             waveformToggle.setToggleState(true, juce::dontSendNotification);
@@ -1093,14 +1263,18 @@ void SoundCapsuleAudioProcessorEditor::resized()
             importRow.removeFromRight(8);
         }
         const auto nameWidth = (importRow.getWidth() - 8) / 2;
-        capsuleName.setBounds(importRow.removeFromLeft(nameWidth).reduced(2, 0));
+        auto nameBounds = importRow.removeFromLeft(nameWidth).reduced(2, 0);
+        capsuleName.setBounds(nameBounds);
+        capsuleNameClear.setBounds(nameBounds.removeFromRight(26).reduced(3, 5));
         importRow.removeFromLeft(8);
-        tagsInput.setBounds(importRow.reduced(2, 0));
+        auto tagsBounds = importRow.reduced(2, 0);
+        tagsInput.setBounds(tagsBounds);
+        tagsInputClear.setBounds(tagsBounds.removeFromRight(26).reduced(3, 5));
         bounds.removeFromBottom(8);
     }
     list.setBounds(bounds);
-    importProgress.setBounds(getLocalBounds());
-    importProgress.toFront(false);
+    operationProgress.setBounds(getLocalBounds());
+    operationProgress.toFront(false);
 }
 
 int SoundCapsuleAudioProcessorEditor::getNumRows() { return static_cast<int>(rows.size()); }
@@ -1260,14 +1434,17 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
                                     static_cast<float>(area.getRight()));
         if (row.thumbnail != nullptr && row.thumbnail->getTotalLength() > 0.0)
         {
+            const auto verticalZoom = soundcapsule::preview::waveformVerticalZoom(
+                row.thumbnail->getApproximatePeak(), normalizeWaveformDisplay);
             auto render = [&](juce::Colour colour) {
                 graphics.setColour(colour);
                 if (waveformChannels == WaveformChannels::stereo)
-                    row.thumbnail->drawChannels(graphics, area, 0.0, row.thumbnail->getTotalLength(), 1.0f);
+                    row.thumbnail->drawChannels(
+                        graphics, area, 0.0, row.thumbnail->getTotalLength(), verticalZoom);
                 else
                     for (int channel = 0; channel < row.thumbnail->getNumChannels(); ++channel)
                         row.thumbnail->drawChannel(graphics, area, 0.0, row.thumbnail->getTotalLength(),
-                                                   channel, 1.0f);
+                                                   channel, verticalZoom);
             };
             render(juce::Colours::lightgrey.withAlpha(0.85f));
             if (isPlaying || isCompleted)
@@ -1320,7 +1497,7 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         if (isPlaying || isCompleted)
         {
             const auto midiProgress = juce::jlimit(
-                0.0, 1.0, previewProgress / static_cast<double>(row.midiTimelineEnd));
+                0.0, 1.0, previewProgress / static_cast<double>(row.midiPlaybackEnd));
             const auto progressWidth = juce::roundToInt(
                 midiProgress * area.getWidth());
             juce::Graphics::ScopedSaveState state(graphics);
@@ -1406,7 +1583,7 @@ void SoundCapsuleAudioProcessorEditor::listBoxItemClicked(int rowNumber, const j
                 return;
         }
         if (clickedMidi)
-            normalized *= rows[static_cast<size_t>(rowNumber)].midiTimelineEnd;
+            normalized *= rows[static_cast<size_t>(rowNumber)].midiPlaybackEnd;
         startPreview(rowNumber, juce::jlimit(0.0, 1.0, normalized), false);
     }
     else if (event.x >= actionsX && event.x < actionsX + 36)
@@ -1437,17 +1614,17 @@ void SoundCapsuleAudioProcessorEditor::listBoxItemDoubleClicked(int, const juce:
 void SoundCapsuleAudioProcessorEditor::timerCallback()
 {
     const auto now = juce::Time::getMillisecondCounter();
-    if (importOperationId.isNotEmpty()
-        && static_cast<int32_t>(now - lastImportProgressPollAt) >= 250)
+    if (operationPollingEnabled && operationId.isNotEmpty()
+        && static_cast<int32_t>(now - lastOperationProgressPollAt) >= 250)
     {
-        lastImportProgressPollAt = now;
-        pollImportProgress();
+        lastOperationProgressPollAt = now;
+        pollOperationProgress();
     }
-    if (importOverlayHideAt != 0
-        && static_cast<int32_t>(now - importOverlayHideAt) >= 0)
+    if (operationOverlayHideAt != 0
+        && static_cast<int32_t>(now - operationOverlayHideAt) >= 0)
     {
-        importOverlayHideAt = 0;
-        importProgress.setVisible(false);
+        operationOverlayHideAt = 0;
+        operationProgress.setVisible(false);
     }
     if (static_cast<int32_t>(now - lastVisiblePreloadAt) >= 125)
     {
@@ -1726,10 +1903,15 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
                 row.capsulePath = value.getProperty("path", "").toString();
                 auto plugins = juce::JSON::parse(value.getProperty("plugin_names", "[]").toString());
                 auto tagValues = juce::JSON::parse(value.getProperty("tags", "[]").toString());
+                auto channelValues = juce::JSON::parse(
+                    value.getProperty("channel_names", "[]").toString());
                 auto noteValues = juce::JSON::parse(value.getProperty("note_preview", "[]").toString());
                 juce::StringArray pluginNames, tagNames;
                 if (auto* array = plugins.getArray()) for (const auto& item : *array) pluginNames.add(item.toString());
                 if (auto* array = tagValues.getArray()) for (const auto& item : *array) tagNames.add(item.toString());
+                if (auto* array = channelValues.getArray())
+                    for (const auto& item : *array)
+                        row.channelNames.add(item.toString());
                 if (auto* notes = noteValues.getArray())
                     for (const auto& item : *notes)
                         if (auto* note = item.getArray(); note != nullptr && note->size() >= 3)
@@ -1746,6 +1928,9 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
                             row.midiTimelineEnd, note.start + note.length);
                     row.midiTimelineEnd = juce::jlimit(0.000001f, 1.0f, row.midiTimelineEnd);
                 }
+                row.midiPlaybackEnd = juce::jlimit(
+                    0.000001f, 1.0f,
+                    static_cast<float>(value.getProperty("midi_playback_end", 1.0)));
                 row.plugins = pluginNames.joinIntoString(", ");
                 row.tags = tagNames.joinIntoString(", ");
                 row.tagItems = tagNames;
@@ -1841,9 +2026,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         auto nextSuggestion = selectedNames.joinIntoString(" + ");
         if (nextSuggestion.length() > 80 && selectedNames.size() > 1)
             nextSuggestion = selectedNames[0] + " + " + juce::String(selectedNames.size() - 1) + " more";
-        const auto currentName = safe->capsuleName.getText().trim();
-        if (nextSuggestion.isNotEmpty()
-            && (currentName.isEmpty() || currentName == safe->suggestedCapsuleName || currentName == "Sound Capsule"))
+        if (!safe->capsuleNameCustom)
             safe->capsuleName.setText(nextSuggestion, false);
         safe->suggestedCapsuleName = nextSuggestion;
 
@@ -1854,6 +2037,8 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->connectionSetup.setVisible(false);
         safe->capsuleName.setVisible(true);
         safe->tagsInput.setVisible(true);
+        safe->capsuleNameClear.setVisible(safe->capsuleNameCustom);
+        safe->tagsInputClear.setVisible(safe->tagsInput.getText().trim().isNotEmpty());
         if (safe->status.getText() == "Waiting for FL Studio"
             || safe->status.getText() == "Connecting...")
             safe->status.setText("Ready", juce::dontSendNotification);
@@ -1905,22 +2090,46 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
     juce::Array<juce::var> tags;
     for (auto tag : juce::StringArray::fromTokens(tagsInput.getText(), ",", ""))
         if (tag.trim().isNotEmpty()) tags.add(tag.trim());
+
+    operationId = juce::Uuid().toString();
+    const auto captureOperationId = operationId;
+    operationPollingEnabled = false;
+    operationOverlayHideAt = 0;
+    lastOperationProgressPollAt = 0;
+    operationProgress.begin("Saving Capsule", "Saving current FL Studio project");
+    resized();
+
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
-    runAfterProjectSaved([safe, name, individually, tags] {
+    const auto showFailure = [safe, captureOperationId](const juce::String& error) {
+        if (safe == nullptr || safe->operationId != captureOperationId)
+            return;
+        safe->operationPollingEnabled = false;
+        safe->operationProgress.finish(false, "Capture failed", error);
+        safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 3000;
+        safe->operationId.clear();
+        safe->operationProgressPollInFlight.store(false);
+    };
+    runAfterProjectSaved([safe, captureOperationId, name, individually, tags, showFailure] {
         if (safe == nullptr) return;
-       #if JUCE_WINDOWS
-        safe->status.setText("Rendering preview in a separate FL Studio instance",
-                             juce::dontSendNotification);
-       #endif
+        safe->operationPollingEnabled = true;
+        safe->lastOperationProgressPollAt = 0;
         safe->sendCommand(
-            "capture", object({{"name", name}, {"individually", individually}, {"tags", tags}}),
-            [safe](juce::var) {
-                if (safe == nullptr) return;
+            "capture", object({{"name", name}, {"individually", individually},
+                               {"tags", tags}, {"operation_id", captureOperationId}}),
+            [safe, captureOperationId](juce::var) {
+                if (safe == nullptr || safe->operationId != captureOperationId) return;
+                safe->operationPollingEnabled = false;
+                safe->operationProgress.finish(
+                    true, "Capsule saved", "Added to the Sound Capsule library");
+                safe->operationOverlayHideAt =
+                    juce::Time::getMillisecondCounter() + 1100;
+                safe->operationId.clear();
+                safe->operationProgressPollInFlight.store(false);
                 safe->status.setText("Imported to library", juce::dontSendNotification);
                 safe->refreshLibrary();
             },
-            300000);
-    });
+            300000, false, showFailure);
+    }, showFailure);
 }
 
 void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
@@ -1939,6 +2148,12 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
                                        : ImportMode::currentPattern);
         safe->volumeDisplayDb = response.getProperty(
             "volume_display", "percent").toString() == "db";
+        safe->startPreviewAtFirstAudio = static_cast<bool>(
+            response.getProperty("start_preview_at_first_audio", true));
+        safe->normalizeWaveformDisplay = static_cast<bool>(
+            response.getProperty("normalize_waveform_display", false));
+        safe->showSingleChannelNameInRename = static_cast<bool>(
+            response.getProperty("show_single_channel_name_in_rename", false));
         safe->updateVolumeDisplay();
         safe->waveformToggle.setWaveformStereo(safe->waveformChannels == WaveformChannels::stereo);
         safe->list.repaint();
@@ -2536,12 +2751,20 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
             response.getProperty("volume_display", "percent").toString();
         const auto currentCheckUpdatesOnStartup = static_cast<bool>(
             response.getProperty("check_updates_on_startup", true));
+        const auto currentStartAtFirstAudio = static_cast<bool>(
+            response.getProperty("start_preview_at_first_audio", true));
+        const auto currentNormalizeWaveform = static_cast<bool>(
+            response.getProperty("normalize_waveform_display", false));
+        const auto currentShowSingleChannel = static_cast<bool>(
+            response.getProperty("show_single_channel_name_in_rename", false));
         const auto currentLibraryDirectory =
             response.getProperty("library_dir", "").toString();
         const auto appPath = response.getProperty("app_path", "").toString();
         const auto titleText = initial ? "Welcome to Sound Capsule" : "Sound Capsule settings";
         auto* dialog = new SettingsAlertWindow(
-            titleText, currentCheckUpdatesOnStartup, currentLibraryDirectory);
+            titleText, currentCheckUpdatesOnStartup, currentLibraryDirectory,
+            currentStartAtFirstAudio, currentNormalizeWaveform,
+            currentShowSingleChannel);
         dialog->addTextEditor("undo_minutes", juce::String(currentUndoMinutes),
                               "Undo minutes (1-1440):");
         juce::StringArray waveformModes;
@@ -2606,6 +2829,9 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                                        ? juce::String("db")
                                                        : juce::String("percent");
                     const auto checkUpdatesOnStartup = dialog->shouldCheckOnStartup();
+                    const auto startAtFirstAudio = dialog->shouldStartAtFirstAudio();
+                    const auto normalizeWaveform = dialog->shouldNormalizeWaveform();
+                    const auto showSingleChannel = dialog->shouldShowSingleChannel();
                     const auto selectedLibraryDirectory = dialog->getLibraryLocation();
                     if (undoMinutes < 1 || undoMinutes > 1440)
                     {
@@ -2618,7 +2844,8 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                     }
                     auto saveSettings =
                         [safe, appPath, showInstructions, undoMinutes, waveformSetting,
-                         importSetting, volumeDisplaySetting, checkUpdatesOnStartup]
+                         importSetting, volumeDisplaySetting, checkUpdatesOnStartup,
+                         startAtFirstAudio, normalizeWaveform, showSingleChannel]
                         (juce::var libraryResult) {
                         if (safe == nullptr) return;
                         safe->sendCommand(
@@ -2627,9 +2854,13 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                     {"waveform_channels", waveformSetting},
                                     {"import_destination", importSetting},
                                     {"volume_display", volumeDisplaySetting},
-                                    {"check_updates_on_startup", checkUpdatesOnStartup}}),
+                                    {"check_updates_on_startup", checkUpdatesOnStartup},
+                                    {"start_preview_at_first_audio", startAtFirstAudio},
+                                    {"normalize_waveform_display", normalizeWaveform},
+                                    {"show_single_channel_name_in_rename", showSingleChannel}}),
                             [safe, appPath, showInstructions, waveformSetting,
-                             importSetting, volumeDisplaySetting, libraryResult](juce::var) {
+                             importSetting, volumeDisplaySetting, startAtFirstAudio,
+                             normalizeWaveform, showSingleChannel, libraryResult](juce::var) {
                             if (safe == nullptr) return;
                             safe->waveformChannels = waveformSetting == "stereo"
                                                    ? WaveformChannels::stereo
@@ -2642,6 +2873,9 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                                            ? ImportMode::overrideSelection
                                                            : ImportMode::currentPattern);
                             safe->volumeDisplayDb = volumeDisplaySetting == "db";
+                            safe->startPreviewAtFirstAudio = startAtFirstAudio;
+                            safe->normalizeWaveformDisplay = normalizeWaveform;
+                            safe->showSingleChannelNameInRename = showSingleChannel;
                             safe->updateVolumeDisplay();
                             safe->list.repaint();
                             const auto locationChanged = libraryResult.isObject();
@@ -2742,10 +2976,13 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
     });
 }
 
-void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(std::function<void()> action)
+void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(
+    std::function<void()> action, std::function<void(juce::String)> onFailure)
 {
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
-    sendCommand("session", object({}), [safe, continuation = std::move(action)](juce::var response) mutable {
+    sendCommand("session", object({}),
+                [safe, continuation = std::move(action),
+                 failure = onFailure](juce::var response) mutable {
         if (safe == nullptr) return;
         const auto changed = static_cast<int>(response.getProperty("changed", 0));
         const auto previousSequence = static_cast<int>(response.getProperty("save_sequence", 0));
@@ -2755,7 +2992,8 @@ void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(std::function<void()
             // temporarily headed by a rendered Sound Capsule preview. Even a
             // clean project is saved so the helper can identify the exact FLP
             // from its fresh modification time instead of guessing.
-            safe->waitForFlSave(previousSequence, std::move(continuation));
+            safe->waitForFlSave(previousSequence, std::move(continuation),
+                                std::move(failure));
             return;
         }
         juce::AlertWindow::showAsync(
@@ -2765,24 +3003,36 @@ void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(std::function<void()
                 "FL Studio has unsaved changes. Save the project and continue? "
                 "FL may show its normal Save dialog for a new project.",
                 "Save and continue", "Cancel", safe.getComponent()),
-            [safe, previousSequence, confirmedAction = std::move(continuation)](int result) mutable {
+            [safe, previousSequence, confirmedAction = std::move(continuation),
+             confirmedFailure = std::move(failure)](int result) mutable {
                 if (safe != nullptr && result == 1)
-                    safe->waitForFlSave(previousSequence, std::move(confirmedAction));
+                    safe->waitForFlSave(previousSequence, std::move(confirmedAction),
+                                        std::move(confirmedFailure));
+                else if (safe != nullptr && confirmedFailure)
+                    confirmedFailure("Operation cancelled");
             });
+    }, 60000, false,
+    [failure = onFailure](const juce::String& error) {
+        if (failure)
+            failure(error);
     });
 }
 
-void SoundCapsuleAudioProcessorEditor::waitForFlSave(int previousSaveSequence, std::function<void()> action)
+void SoundCapsuleAudioProcessorEditor::waitForFlSave(
+    int previousSaveSequence, std::function<void()> action,
+    std::function<void(juce::String)> onFailure)
 {
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     setBusy("Requesting Save from FL Studio...");
     sendCommand("request_save", object({}),
-                [safe, previousSaveSequence, continuation = std::move(action)](juce::var) mutable {
+                [safe, previousSaveSequence, continuation = std::move(action),
+                 failure = onFailure](juce::var) mutable {
         if (safe == nullptr) return;
         safe->setBusy("Waiting for FL Studio to finish saving...");
         ++safe->requestsInFlight;
         safe->requestPool.addJob([safe, previousSaveSequence,
-                                  completedAction = std::move(continuation)]() mutable {
+                                  completedAction = std::move(continuation),
+                                  completedFailure = std::move(failure)]() mutable {
         juce::String error;
         bool saved = false;
         const auto deadline = juce::Time::getMillisecondCounterHiRes() + 30000.0;
@@ -2810,19 +3060,26 @@ void SoundCapsuleAudioProcessorEditor::waitForFlSave(int previousSaveSequence, s
         if (!saved && error.isEmpty())
             error = "FL Studio did not finish saving within 30 seconds";
         juce::MessageManager::callAsync(
-            [safe, saved, error, continuationAfterSave = std::move(completedAction)]() mutable {
+            [safe, saved, error, continuationAfterSave = std::move(completedAction),
+             failureAfterSave = std::move(completedFailure)]() mutable {
             if (safe == nullptr) return;
             --safe->requestsInFlight;
             if (!saved)
             {
                 safe->status.setText(error, juce::dontSendNotification);
+                if (failureAfterSave)
+                    failureAfterSave(error);
                 return;
             }
             safe->status.setText("Project saved", juce::dontSendNotification);
             continuationAfterSave();
         });
         });
-    }, 5000);
+    }, 5000, false,
+    [failure = onFailure](const juce::String& error) {
+        if (failure)
+            failure(error);
+    });
 }
 
 void SoundCapsuleAudioProcessorEditor::stopPreviewPlayback()
@@ -2833,6 +3090,7 @@ void SoundCapsuleAudioProcessorEditor::stopPreviewPlayback()
     completedPreviewId.clear();
     pendingPreviewId.clear();
     pendingPreviewStart = 0.0;
+    pendingPreviewStartsAtAudio = false;
     list.repaint();
 }
 
@@ -2842,6 +3100,8 @@ void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normal
     if (!juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
         return;
     const auto id = rows[static_cast<size_t>(rowNumber)].id;
+    const auto startAtAudio = toggleIfPlaying && startPreviewAtFirstAudio
+                           && normalizedStart <= 0.0;
     list.selectRow(rowNumber);
     if (id == playingCapsuleId)
     {
@@ -2854,7 +3114,7 @@ void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normal
             audioProcessor.stopPreview();
         }
         else
-            audioProcessor.playPreview(normalizedStart);
+            audioProcessor.playPreview(normalizedStart, false);
         list.repaint();
         return;
     }
@@ -2866,7 +3126,10 @@ void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normal
             pendingPreviewId.clear();
         }
         else
+        {
             pendingPreviewStart = normalizedStart;
+            pendingPreviewStartsAtAudio = false;
+        }
         return;
     }
 
@@ -2876,13 +3139,14 @@ void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normal
     completedPreviewId.clear();
     pendingPreviewId = id;
     pendingPreviewStart = normalizedStart;
+    pendingPreviewStartsAtAudio = startAtAudio;
     list.repaint();
     const juce::File capsule(rows[static_cast<size_t>(rowNumber)].capsulePath);
     if (audioProcessor.loadPreviewFile(capsule, false))
     {
         pendingPreviewId.clear();
         playingCapsuleId = id;
-        audioProcessor.playPreview(pendingPreviewStart);
+        audioProcessor.playPreview(pendingPreviewStart, pendingPreviewStartsAtAudio);
         list.repaint();
         return;
     }
@@ -2898,7 +3162,8 @@ void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normal
             if (loaded && safe->audioProcessor.loadPreviewFile(capsule, false))
             {
                 safe->playingCapsuleId = id;
-                safe->audioProcessor.playPreview(safe->pendingPreviewStart);
+                safe->audioProcessor.playPreview(
+                    safe->pendingPreviewStart, safe->pendingPreviewStartsAtAudio);
                 safe->list.repaint();
             }
             else
@@ -2952,28 +3217,31 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
                                       ? juce::String("override_selection")
                                       : juce::String("current_pattern"));
         const auto helperMode = mode == ImportMode::overrideSelection ? "override" : "append";
-        safe->importOperationId = juce::Uuid().toString();
-        safe->importOverlayHideAt = 0;
-        safe->lastImportProgressPollAt = 0;
-        safe->importProgress.begin("Preparing the project");
+        safe->operationId = juce::Uuid().toString();
+        const auto importOperationId = safe->operationId;
+        safe->operationPollingEnabled = true;
+        safe->operationOverlayHideAt = 0;
+        safe->lastOperationProgressPollAt = 0;
+        safe->operationProgress.begin("Importing Capsule", "Preparing the project");
         safe->resized();
         safe->sendCommand(
             "import", object({{"id", id},
                               {"mode", helperMode},
                               {"import_destination", destination},
-                              {"operation_id", safe->importOperationId},
+                              {"operation_id", importOperationId},
                               {"open", true},
                               {"in_place", true}}),
-            [safe, mode](juce::var response) {
-                if (safe == nullptr) return;
+            [safe, mode, importOperationId](juce::var response) {
+                if (safe == nullptr || safe->operationId != importOperationId) return;
                 const auto confirmed = static_cast<bool>(response.getProperty("reload_confirmed", false));
-                safe->importProgress.finish(
-                    true,
+                safe->operationPollingEnabled = false;
+                safe->operationProgress.finish(
+                    true, "Import complete",
                     confirmed ? "FL Studio reopened the updated project"
                               : "Project updated; verify that FL Studio reopened it");
-                safe->importOverlayHideAt = juce::Time::getMillisecondCounter() + 1100;
-                safe->importOperationId.clear();
-                safe->importProgressPollInFlight.store(false);
+                safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 1100;
+                safe->operationId.clear();
+                safe->operationProgressPollInFlight.store(false);
                 safe->status.setText(
                     confirmed
                         ? (mode == ImportMode::overrideSelection
@@ -2985,12 +3253,13 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
             },
             120000,
             false,
-            [safe](const juce::String& error) {
-                if (safe == nullptr) return;
-                safe->importProgress.finish(false, error);
-                safe->importOverlayHideAt = juce::Time::getMillisecondCounter() + 3000;
-                safe->importOperationId.clear();
-                safe->importProgressPollInFlight.store(false);
+            [safe, importOperationId](const juce::String& error) {
+                if (safe == nullptr || safe->operationId != importOperationId) return;
+                safe->operationPollingEnabled = false;
+                safe->operationProgress.finish(false, "Import failed", error);
+                safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 3000;
+                safe->operationId.clear();
+                safe->operationProgressPollInFlight.store(false);
             });
     });
 }
@@ -3015,28 +3284,29 @@ void SoundCapsuleAudioProcessorEditor::showImportMenu(
     });
 }
 
-void SoundCapsuleAudioProcessorEditor::pollImportProgress()
+void SoundCapsuleAudioProcessorEditor::pollOperationProgress()
 {
-    if (importOperationId.isEmpty() || importProgressPollInFlight.exchange(true))
+    if (!operationPollingEnabled || operationId.isEmpty()
+        || operationProgressPollInFlight.exchange(true))
         return;
-    const auto operationId = importOperationId;
+    const auto requestedOperationId = operationId;
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     sendCommand(
-        "import_status", object({{"operation_id", operationId}}),
-        [safe, operationId](juce::var response) {
+        "operation_status", object({{"operation_id", requestedOperationId}}),
+        [safe, requestedOperationId](juce::var response) {
             if (safe == nullptr) return;
-            safe->importProgressPollInFlight.store(false);
-            if (operationId != safe->importOperationId)
+            safe->operationProgressPollInFlight.store(false);
+            if (requestedOperationId != safe->operationId)
                 return;
             const auto value = static_cast<int>(response.getProperty("progress", 0));
-            const auto step = response.getProperty("step", "Importing").toString();
-            safe->importProgress.update(static_cast<double>(value) / 100.0, step);
+            const auto step = response.getProperty("step", "Working").toString();
+            safe->operationProgress.update(static_cast<double>(value) / 100.0, step);
         },
         5000,
         true,
         [safe](const juce::String&) {
             if (safe != nullptr)
-                safe->importProgressPollInFlight.store(false);
+                safe->operationProgressPollInFlight.store(false);
         });
 }
 
@@ -3048,6 +3318,7 @@ void SoundCapsuleAudioProcessorEditor::showRowMenu(int rowNumber, juce::Point<in
     const auto& row = rows[static_cast<size_t>(rowNumber)];
     const auto id = row.id;
     const auto name = row.name;
+    const auto channelNames = row.channelNames;
     const auto currentTags = row.tags;
     const auto capsulePath = row.capsulePath;
 
@@ -3070,12 +3341,12 @@ void SoundCapsuleAudioProcessorEditor::showRowMenu(int rowNumber, juce::Point<in
     const auto target = juce::Rectangle<int>(screenPosition.x, screenPosition.y, 1, 1);
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&list)
                                                  .withTargetScreenArea(target),
-                       [safe, id, name, currentTags, capsulePath](int result) {
+                       [safe, id, name, channelNames, currentTags, capsulePath](int result) {
         if (safe == nullptr) return;
         if (result == 1) safe->importCapsule(id, ImportMode::currentPattern);
         else if (result == 2) safe->importCapsule(id, ImportMode::newPattern);
         else if (result == 3) safe->importCapsule(id, ImportMode::overrideSelection);
-        else if (result == 10) safe->promptRename(id, name);
+        else if (result == 10) safe->promptRename(id, name, channelNames);
         else if (result == 11) safe->promptTags(id, currentTags);
         else if (result == 12)
         {
@@ -3237,23 +3508,44 @@ bool SoundCapsuleAudioProcessorEditor::isLibraryCapsuleFile(
 }
 
 void SoundCapsuleAudioProcessorEditor::promptRename(const juce::String& id,
-                                                     const juce::String& currentName)
+                                                     const juce::String& currentName,
+                                                     const juce::StringArray& channelNames)
 {
-    auto* dialog = new juce::AlertWindow("Rename capsule", "", juce::MessageBoxIconType::NoIcon, this);
-    dialog->addTextEditor("value", currentName, "Name:");
-    dialog->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    const auto exposeChannelNames = channelNames.size() > 1
+                                 || (channelNames.size() == 1
+                                     && showSingleChannelNameInRename);
+    auto* dialog = new RenameAlertWindow(
+        currentName, exposeChannelNames ? channelNames : juce::StringArray(), this);
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     dialog->enterModalState(true, juce::ModalCallbackFunction::create(
-        [safe, id, dialog](int result) {
+        [safe, id, channelNames, exposeChannelNames, dialog](int result) {
             if (safe == nullptr || result != 1) return;
-            const auto newName = dialog->getTextEditorContents("value").trim();
-            if (newName.isNotEmpty())
-                safe->sendCommand("rename", object({{"id", id}, {"name", newName}}),
-                                  [safe](juce::var) { if (safe != nullptr) safe->refreshLibrary(); });
+            const auto newName = dialog->getTitleValue();
+            auto newChannelNames = exposeChannelNames
+                                     ? dialog->getChannelNames() : channelNames;
+            if (newChannelNames.size() == 1 && !exposeChannelNames)
+                newChannelNames.set(0, newName);
+            auto valid = newName.isNotEmpty()
+                      && newChannelNames.size() == channelNames.size();
+            for (const auto& channelName : newChannelNames)
+                valid = valid && channelName.trim().isNotEmpty();
+            if (!valid)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::WarningIcon,
+                    "Names cannot be empty",
+                    "Enter a capsule title and a name for every channel.",
+                    "OK", safe.getComponent());
+                return;
+            }
+            juce::Array<juce::var> values;
+            for (const auto& channelName : newChannelNames)
+                values.add(channelName.trim());
+            safe->sendCommand(
+                "rename", object({{"id", id}, {"name", newName},
+                                  {"channel_names", values}}),
+                [safe](juce::var) { if (safe != nullptr) safe->refreshLibrary(); });
         }), true);
-    if (auto* editor = dialog->getTextEditor("value"))
-        editor->selectAll();
 }
 
 void SoundCapsuleAudioProcessorEditor::promptTags(const juce::String& id,
@@ -3339,8 +3631,13 @@ void SoundCapsuleAudioProcessorEditor::sendCommand(const juce::String& command,
                     safe->projectStatus.setText("Project: Unknown", juce::dontSendNotification);
                     safe->patternStatus.setText("Pattern: Unknown", juce::dontSendNotification);
                     safe->status.setText("Waiting for FL Studio", juce::dontSendNotification);
+                    safe->suggestedCapsuleName.clear();
+                    if (!safe->capsuleNameCustom)
+                        safe->capsuleName.setText({}, false);
                     safe->capsuleName.setVisible(false);
+                    safe->capsuleNameClear.setVisible(false);
                     safe->tagsInput.setVisible(false);
+                    safe->tagsInputClear.setVisible(false);
                     safe->saveGroup.setVisible(false);
                     safe->saveIndividual.setVisible(false);
                     safe->undoImport.setVisible(false);

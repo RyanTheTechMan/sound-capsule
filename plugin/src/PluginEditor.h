@@ -29,13 +29,13 @@ public:
     void paintButton(juce::Graphics&, bool highlighted, bool down) override;
 };
 
-class ImportProgressOverlay final : public juce::Component
+class OperationProgressOverlay final : public juce::Component
 {
 public:
-    ImportProgressOverlay();
-    void begin(const juce::String& initialStep);
+    OperationProgressOverlay();
+    void begin(const juce::String& title, const juce::String& initialStep);
     void update(double progress, const juce::String& step);
-    void finish(bool succeeded, const juce::String& detail);
+    void finish(bool succeeded, const juce::String& title, const juce::String& detail);
     void paint(juce::Graphics&) override;
     void resized() override;
 
@@ -84,12 +84,14 @@ private:
         juce::String tags;
         juce::String sourceFlVersion;
         juce::StringArray tagItems;
+        juce::StringArray channelNames;
         bool favorite = false;
         int channelCount = 0;
         int useCount = 0;
         juce::String capsulePath;
         std::vector<NotePreview> notes;
         float midiTimelineEnd = 1.0f;
+        float midiPlaybackEnd = 1.0f;
         std::unique_ptr<juce::AudioThumbnail> thumbnail;
         bool preloadQueued = false;
     };
@@ -122,21 +124,24 @@ private:
     void showExternalMidiSetup(std::function<void(juce::String)> continuation = {},
                                juce::String notice = {});
 #endif
-    void runAfterProjectSaved(std::function<void()> action);
-    void waitForFlSave(int previousSaveSequence, std::function<void()> action);
+    void runAfterProjectSaved(std::function<void()> action,
+                              std::function<void(juce::String)> onFailure = {});
+    void waitForFlSave(int previousSaveSequence, std::function<void()> action,
+                       std::function<void(juce::String)> onFailure = {});
     void stopPreviewPlayback();
     void startPreview(int row, double normalizedStart, bool toggleIfPlaying);
     void importCapsule(const juce::String& id, ImportMode mode);
     void performImportCapsule(const juce::String& id, ImportMode mode);
     void showImportMenu(const juce::String& id, juce::Point<int> screenPosition);
-    void pollImportProgress();
+    void pollOperationProgress();
     void showRowMenu(int row, juce::Point<int> screenPosition);
     void exportCapsule(const juce::String& path, const juce::String& name);
     void copyCapsuleForExport(const juce::File& source, const juce::File& destination);
     void addExternalCapsules(const juce::StringArray& files);
     void showAddCapsulesResult(const juce::var& response);
     bool isLibraryCapsuleFile(const juce::String& path) const;
-    void promptRename(const juce::String& id, const juce::String& currentName);
+    void promptRename(const juce::String& id, const juce::String& currentName,
+                      const juce::StringArray& channelNames);
     void promptTags(const juce::String& id, const juce::String& currentTags);
     void confirmDelete(const juce::String& id, const juce::String& name);
     void updateRowHover(juce::Point<int> listPosition);
@@ -169,22 +174,22 @@ private:
     uint32_t searchDueAt = 0;
     uint32_t lastSessionPollAt = 0;
     uint32_t lastVisiblePreloadAt = 0;
-    uint32_t lastImportProgressPollAt = 0;
-    uint32_t importOverlayHideAt = 0;
+    uint32_t lastOperationProgressPollAt = 0;
+    uint32_t operationOverlayHideAt = 0;
     uint64_t listGeneration = 0;
     uint64_t previewGeneration = 0;
     juce::String suggestedCapsuleName;
     juce::String playingCapsuleId;
     juce::String completedPreviewId;
     juce::String pendingPreviewId;
-    juce::String importOperationId;
+    juce::String operationId;
     juce::String currentFlHostName;
     juce::String availableUpdateTag;
     juce::String availableInstallerName;
     juce::String availableInstallerUrl;
     juce::String availableChecksumUrl;
     juce::String availableReleaseUrl;
-    std::atomic<bool> importProgressPollInFlight{false};
+    std::atomic<bool> operationProgressPollInFlight{false};
     std::atomic<bool> updateCheckInFlight{false};
     std::atomic<bool> updateDownloadInFlight{false};
     std::atomic<bool> setupRepairInFlight{false};
@@ -195,6 +200,12 @@ private:
     RowHoverTarget hoveredTarget = RowHoverTarget::none;
     bool outboundDragStarted = false;
     bool inboundFileDragActive = false;
+    bool capsuleNameCustom = false;
+    bool operationPollingEnabled = false;
+    bool startPreviewAtFirstAudio = true;
+    bool pendingPreviewStartsAtAudio = false;
+    bool normalizeWaveformDisplay = false;
+    bool showSingleChannelNameInRename = false;
 
     juce::Label title;
     juce::Label status;
@@ -205,7 +216,9 @@ private:
     juce::Label patternStatus;
     juce::TextEditor search;
     juce::TextEditor capsuleName;
+    juce::TextButton capsuleNameClear{juce::String::charToString(0x00d7)};
     juce::TextEditor tagsInput;
+    juce::TextButton tagsInputClear{juce::String::charToString(0x00d7)};
     IconToggleButton favoritesOnly{IconToggleButton::Icon::favorite};
     juce::ComboBox sortBy;
     juce::TextButton sortDirection;
@@ -219,7 +232,7 @@ private:
     SettingsIconButton setup;
     juce::Label volumeLabel{{}, "Volume"};
     juce::Slider previewVolume;
-    ImportProgressOverlay importProgress;
+    OperationProgressOverlay operationProgress;
     std::unique_ptr<juce::FileChooser> exportChooser;
     std::array<bool, 3> sortDescendingByMode{{true, false, true}};
     WaveformChannels waveformChannels = WaveformChannels::mono;

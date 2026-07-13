@@ -33,7 +33,7 @@ public:
     bool loadPreviewFile(const juce::File& file, bool decodeIfMissing = true);
     bool preloadPreviewFile(const juce::File& file);
     void retainPreloadedPreviewFiles(const juce::StringArray& paths);
-    void playPreview(double normalizedStart = 0.0);
+    void playPreview(double normalizedStart = 0.0, bool startAtFirstAudio = false);
     void stopPreview();
     bool isPreviewPlaying() const;
     double getPreviewPositionProportion() const;
@@ -59,6 +59,7 @@ private:
     {
         juce::AudioBuffer<float> audio;
         double sampleRate = 0.0;
+        double firstAudibleProportion = 0.0;
     };
 
     juce::AudioFormatManager formatManager;
