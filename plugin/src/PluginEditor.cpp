@@ -47,8 +47,8 @@ juce::String compatibilityTooltip(const juce::String& sourceVersion,
                        .has_value();
     return "Saved in FL Studio "
          + soundcapsule::flversion::displayRelease(sourceVersion)
-         + ", which is newer than "
-         + (exact ? "the current project's FL Studio " : "the connected FL Studio ")
+         + ". But the current project is "
+         + (exact ? "FL Studio " : "open in FL Studio ")
          + destination
          + ". Import may not be fully compatible.";
 }
@@ -3173,8 +3173,8 @@ void SoundCapsuleAudioProcessorEditor::importCapsule(const juce::String& id,
                 "\"" + rowName + "\" was saved with FL Studio "
                     + soundcapsule::flversion::displayRelease(sourceVersion)
                     + (soundcapsule::flversion::compatibilityRelease(destinationVersion)
-                               ? ", but the current project was saved with FL Studio "
-                               : ", but the connected app is FL Studio ")
+                               ? ". But the current project is FL Studio "
+                               : ". But the current project is open in FL Studio ")
                     + soundcapsule::flversion::displayDestinationRelease(
                         destinationVersion, hostName)
                     + ".\n\n"
