@@ -81,6 +81,21 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(payload["failed"])
             self.assertTrue(Path(payload["imported"][0]["path"]).is_file())
 
+    def test_list_reports_non_destructive_library_migration_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            legacy = settings.library_dir / "Broken.flcapsule"
+            legacy.write_bytes(b"not a capsule")
+
+            with SoundCapsuleServer(settings) as server:
+                payload = server.dispatch({"command": "list", "args": {}})
+
+            self.assertFalse(payload["migration_summary"]["converted"])
+            self.assertEqual(len(payload["migration_summary"]["failed"]), 1)
+            self.assertEqual(legacy.read_bytes(), b"not a capsule")
+
     def test_missing_bridge_has_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(RuntimeError, "enable the configured Sound Capsule MIDI input"):

@@ -10,7 +10,7 @@ import time
 import uuid
 
 from . import __version__
-from .capsule import Capsule
+from .capsule import CAPSULE_EXTENSION, Capsule
 from .config import Settings
 from .flp import FLPFile
 from .library import CapsuleLibrary
@@ -205,7 +205,18 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         if not new_dir.is_dir():
             raise ValueError("The capsule save location must be a folder")
 
-        source_paths = sorted(old_dir.rglob("*.flcapsule")) if move_existing else []
+        source_paths = (
+            sorted(
+                {
+                    path
+                    for pattern in (f"*{CAPSULE_EXTENSION}", "*.flcapsule")
+                    for path in old_dir.rglob(pattern)
+                    if path.is_file()
+                }
+            )
+            if move_existing
+            else []
+        )
         conflicts: list[Path] = []
         candidates: list[tuple[Path, Path, Path]] = []
         staging_dir = new_dir / f".sound-capsule-move-{uuid.uuid4().hex}"
@@ -253,6 +264,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             replacement.reindex()
             self.settings.library_dir = new_dir
             self.service.library = replacement
+            self.service.library_migration_summary = replacement.last_migration_summary
         except Exception:
             if settings_persisted:
                 try:
@@ -445,7 +457,8 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                     descending=bool(args.get("descending", True)),
                     limit=args.get("limit", 1000),
                     offset=args.get("offset", 0),
-                )
+                ),
+                "migration_summary": self.service.library_migration_summary,
             }
         if command == "preview":
             capsule = self.service.library.find(args["id"])

@@ -9,7 +9,7 @@ import struct
 import zipfile
 from pathlib import Path
 
-from soundcapsule.capsule import Capsule
+from soundcapsule.capsule import Capsule, _open_capsule_archive
 from soundcapsule.flp import (
     EVENT_CHANNEL_NEW,
     EVENT_CHANNEL_ENABLED,
@@ -114,6 +114,55 @@ def write_float_silence(path: Path, duration_seconds: float = 1.0) -> None:
         + struct.pack("<I", len(data))
         + data
     )
+
+
+def write_rf64_silence(path: Path) -> None:
+    channels = 2
+    sample_rate = 44_100
+    block_align = channels * 2
+    frames = 256
+    data = b"\0" * (frames * block_align)
+    body = (
+        b"WAVEds64"
+        + struct.pack("<IQQQI", 28, 0, len(data), frames, 0)
+        + b"fmt "
+        + struct.pack(
+            "<IHHIIHH", 16, 1, channels, sample_rate,
+            sample_rate * block_align, block_align, 16,
+        )
+        + b"data"
+        + struct.pack("<I", 0xFFFFFFFF)
+        + data
+    )
+    contents = bytearray(b"RF64\xff\xff\xff\xff" + body)
+    struct.pack_into("<Q", contents, 20, len(contents) - 8)
+    path.write_bytes(contents)
+
+
+def make_legacy_capsule(capsule: Capsule) -> Capsule:
+    """Rewrite a playable test capsule as the legacy outer-ZIP format."""
+    preview = capsule.path.with_name(f".{capsule.path.name}.preview.wav")
+    try:
+        capsule.export_preview(preview)
+        manifest = capsule.manifest
+        with _open_capsule_archive(capsule.path) as source:
+            members = {name: source.read(name) for name in source.namelist()}
+        members[manifest.preview_path] = preview.read_bytes()
+        with zipfile.ZipFile(capsule.path, "w") as target:
+            for name, data in members.items():
+                target.writestr(
+                    name,
+                    data,
+                    compress_type=(
+                        zipfile.ZIP_STORED
+                        if name == manifest.preview_path
+                        else zipfile.ZIP_DEFLATED
+                    ),
+                )
+    finally:
+        preview.unlink(missing_ok=True)
+    capsule.verify()
+    return capsule
 
 
 class FLPRoundTripTests(unittest.TestCase):
@@ -400,6 +449,20 @@ class CapsuleTests(unittest.TestCase):
 
             self.assertAlmostEqual(capsule.preview_duration_seconds(), 1.25)
 
+    def test_rf64_preview_remains_playable_and_extracts_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_rf64_silence(preview)
+            capsule = Capsule.build(
+                root / "RF64.flcapsule.wav", name="RF64", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+
+            capsule.verify()
+            self.assertEqual(capsule.path.read_bytes()[:4], b"RF64")
+            self.assertEqual(capsule.export_preview(root / "out.wav").read_bytes(), preview.read_bytes())
+
     def test_capsule_is_portable_and_checksum_verified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -427,12 +490,13 @@ class CapsuleTests(unittest.TestCase):
             )
             self.assertEqual(capsule.read_channel_state(manifest.channels[0]).format, 0x20)
             self.assertEqual(capsule.read_notes(manifest.channels[0])[0].to_dict()["mod_y"], 55)
-            self.assertTrue(capsule.extract_preview(root / "cache").is_file())
-            with zipfile.ZipFile(capsule.path) as archive:
-                self.assertEqual(
-                    archive.getinfo(manifest.preview_path).compress_type,
-                    zipfile.ZIP_STORED,
-                )
+            extracted_preview = capsule.extract_preview(root / "cache")
+            self.assertEqual(extracted_preview.read_bytes(), preview.read_bytes())
+            self.assertEqual(capsule.path.read_bytes()[:4], b"RIFF")
+            with wave.open(str(capsule.path), "rb") as reader:
+                self.assertEqual((reader.getnchannels(), reader.getframerate()), (2, 44_100))
+            with self.assertRaises(zipfile.BadZipFile):
+                zipfile.ZipFile(capsule.path)
 
     def test_single_channel_title_is_stored_as_the_channel_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -449,6 +513,85 @@ class CapsuleTests(unittest.TestCase):
             self.assertEqual(capsule.manifest.name, "Custom title")
             self.assertEqual(capsule.manifest.channels[0].name, "Custom title")
 
+    def test_playable_capsule_rejects_plain_wav_and_corrupt_payload_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            with self.assertRaisesRegex(ValueError, "does not contain Sound Capsule data"):
+                Capsule(preview).verify()
+
+            capsule = Capsule.build(
+                root / "Lead.flcapsule.wav", name="Lead", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+            contents = bytearray(capsule.path.read_bytes())
+            header = contents.index(b"FLCAPS01")
+            contents[header + 16] ^= 0x01
+            capsule.path.write_bytes(contents)
+            with self.assertRaisesRegex(ValueError, "payload checksum mismatch"):
+                capsule.verify()
+
+    def test_playable_capsule_rejects_duplicate_and_nonfinal_scap_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Lead.flcapsule.wav", name="Lead", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+            original = capsule.path.read_bytes()
+            scap_offset = original.index(b"FLCAPS01") - 8
+            duplicated = bytearray(original + original[scap_offset:])
+            struct.pack_into("<I", duplicated, 4, len(duplicated) - 8)
+            capsule.path.write_bytes(duplicated)
+            with self.assertRaisesRegex(ValueError, "duplicate SCAP"):
+                capsule.verify()
+
+            nonfinal = bytearray(original + b"JUNK\0\0\0\0")
+            struct.pack_into("<I", nonfinal, 4, len(nonfinal) - 8)
+            capsule.path.write_bytes(nonfinal)
+            with self.assertRaisesRegex(ValueError, "SCAP must be the final"):
+                capsule.verify()
+
+    def test_metadata_rewrite_preserves_the_exact_audio_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Lead.flcapsule.wav", name="Lead", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+            manifest = capsule.manifest
+            manifest.tags = ["rewritten"]
+            capsule.replace_manifest(manifest)
+
+            extracted = capsule.export_preview(root / "after.wav")
+            self.assertEqual(extracted.read_bytes(), preview.read_bytes())
+            self.assertEqual(capsule.manifest.tags, ["rewritten"])
+            capsule.verify()
+
+    def test_legacy_capsule_converts_to_playable_without_changing_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            legacy = Capsule.build(
+                root / "Lead.flcapsule", name="Lead", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+            make_legacy_capsule(legacy)
+            original_manifest = legacy.manifest.to_dict()
+
+            converted = legacy.convert_to_playable(root / "Lead.flcapsule.wav")
+
+            self.assertEqual(converted.container_format, "playable")
+            self.assertEqual(converted.manifest.to_dict(), original_manifest)
+            self.assertEqual(converted.export_preview(root / "converted.wav").read_bytes(), preview.read_bytes())
+            self.assertTrue(legacy.path.exists())
+
     def test_schema_one_capsule_remains_readable_without_tempo(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -458,6 +601,7 @@ class CapsuleTests(unittest.TestCase):
                 root / "Legacy.flcapsule", name="Legacy", project=fixture_project(),
                 channel_ids=[2], pattern_id=3, preview_wav=preview,
             )
+            make_legacy_capsule(capsule)
             with zipfile.ZipFile(capsule.path) as source:
                 members = {
                     name: source.read(name)
@@ -488,6 +632,7 @@ class CapsuleTests(unittest.TestCase):
                 root / "Lead.flcapsule", name="Lead", project=fixture_project(),
                 channel_ids=[2], pattern_id=3, preview_wav=preview,
             )
+            make_legacy_capsule(capsule)
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist() if name != "checksums.json"}
             manifest = json.loads(members["manifest.json"])
@@ -510,6 +655,7 @@ class CapsuleTests(unittest.TestCase):
                 root / "Lead.flcapsule", name="Lead", project=fixture_project(),
                 channel_ids=[2], pattern_id=3, preview_wav=preview,
             )
+            make_legacy_capsule(capsule)
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist()}
             checksums = json.loads(members["checksums.json"])

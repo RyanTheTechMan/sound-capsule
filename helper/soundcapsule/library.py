@@ -11,9 +11,15 @@ import sqlite3
 import tempfile
 import threading
 
-from .capsule import Capsule, unique_capsule_path
+from .capsule import (
+    CAPSULE_EXTENSION,
+    Capsule,
+    is_capsule_filename,
+    unique_capsule_path,
+    unique_legacy_capsule_path,
+)
 
-INDEX_VERSION = 9
+INDEX_VERSION = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -45,6 +51,10 @@ class CapsuleLibrary:
         self._lock = threading.RLock()
         self.library_dir = library_dir
         self.database_path = database_path
+        self.last_migration_summary: dict[str, list[dict[str, str]]] = {
+            "converted": [],
+            "failed": [],
+        }
         self.library_dir.mkdir(parents=True, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.session() as database:
@@ -95,6 +105,7 @@ class CapsuleLibrary:
 
     def reindex(self) -> int:
         with self._lock:
+            self.last_migration_summary = self._migrate_legacy_capsules()
             seen: set[str] = set()
             count = 0
             with self.session() as database:
@@ -102,7 +113,7 @@ class CapsuleLibrary:
                     row["path"]: row["modified_ns"]
                     for row in database.execute("SELECT path, modified_ns FROM capsules").fetchall()
                 }
-                for path in self.library_dir.rglob("*.flcapsule"):
+                for path in self._capsule_paths():
                     resolved = str(path.resolve())
                     try:
                         modified_ns = path.stat().st_mtime_ns
@@ -158,6 +169,58 @@ class CapsuleLibrary:
                         database.execute("DELETE FROM capsules WHERE path = ?", (indexed_path,))
             return count
 
+    def _capsule_paths(self) -> list[Path]:
+        paths = {
+            path
+            for pattern in (f"*{CAPSULE_EXTENSION}", "*.flcapsule")
+            for path in self.library_dir.rglob(pattern)
+            if path.is_file()
+        }
+        return sorted(paths, key=lambda path: str(path).casefold())
+
+    def _migrate_legacy_capsules(self) -> dict[str, list[dict[str, str]]]:
+        summary: dict[str, list[dict[str, str]]] = {"converted": [], "failed": []}
+        for source in sorted(self.library_dir.rglob("*.flcapsule")):
+            destination: Path | None = None
+            installed = False
+            try:
+                capsule = Capsule(source)
+                capsule.verify()
+                if capsule.container_format != "legacy":
+                    continue
+                source_stat = source.stat()
+                while True:
+                    destination = unique_capsule_path(source.parent, source.stem)
+                    try:
+                        converted = capsule.convert_to_playable(destination)
+                        installed = True
+                        break
+                    except FileExistsError:
+                        continue
+                os.utime(
+                    destination,
+                    ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+                )
+                source.unlink()
+                summary["converted"].append(
+                    {
+                        "source": str(source),
+                        "path": str(destination),
+                        "id": converted.manifest.id,
+                        "name": converted.manifest.name,
+                    }
+                )
+            except Exception as error:
+                if installed and source.exists() and destination is not None:
+                    try:
+                        destination.unlink()
+                    except OSError:
+                        pass
+                summary["failed"].append(
+                    {"source": str(source), "error": str(error)}
+                )
+        return summary
+
     def list(
         self,
         search: str = "",
@@ -201,6 +264,8 @@ class CapsuleLibrary:
 
     @staticmethod
     def _remove_legacy_preview(capsule: Capsule) -> None:
+        if capsule.container_format != "legacy":
+            return
         sidecar = capsule.path.with_suffix(".wav")
         if not sidecar.is_file():
             return
@@ -296,8 +361,10 @@ class CapsuleLibrary:
                 temporary: Path | None = None
                 try:
                     source = source.expanduser().resolve()
-                    if source.suffix.casefold() != ".flcapsule":
-                        raise ValueError("file does not have the .flcapsule extension")
+                    if not is_capsule_filename(source):
+                        raise ValueError(
+                            "file must use the .flcapsule.wav or .flcapsule extension"
+                        )
                     if not source.is_file():
                         raise FileNotFoundError("capsule file was not found")
 
@@ -341,23 +408,53 @@ class CapsuleLibrary:
                             }
                         )
                         continue
-                    while True:
-                        destination = unique_capsule_path(self.library_dir, manifest.name)
-                        try:
-                            os.link(temporary, destination)
-                            break
-                        except FileExistsError:
-                            continue
+                    warning = None
+                    if copied_capsule.container_format == "legacy":
+                        while True:
+                            destination = unique_capsule_path(
+                                self.library_dir, manifest.name
+                            )
+                            try:
+                                copied_capsule.convert_to_playable(destination)
+                                break
+                            except FileExistsError:
+                                continue
+                            except Exception as conversion_error:
+                                while True:
+                                    destination = unique_legacy_capsule_path(
+                                        self.library_dir, manifest.name
+                                    )
+                                    try:
+                                        os.link(temporary, destination)
+                                        break
+                                    except FileExistsError:
+                                        continue
+                                warning = (
+                                    "Legacy capsule was imported without a playable preview: "
+                                    + str(conversion_error)
+                                )
+                                break
+                    else:
+                        while True:
+                            destination = unique_capsule_path(
+                                self.library_dir, manifest.name
+                            )
+                            try:
+                                os.link(temporary, destination)
+                                break
+                            except FileExistsError:
+                                continue
 
                     known_ids.add(manifest.id)
-                    result["imported"].append(
-                        {
-                            "source": str(source),
-                            "path": str(destination.resolve()),
-                            "id": manifest.id,
-                            "name": manifest.name,
-                        }
-                    )
+                    imported = {
+                        "source": str(source),
+                        "path": str(destination.resolve()),
+                        "id": manifest.id,
+                        "name": manifest.name,
+                    }
+                    if warning:
+                        imported["warning"] = warning
+                    result["imported"].append(imported)
                 except Exception as error:
                     result["failed"].append(
                         {"source": str(source), "error": str(error)}
@@ -403,19 +500,14 @@ class CapsuleLibrary:
     def delete(self, capsule_id: str) -> None:
         with self._lock:
             capsule = self.find(capsule_id)
-            capsule.path.with_suffix(".wav").unlink(missing_ok=True)
+            if capsule.container_format == "legacy":
+                capsule.path.with_suffix(".wav").unlink(missing_ok=True)
             capsule.path.unlink()
             self.reindex()
 
     def _rewrite_manifest(self, capsule: Capsule, **changes) -> None:
-        import tempfile
-        import zipfile
-        import hashlib
-
         capsule.verify()
-        with zipfile.ZipFile(capsule.path) as source:
-            manifest = capsule.manifest
-            checksums = json.loads(source.read("checksums.json"))
+        manifest = capsule.manifest
         channel_names = changes.pop("channel_names", None)
         if channel_names is not None:
             normalized = [str(name).strip() for name in channel_names]
@@ -425,27 +517,4 @@ class CapsuleLibrary:
                 channel.name = name
         for key, value in changes.items():
             setattr(manifest, key, value)
-        manifest.validate()
-        manifest_bytes = json.dumps(manifest.to_dict(), indent=2, sort_keys=True).encode()
-        checksums["manifest.json"] = hashlib.sha256(manifest_bytes).hexdigest()
-        checksum_bytes = json.dumps(checksums, indent=2, sort_keys=True).encode()
-        with tempfile.NamedTemporaryFile(
-            dir=capsule.path.parent, prefix=f".{capsule.path.name}.", suffix=".tmp", delete=False
-        ) as handle:
-            temporary = Path(handle.name)
-        try:
-            with zipfile.ZipFile(capsule.path) as source, zipfile.ZipFile(
-                temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
-            ) as target:
-                for info in source.infolist():
-                    if info.filename in {"manifest.json", "checksums.json"}:
-                        continue
-                    with source.open(info) as input_member, target.open(info.filename, "w") as output_member:
-                        import shutil
-                        shutil.copyfileobj(input_member, output_member, length=1024 * 1024)
-                target.writestr("manifest.json", manifest_bytes)
-                target.writestr("checksums.json", checksum_bytes)
-            Capsule(temporary).verify()
-            temporary.replace(capsule.path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        capsule.replace_manifest(manifest)

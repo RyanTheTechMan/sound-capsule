@@ -22,6 +22,8 @@ std::unique_ptr<juce::InputStream> createCapsulePreviewStream(const juce::File& 
 {
     if (!capsule.existsAsFile())
         return {};
+    if (capsule.getFileName().endsWithIgnoreCase(".flcapsule.wav"))
+        return capsule.createInputStream();
     juce::ZipFile archive(capsule);
     const auto memberName = previewMemberName(archive);
     const auto memberIndex = archive.getIndexOfFileName(memberName);

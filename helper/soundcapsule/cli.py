@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from .capsule import Capsule
+from .capsule import Capsule, is_capsule_filename
 from .config import Settings
 from .flp import FLPFile
 from .project import CapsuleService
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             service.library.reindex()
             _print({"capsules": service.library.list()})
         elif args.command == "inspect":
-            if args.path.suffix == ".flcapsule":
+            if is_capsule_filename(args.path):
                 capsule = Capsule(args.path)
                 capsule.verify()
                 _print(capsule.manifest.to_dict())

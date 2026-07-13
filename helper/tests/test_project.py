@@ -1009,6 +1009,7 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertIn("validating", " ".join(step for _, step in updates))
             self.assertIn("Packaging", " ".join(step for _, step in updates))
             self.assertEqual(updates[-1], (100, "Capsule saved"))
+            self.assertTrue(capsules[0].path.name.endswith(".flcapsule.wav"))
             self.assertEqual(capsules[0].manifest.name, "Custom capture")
             self.assertEqual(capsules[0].manifest.channels[0].name, "Custom capture")
 
@@ -1026,6 +1027,9 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(
                 [capsule.manifest.name for capsule in individual],
                 ["Serum Lead", "Kick"],
+            )
+            self.assertTrue(
+                all(capsule.path.name.endswith(".flcapsule.wav") for capsule in individual)
             )
 
     def test_backup_uses_project_data_folder_but_rejects_unresolved_macros(self) -> None:

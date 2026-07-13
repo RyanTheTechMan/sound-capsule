@@ -14,6 +14,13 @@ const auto background = juce::Colour(0xff101318);
 const auto panel = juce::Colour(0xff1b2028);
 const auto accent = juce::Colour(0xff69d2a8);
 
+bool isSoundCapsuleFile(const juce::File& file)
+{
+    const auto name = file.getFileName();
+    return name.endsWithIgnoreCase(".flcapsule.wav")
+        || name.endsWithIgnoreCase(".flcapsule");
+}
+
 #ifndef SOUNDCAPSULE_RELEASE_REPOSITORY
  #define SOUNDCAPSULE_RELEASE_REPOSITORY ""
 #endif
@@ -1131,7 +1138,7 @@ bool SoundCapsuleAudioProcessorEditor::isInterestedInFileDrag(
     auto hasExternalCapsule = false;
     for (const auto& path : files)
     {
-        if (!juce::File(path).hasFileExtension("flcapsule"))
+        if (!isSoundCapsuleFile(juce::File(path)))
             return false;
         if (!isLibraryCapsuleFile(path))
             hasExternalCapsule = true;
@@ -1915,7 +1922,46 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
         list.updateContent();
         list.repaint();
         preloadVisibleRows();
-        status.setText(juce::String(rows.size()) + " capsules", juce::dontSendNotification);
+        auto statusText = juce::String(rows.size()) + " capsules";
+        if (!migrationNoticeShown)
+        {
+            migrationNoticeShown = true;
+            const auto migration = response.getProperty("migration_summary", juce::var());
+            const auto convertedValue = migration.getProperty("converted", juce::var());
+            const auto failedValue = migration.getProperty("failed", juce::var());
+            const auto* converted = convertedValue.getArray();
+            const auto* failed = failedValue.getArray();
+            const auto convertedCount = converted != nullptr ? converted->size() : 0;
+            const auto failedCount = failed != nullptr ? failed->size() : 0;
+            if (convertedCount > 0 || failedCount > 0)
+            {
+                statusText = "Upgraded " + juce::String(convertedCount)
+                           + (convertedCount == 1 ? " capsule" : " capsules");
+                if (failedCount > 0)
+                    statusText << "; " << failedCount << " left in the legacy format";
+            }
+            if (failedCount > 0)
+            {
+                juce::String details;
+                details << "Sound Capsule could not upgrade these files. They remain unchanged and readable:\n\n";
+                auto shown = 0;
+                for (const auto& failure : *failed)
+                {
+                    if (shown >= 12)
+                        break;
+                    details << failure.getProperty("source", "").toString()
+                            << "\n" << failure.getProperty("error", "").toString() << "\n\n";
+                    ++shown;
+                }
+                if (failedCount > shown)
+                    details << "...and " << failedCount - shown << " more\n";
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::WarningIcon,
+                    "Some capsules were not upgraded",
+                    details.trimEnd(), "OK");
+            }
+        }
+        status.setText(statusText, juce::dontSendNotification);
     });
 }
 
@@ -3363,23 +3409,29 @@ void SoundCapsuleAudioProcessorEditor::exportCapsule(
     auto filename = juce::File::createLegalFileName(name.trim());
     if (filename.isEmpty())
         filename = "Sound Capsule";
-    filename = juce::File(filename).withFileExtension("flcapsule").getFileName();
+    const auto legacy = source.getFileName().endsWithIgnoreCase(".flcapsule")
+                     && !source.getFileName().endsWithIgnoreCase(".flcapsule.wav");
+    const auto extension = legacy ? ".flcapsule" : ".flcapsule.wav";
+    filename = filename + extension;
     const auto initial = juce::File::getSpecialLocation(
         juce::File::userDocumentsDirectory).getChildFile(filename);
     exportChooser = std::make_unique<juce::FileChooser>(
-        "Export Sound Capsule", initial, "*.flcapsule", true, false, this);
+        "Export Sound Capsule", initial,
+        legacy ? "*.flcapsule" : "*.flcapsule.wav", true, false, this);
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     exportChooser->launchAsync(
         juce::FileBrowserComponent::saveMode
             | juce::FileBrowserComponent::canSelectFiles
             | juce::FileBrowserComponent::warnAboutOverwriting,
-        [safe, source](const juce::FileChooser& chooser) {
+        [safe, source, extension](const juce::FileChooser& chooser) {
             if (safe == nullptr)
                 return;
             auto destination = chooser.getResult();
             if (destination == juce::File())
                 return;
-            destination = destination.withFileExtension("flcapsule");
+            auto destinationName = destination.getFileName();
+            if (!destinationName.endsWithIgnoreCase(extension))
+                destination = destination.getSiblingFile(destinationName + extension);
             safe->copyCapsuleForExport(source, destination);
         });
 }
@@ -3441,6 +3493,11 @@ void SoundCapsuleAudioProcessorEditor::showAddCapsulesResult(const juce::var& re
     const auto importedCount = imported != nullptr ? imported->size() : 0;
     const auto skippedCount = skipped != nullptr ? skipped->size() : 0;
     const auto failedCount = failed != nullptr ? failed->size() : 0;
+    auto warningCount = 0;
+    if (imported != nullptr)
+        for (const auto& item : *imported)
+            if (item.getProperty("warning", "").toString().isNotEmpty())
+                ++warningCount;
 
     status.setText(
         juce::String(importedCount) + (importedCount == 1 ? " capsule added"
@@ -3448,12 +3505,15 @@ void SoundCapsuleAudioProcessorEditor::showAddCapsulesResult(const juce::var& re
         juce::dontSendNotification);
     if (importedCount > 0)
         refreshLibrary();
-    if (skippedCount == 0 && failedCount == 0)
+    if (skippedCount == 0 && failedCount == 0 && warningCount == 0)
         return;
 
     juce::String details;
     details << importedCount << " added, " << skippedCount << " skipped, "
-            << failedCount << " failed.\n\n";
+            << failedCount << " failed";
+    if (warningCount > 0)
+        details << ", " << warningCount << " kept in the legacy format";
+    details << ".\n\n";
     auto issueCount = 0;
     const auto appendIssues = [&details, &issueCount](
                                   const juce::Array<juce::var>* issues,
@@ -3464,17 +3524,21 @@ void SoundCapsuleAudioProcessorEditor::showAddCapsulesResult(const juce::var& re
         {
             if (issueCount >= 12)
                 break;
+            const auto detail = issue.getProperty(detailProperty, "").toString();
+            if (detail.isEmpty())
+                continue;
             const auto source = issue.getProperty("source", "").toString();
             details << juce::File(source).getFileName() << ": "
-                    << issue.getProperty(detailProperty, "Unknown error").toString()
-                    << "\n";
+                    << detail << "\n";
             ++issueCount;
         }
     };
+    appendIssues(imported, juce::Identifier("warning"));
     appendIssues(skipped, juce::Identifier("reason"));
     appendIssues(failed, juce::Identifier("error"));
-    if (skippedCount + failedCount > issueCount)
-        details << "...and " << skippedCount + failedCount - issueCount << " more";
+    if (warningCount + skippedCount + failedCount > issueCount)
+        details << "...and " << warningCount + skippedCount + failedCount - issueCount
+                << " more";
 
     juce::AlertWindow::showMessageBoxAsync(
         juce::MessageBoxIconType::WarningIcon,

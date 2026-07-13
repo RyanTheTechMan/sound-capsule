@@ -8,6 +8,12 @@ version's section is also used as its GitHub release notes.
 
 ### Added
 
+- Capsules are now stored and shared as playable `.flcapsule.wav` files. Their
+  normal WAV audio contains a verified `SCAP` payload with the MIDI, channel
+  states, manifest, and embedded sample assets.
+- Verified legacy `.flcapsule` libraries upgrade atomically on startup, while
+  legacy imports remain supported and failed conversions leave their sources
+  unchanged.
 - Capsule rows show a warning icon beside the title when they contain newer FL
   Studio project data than the connected host. Hovering explains the version
   mismatch, and importing requires explicit confirmation while still allowing

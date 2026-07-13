@@ -12,10 +12,128 @@ from unittest.mock import patch
 
 from soundcapsule.capsule import Capsule
 from soundcapsule.library import CapsuleLibrary
-from test_flp import fixture_project, write_float_silence, write_silence
+from test_flp import (
+    fixture_project,
+    make_legacy_capsule,
+    write_float_silence,
+    write_silence,
+)
 
 
 class LibraryTests(unittest.TestCase):
+    def test_reindex_atomically_upgrades_legacy_capsules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library_dir = root / "library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            legacy = Capsule.build(
+                library_dir / "Lead.flcapsule", name="Lead",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(legacy)
+            capsule_id = legacy.manifest.id
+            library = CapsuleLibrary(library_dir, root / "index.sqlite3")
+
+            self.assertEqual(library.reindex(), 1)
+
+            upgraded = library_dir / "Lead.flcapsule.wav"
+            self.assertFalse(legacy.path.exists())
+            self.assertTrue(upgraded.exists())
+            self.assertEqual(Capsule(upgraded).container_format, "playable")
+            self.assertEqual(Capsule(upgraded).manifest.id, capsule_id)
+            self.assertEqual(len(library.last_migration_summary["converted"]), 1)
+            self.assertFalse(library.last_migration_summary["failed"])
+
+    def test_failed_legacy_upgrade_leaves_the_source_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library_dir = root / "library"
+            library_dir.mkdir()
+            legacy = library_dir / "Broken.flcapsule"
+            original = b"not a capsule"
+            legacy.write_bytes(original)
+            library = CapsuleLibrary(library_dir, root / "index.sqlite3")
+
+            self.assertEqual(library.reindex(), 0)
+
+            self.assertEqual(legacy.read_bytes(), original)
+            self.assertFalse(list(library_dir.glob("*.flcapsule.wav")))
+            self.assertEqual(len(library.last_migration_summary["failed"]), 1)
+
+    def test_legacy_cleanup_failure_rolls_back_the_playable_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library_dir = root / "library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            legacy = Capsule.build(
+                library_dir / "Lead.flcapsule", name="Lead",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(legacy)
+            library = CapsuleLibrary(library_dir, root / "index.sqlite3")
+            original_unlink = Path.unlink
+
+            def fail_source_unlink(path: Path, *args, **kwargs):
+                if path == legacy.path:
+                    raise OSError("simulated cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", new=fail_source_unlink):
+                self.assertEqual(library.reindex(), 1)
+
+            self.assertTrue(legacy.path.exists())
+            self.assertFalse(list(library_dir.glob("*.flcapsule.wav")))
+            self.assertEqual(len(library.last_migration_summary["failed"]), 1)
+
+    def test_legacy_upgrade_uses_a_collision_safe_playable_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library_dir = root / "library"
+            preview = root / "preview.wav"
+            write_silence(preview)
+            Capsule.build(
+                library_dir / "Lead.flcapsule.wav", name="Existing",
+                project=fixture_project(), channel_ids=[5], pattern_id=3,
+                preview_wav=preview,
+            )
+            legacy = Capsule.build(
+                library_dir / "Lead.flcapsule", name="Migrated",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(legacy)
+            library = CapsuleLibrary(library_dir, root / "index.sqlite3")
+
+            self.assertEqual(library.reindex(), 2)
+
+            self.assertTrue((library_dir / "Lead.flcapsule.wav").exists())
+            self.assertTrue((library_dir / "Lead-2.flcapsule.wav").exists())
+            self.assertFalse(legacy.path.exists())
+
+    def test_imported_legacy_capsule_is_stored_as_playable_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            legacy = Capsule.build(
+                root / "incoming" / "Shared.flcapsule", name="Shared",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(legacy)
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+
+            result = library.add_capsules([legacy.path])
+
+            imported = Path(result["imported"][0]["path"])
+            self.assertTrue(imported.name.endswith(".flcapsule.wav"))
+            self.assertEqual(Capsule(imported).container_format, "playable")
+            self.assertTrue(legacy.path.exists())
+
     def test_add_capsules_validates_copies_and_reports_partial_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -85,7 +203,7 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(len(result["imported"]), 2)
             self.assertEqual(
                 {Path(item["path"]).name for item in result["imported"]},
-                {"Same-Name.flcapsule", "Same-Name-2.flcapsule"},
+                {"Same-Name.flcapsule.wav", "Same-Name-2.flcapsule.wav"},
             )
             self.assertEqual(len(library.list()), 2)
 
@@ -108,7 +226,7 @@ class LibraryTests(unittest.TestCase):
             shutil.copy2(preview, library_dir / "Lead.wav")
             library = CapsuleLibrary(library_dir, root / "index.sqlite3")
             self.assertEqual(library.reindex(), 1)
-            self.assertFalse((library_dir / "Lead.wav").exists())
+            self.assertTrue((library_dir / "Lead.wav").exists())
             self.assertEqual(len(library.list("Serum")), 1)
 
             library.set_favorite(capsule.manifest.id, True)
@@ -185,6 +303,7 @@ class LibraryTests(unittest.TestCase):
                 project=fixture_project(), channel_ids=[2], pattern_id=3,
                 pattern_length_steps=16, preview_wav=preview,
             )
+            make_legacy_capsule(capsule)
             with zipfile.ZipFile(capsule.path) as source:
                 members = {
                     name: source.read(name)
@@ -202,9 +321,10 @@ class LibraryTests(unittest.TestCase):
                     target.writestr(name, data)
                 target.writestr("checksums.json", json.dumps(checksums))
 
+            capsule_id = capsule.manifest.id
             library = CapsuleLibrary(root / "library", root / "index.sqlite3")
             library.reindex()
-            row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
+            row = next(item for item in library.list() if item["id"] == capsule_id)
             notes = json.loads(row["note_preview"])
             legacy_end = 16 * fixture_project().ppq / 4
 

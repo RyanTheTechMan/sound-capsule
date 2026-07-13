@@ -177,6 +177,7 @@ private:
     uint32_t lastOperationProgressPollAt = 0;
     uint32_t operationOverlayHideAt = 0;
     uint64_t listGeneration = 0;
+    bool migrationNoticeShown = false;
     uint64_t previewGeneration = 0;
     juce::String suggestedCapsuleName;
     juce::String playingCapsuleId;

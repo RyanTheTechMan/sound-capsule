@@ -53,6 +53,7 @@ class CapsuleService:
         self.bridge = BridgeQueue(settings.bridge_dir)
         self.library = CapsuleLibrary(settings.library_dir, settings.data_dir / "library.sqlite3")
         self.library.reindex()
+        self.library_migration_summary = self.library.last_migration_summary
         for cached_preview in self.settings.cache_dir.glob("*.wav"):
             try:
                 cached_preview.unlink(missing_ok=True)

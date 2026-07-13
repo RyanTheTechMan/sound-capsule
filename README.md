@@ -1,9 +1,9 @@
 # Sound Capsule
 
-Sound Capsule lets you save an FL Studio sound as a portable `.flcapsule` file.
+Sound Capsule lets you save an FL Studio sound as a portable `.flcapsule.wav` file.
 Each capsule contains the selected generator channel or channels, their notes in
-the active pattern, and an audio preview—ready to browse and reuse in another
-project.
+the active pattern, and an audio preview—ready to play in Finder, Explorer, chat
+apps, and ordinary audio players, then reuse in another project.
 
 The standalone app is the main way to use Sound Capsule. The optional VST3 can
 also display the library inside FL Studio, but it is not required.
@@ -16,8 +16,8 @@ also display the library inside FL Studio, but it is not required.
   playback.
 - Import a capsule into the current pattern, a new pattern, or matching selected
   channels.
-- Share capsules by dragging them out, exporting through a native Save dialog,
-  or dropping shared `.flcapsule` files into the app.
+- Share playable capsules by dragging them out, exporting through a native Save
+  dialog, or dropping shared `.flcapsule.wav` files into the app.
 
 ## Install
 
@@ -63,7 +63,7 @@ uv run --python 3.12 scripts/install.py --build . --with-vst
 
 See [Windows MIDI setup](docs/WINDOWS_MIDI_SETUP.md) for the full loopMIDI steps.
 
-In **Settings**, **Capsule save location** chooses where `.flcapsule` files are
+In **Settings**, **Capsule save location** chooses where `.flcapsule.wav` files are
 stored without moving Sound Capsule's program settings or cache. When changing
 locations, you can merge the current library into the new folder or leave the
 existing files where they are. Files with the same relative path are not
@@ -101,13 +101,24 @@ available for the recovery period configured in Settings.
 ## Share a capsule
 
 - Drag a library row from its name/details area to Finder, Explorer, another
-  folder, or an app such as Discord. Sound Capsule shares a copy and keeps the
-  library file in place.
+  folder, or an app such as Discord. The same file can play as WAV audio and
+  still imports with its MIDI and channel information intact.
 - Open a row's three-dot menu and choose **Export...** to copy it with the native
   Save dialog.
-- Drop one or more `.flcapsule` files anywhere on the Sound Capsule window to
+- Drop one or more `.flcapsule.wav` files anywhere on the Sound Capsule window to
   validate and add them. Valid files in a mixed batch are added while corrupt,
   unsupported, or duplicate capsules are reported and skipped.
+
+Older ZIP-based `.flcapsule` files remain supported. The app upgrades verified
+legacy files in the library to playable `.flcapsule.wav` files without changing
+their IDs or musical contents; a legacy source is removed only after its
+replacement verifies successfully.
+
+The capsule data lives in a private `SCAP` chunk after the WAV audio. Copying or
+downloading the original file preserves it, but trimming or re-exporting the file
+through an audio editor may remove the capsule data and leave ordinary audio.
+The file is intentionally not a generic ZIP archive; use Sound Capsule to inspect
+or import its embedded contents.
 
 ## What’s included
 
