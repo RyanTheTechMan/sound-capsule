@@ -1,3 +1,4 @@
+#include "FlVersion.h"
 #include "PreviewMath.h"
 
 #include <cmath>
@@ -47,7 +48,28 @@ int main()
     passed &= expect(closeTo(soundcapsule::preview::waveformVerticalZoom(0.25f, false), 1.0),
                      "disabled waveform normalization must not alter display scale");
 
+    using soundcapsule::flversion::displayRelease;
+    using soundcapsule::flversion::sourceIsNewer;
+    passed &= expect(sourceIsNewer("26.4.0.100", "26.2.9.9999"),
+                     "a newer FL minor release must warn");
+    passed &= expect(!sourceIsNewer("26.2.9.9999", "26.4.0.100"),
+                     "an older FL release must not warn in a newer destination");
+    passed &= expect(!sourceIsNewer("26.1.0.5530", "26.1.0.5294"),
+                     "platform build numbers in the same release must be equivalent");
+    passed &= expect(!sourceIsNewer("26.1.0.5294", "26.1.0.5530"),
+                     "platform build equivalence must work in both directions");
+    passed &= expect(sourceIsNewer("27.0", "26.9"),
+                     "a newer FL major release must warn");
+    passed &= expect(!sourceIsNewer("26.2.1", "26.2.0"),
+                     "patch releases must share one compatibility level");
+    passed &= expect(!sourceIsNewer("unknown", "26.2")
+                     && !sourceIsNewer("26..4", "26.2")
+                     && !sourceIsNewer("26.4", ""),
+                     "missing or malformed versions must not claim a direction");
+    passed &= expect(displayRelease("26.4.3.1234") == "26.4",
+                     "displayed compatibility versions must use major.minor");
+
     if (passed)
-        std::cout << "Preview math tests passed\n";
+        std::cout << "Preview and FL version tests passed\n";
     return passed ? 0 : 1;
 }

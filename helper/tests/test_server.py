@@ -19,6 +19,7 @@ from soundcapsule.bridge import (
 )
 from soundcapsule.capsule import Capsule
 from soundcapsule.config import Settings
+from soundcapsule.flp import EVENT_FL_VERSION
 from soundcapsule.server import SoundCapsuleServer
 from test_flp import fixture_project, write_silence
 
@@ -314,6 +315,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(payload["load_sequence"], 9)
             self.assertEqual(payload["last_load_status"], 100)
             self.assertEqual(payload["pattern_length_steps"], 32)
+            self.assertEqual(payload["project_fl_version"], "")
 
     def test_session_heartbeat_does_not_wait_for_project_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -422,6 +424,67 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(payload["project_title"], "temp")
             self.assertEqual(payload["project_path"], str(project))
+            self.assertEqual(payload["project_fl_version"], "25.2.5.5055")
+
+    def test_session_project_version_refreshes_after_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project_path = root / "Song.flp"
+            project_path.write_bytes(fixture_project().to_bytes())
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            session_payload = {
+                "timestamp": time.time(),
+                "project_title": "Song",
+                "midi_api_version": 42,
+                "selected_channels": [0],
+                "selected_channel_names": ["Serum Lead"],
+                "current_pattern": 3,
+                "pattern_name": "Verse",
+                "pattern_length_steps": 16,
+                "ppq": 96,
+                "changed": 0,
+                "save_sequence": 1,
+                "last_save_requested_at": time.time(),
+                "load_sequence": 1,
+                "last_load_status": 100,
+                "last_load_at": time.time(),
+            }
+            session_path = settings.bridge_dir / "session.json"
+            session_path.write_text(json.dumps(session_payload), encoding="utf-8")
+
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "_resolve_project", return_value=project_path
+            ) as resolver:
+                deadline = time.monotonic() + 1
+                payload = server.dispatch({"command": "session", "args": {}})
+                while time.monotonic() < deadline and not payload["project_fl_version"]:
+                    time.sleep(0.01)
+                    payload = server.dispatch({"command": "session", "args": {}})
+                self.assertEqual(payload["project_fl_version"], "25.2.5.5055")
+
+                updated = fixture_project()
+                version = next(
+                    event for event in updated.events if event.id == EVENT_FL_VERSION
+                )
+                updated.events[updated.events.index(version)] = version.with_payload(
+                    b"27.4.0.1234\0"
+                )
+                project_path.write_bytes(updated.to_bytes())
+                session_payload["timestamp"] = time.time()
+                session_payload["save_sequence"] = 2
+                session_payload["last_save_requested_at"] = time.time()
+                session_path.write_text(json.dumps(session_payload), encoding="utf-8")
+
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    payload = server.dispatch({"command": "session", "args": {}})
+                    if payload["project_fl_version"] == "27.4.0.1234":
+                        break
+                    time.sleep(0.01)
+
+            self.assertEqual(payload["project_fl_version"], "27.4.0.1234")
+            self.assertGreaterEqual(resolver.call_count, 2)
 
     def test_session_retries_project_discovery_after_transient_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

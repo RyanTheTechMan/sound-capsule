@@ -10,7 +10,6 @@ from unittest import mock
 
 from soundcapsule.capsule import Capsule
 from soundcapsule.bridge import BridgeSession
-from soundcapsule.compatibility import require_mutation_profile
 from soundcapsule.config import Settings
 from soundcapsule.flp import (
     EVENT_FL_VERSION,
@@ -778,41 +777,67 @@ class ProjectServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(FLPUnsupportedError, "expired"):
                 service.undo_last_import(project_path=source, open_project=False)
 
-    def test_unknown_fl_version_is_library_only(self) -> None:
+    def test_capture_allows_any_structurally_valid_fl_version(self) -> None:
+        versions = (
+            "24.9.0.1000",
+            "25.2.5.5319",
+            "26.9.0.9999",
+            "27.0.0.1",
+            "99.4.3.2",
+        )
+        for fl_version in versions:
+            with self.subTest(fl_version=fl_version), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                project = fixture_project()
+                version = next(
+                    event for event in project.events if event.id == EVENT_FL_VERSION
+                )
+                project.events[project.events.index(version)] = version.with_payload(
+                    fl_version.encode() + b"\0"
+                )
+                source = root / "Project.flp"
+                source.write_bytes(project.to_bytes())
+                preview = root / "preview.wav"
+                write_silence(preview)
+
+                capsules = CapsuleService(Settings(data_dir=root / "data")).capture(
+                    "Any FL", project_path=source, preview_wav=preview
+                )
+
+                self.assertEqual(len(capsules), 1)
+                self.assertEqual(capsules[0].manifest.source_fl_version, fl_version)
+
+    def test_import_allows_a_structurally_valid_future_destination(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             settings = Settings(data_dir=root / "data")
-            project = fixture_project()
-            version = next(event for event in project.events if event.id == 199)
-            project.events[project.events.index(version)] = version.with_payload(b"26.0.0\0")
-            source = root / "Future.flp"
-            source.write_bytes(project.to_bytes())
+            settings.ensure()
             preview = root / "preview.wav"
             write_silence(preview)
-            service = CapsuleService(settings)
-            with self.assertRaises(FLPUnsupportedError):
-                service.capture("Future", project_path=source, preview_wav=preview)
-
-    def test_fl25_windows_build_allows_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            project = fixture_project()
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule", name="Lead",
+                project=fixture_project(), channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+            destination = fixture_project()
             version = next(
-                event for event in project.events if event.id == EVENT_FL_VERSION
+                event for event in destination.events if event.id == EVENT_FL_VERSION
             )
-            project.events[project.events.index(version)] = version.with_payload(
-                b"25.2.5.5319\0"
+            destination.events[destination.events.index(version)] = version.with_payload(
+                b"99.4.3.2\0"
             )
-            source = root / "FL25-Windows.flp"
-            source.write_bytes(project.to_bytes())
-            preview = root / "preview.wav"
-            write_silence(preview)
+            target = root / "Future.flp"
+            target.write_bytes(destination.to_bytes())
+            service = CapsuleService(settings)
+            service.library.reindex()
 
-            capsules = CapsuleService(Settings(data_dir=root / "data")).capture(
-                "FL 25 Windows", project_path=source, preview_wav=preview
+            result = service.import_capsule(
+                capsule.manifest.id, mode="append", project_path=target,
+                open_project=False,
             )
 
-            self.assertEqual(len(capsules), 1)
+            self.assertEqual(FLPFile.read(result.merged_project).fl_version, "99.4.3.2")
+            self.assertEqual(FLPFile.read(result.merged_project).channel_count, 3)
 
     def test_failed_render_cleans_capture_project_preview_and_wave(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -950,24 +975,6 @@ class ProjectServiceTests(unittest.TestCase):
                 [capsule.manifest.name for capsule in individual],
                 ["Serum Lead", "Kick"],
             )
-
-    def test_mutation_profiles_cover_only_verified_host_builds(self) -> None:
-        self.assertEqual(require_mutation_profile("25.2.5.5055").name, "fl25")
-        self.assertEqual(require_mutation_profile("25.2.5.5319").name, "fl25")
-        self.assertEqual(require_mutation_profile("26.1.0.5294").name, "fl26")
-        self.assertEqual(require_mutation_profile("26.1.0.5530").name, "fl26")
-        for unsupported in (
-            "25.2.5.5054",
-            "25.9.0.1",
-            "26.1.0.5293",
-            "26.9.0.1",
-            "27.0.0",
-            "unknown",
-        ):
-            with self.subTest(unsupported=unsupported), self.assertRaises(
-                FLPUnsupportedError
-            ):
-                require_mutation_profile(unsupported)
 
     def test_backup_uses_project_data_folder_but_rejects_unresolved_macros(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -14,7 +14,6 @@ import uuid
 
 from .bridge import BridgeQueue, BridgeSession
 from .capsule import Capsule, slugify, unique_capsule_path
-from .compatibility import require_mutation_profile
 from .config import Settings
 from .flp import ChannelSection, FLPFile, FLPUnsupportedError, NoteRecord
 from .library import CapsuleLibrary
@@ -180,7 +179,6 @@ class CapsuleService:
         try:
             progress(18, "Reading and validating the FL Studio project")
             project = FLPFile.read(staged_source)
-            require_mutation_profile(project.fl_version)
             if project.tempo_bpm is None:
                 raise FLPUnsupportedError(
                     "the project does not contain a supported static tempo"
@@ -348,8 +346,6 @@ class CapsuleService:
         progress(20, "Staging the saved project")
         staged_source, source_hash = self._stage_project(project_path, "import")
         project = FLPFile.read(staged_source)
-        require_mutation_profile(project.fl_version)
-
         progress(32, "Restoring instruments, samples, and MIDI")
         sections: list[ChannelSection] = []
         notes_by_source: dict[int, list[NoteRecord]] = {}
@@ -494,7 +490,6 @@ class CapsuleService:
         if _sha256(backup_bytes) != record["source_sha256"]:
             raise RuntimeError("the import backup checksum no longer matches the transaction journal")
         original = FLPFile.from_bytes(backup_bytes)
-        require_mutation_profile(original.fl_version)
         safety = self._create_backup(project_path, original, current_bytes, "before-undo")
         try:
             self._atomic_write(project_path, backup_bytes)

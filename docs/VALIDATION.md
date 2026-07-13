@@ -1,8 +1,11 @@
 # Compatibility validation
 
-Mutation profiles are exact FL project-format versions, not major/minor
-prefixes. A profile is enabled only after automated corpus checks and the FL
-host matrix pass on that OS/build.
+Sound Capsule attempts narrowly scoped mutation for every FL project version
+that passes lossless parsing and structural validation. This is best-effort
+compatibility, not a promise that an untested future FLP layout is unchanged.
+Capsules warn when their saved FL `major.minor` release is newer than the
+destination project's saved release; patch and platform build numbers are
+treated as equivalent.
 
 ## Automated checks
 
@@ -72,7 +75,7 @@ through the isolated renderer. The original project remained open and the
 generated 431,008-byte WAV passed non-silent RIFF/WAVE validation.
 
 The following still require explicit interactive host acceptance before a
-public release profile is claimed:
+release is claimed as host-tested:
 
 1. On Windows, validate **Sound Capsule MIDI** through loopMIDI; preserve
    **Sound Capsule Control** for an upgraded legacy setup. Confirm the selected
@@ -111,10 +114,11 @@ public release profile is claimed:
    duplicate and a corrupt capsule in the same batch. Verify the native Export
    dialog's default filename, cancellation, overwrite warning, and saved bytes.
 9. Repeat the suite on Windows x64, macOS Intel, and macOS Apple Silicon before
-   adding each exact build to `helper/soundcapsule/compatibility.py`.
+   claiming a release as host-tested. Untested releases remain available on a
+   best-effort basis when their structure passes the same safety checks.
 
-Do not enable a profile based only on parser success. FL must load and render
-the generated fixtures with the expected logical and audible state.
+Do not claim host validation based only on parser success. FL must load and
+render the generated fixtures with the expected logical and audible state.
 
 ## Release gates
 

@@ -12,6 +12,7 @@ import uuid
 from . import __version__
 from .capsule import Capsule
 from .config import Settings
+from .flp import FLPFile
 from .library import CapsuleLibrary
 from .project import CapsuleService
 
@@ -51,6 +52,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         self.session_project_lock = threading.Lock()
         self.session_project_token: str | None = None
         self.session_project_path: Path | None = None
+        self.session_project_fl_version = ""
         self.session_project_resolution: str | None = None
         self.operation_progress: dict = {
             "operation_id": None,
@@ -91,24 +93,33 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         ).hexdigest()
 
     def _resolve_session_project_in_background(self, token: str, session) -> None:
+        project_fl_version = ""
         try:
             project_path = self.service._resolve_project(
                 None, session, require_clean=False
             )
         except (OSError, RuntimeError, ValueError):
             project_path = None
+        if project_path is not None:
+            try:
+                project_fl_version = FLPFile.read(project_path).fl_version
+            except (OSError, RuntimeError, ValueError):
+                # Project identity is still useful even if an unknown future
+                # FLP format prevents a directional compatibility warning.
+                project_fl_version = ""
         with self.session_project_lock:
             if self.session_project_resolution != token:
                 return
             self.session_project_token = token
             self.session_project_path = project_path
+            self.session_project_fl_version = project_fl_version
             if project_path is None:
                 # FL can publish its first heartbeat before its MRU/save state
                 # settles. Let a later UI poll retry without ever blocking it.
                 self.session_project_resolution = None
 
-    def _project_for_live_session(self, session) -> Path | None:
-        """Return cached project identity immediately and resolve misses off-thread.
+    def _project_for_live_session(self, session) -> tuple[Path | None, str]:
+        """Return cached project identity/version and resolve misses off-thread.
 
         A live MIDI heartbeat is the connection signal. Locating an untitled FLP
         may require parsing several recent projects and must never delay that
@@ -117,19 +128,20 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         token = self._session_resolution_token(session)
         with self.session_project_lock:
             if self.session_project_token == token and self.session_project_path is not None:
-                return self.session_project_path
+                return self.session_project_path, self.session_project_fl_version
             if self.session_project_resolution == token:
-                return None
+                return None, ""
             self.session_project_resolution = token
             self.session_project_token = token
             self.session_project_path = None
+            self.session_project_fl_version = ""
         threading.Thread(
             target=self._resolve_session_project_in_background,
             args=(token, session),
             name="SoundCapsuleProjectResolver",
             daemon=True,
         ).start()
-        return None
+        return None, ""
 
     def _update_operation_progress(
         self,
@@ -284,12 +296,13 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             return {"version": __version__}
         if command == "session":
             session = self.service.bridge.session()
-            project_path = self._project_for_live_session(session)
+            project_path, project_fl_version = self._project_for_live_session(session)
             undo = self.service.undo_status(project_path)
             return {
                 "timestamp": session.timestamp,
                 "project_title": session.project_title or (project_path.stem if project_path else ""),
                 "project_path": str(project_path) if project_path else None,
+                "project_fl_version": project_fl_version,
                 "midi_api_version": session.midi_api_version,
                 "host_name": session.host_name,
                 "host_executable": session.host_executable,

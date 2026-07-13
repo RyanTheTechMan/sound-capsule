@@ -20,6 +20,7 @@ target_sources(SoundCapsule PRIVATE
     src/CapsulePreviewSource.h
     src/HelperClient.cpp
     src/HelperClient.h
+    src/FlVersion.h
     src/PluginEditor.cpp
     src/PluginEditor.h
     src/PluginProcessor.cpp
@@ -52,6 +53,7 @@ juce_add_console_app(SoundCapsulePreviewTests
 )
 target_sources(SoundCapsulePreviewTests PRIVATE
     tests/PreviewMathTests.cpp
+    src/FlVersion.h
     src/PreviewMath.h
 )
 target_include_directories(SoundCapsulePreviewTests PRIVATE src)

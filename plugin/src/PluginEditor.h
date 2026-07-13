@@ -183,7 +183,7 @@ private:
     juce::String completedPreviewId;
     juce::String pendingPreviewId;
     juce::String operationId;
-    juce::String currentFlHostName;
+    juce::String currentProjectFlVersion;
     juce::String availableUpdateTag;
     juce::String availableInstallerName;
     juce::String availableInstallerUrl;
