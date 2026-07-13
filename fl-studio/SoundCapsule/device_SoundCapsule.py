@@ -153,6 +153,7 @@ def _publish_session(force=False, bridge_active=True):
 
 def OnInit():
     _ensure_directories()
+    _acknowledge_existing_command()
     _publish_session(True)
 
 
@@ -177,6 +178,18 @@ def _perform_save():
     _save_sequence += 1
     _last_save_requested_at = time.time()
     _publish_session(True)
+
+
+def _acknowledge_existing_command():
+    """Prevent a request handled by a previous FL session from replaying."""
+    global _last_command_id
+    try:
+        payload = _read_json(_COMMAND)
+        request_id = str(payload.get("request_id", ""))
+        if request_id:
+            _last_command_id = request_id
+    except (OSError, ValueError, TypeError):
+        return
 
 
 def _process_command():
