@@ -6,6 +6,8 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-13
+
 ### Added
 
 - Capsules are now stored and shared as playable `.flcapsule.wav` files. Their
