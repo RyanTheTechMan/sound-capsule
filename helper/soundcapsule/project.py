@@ -59,13 +59,75 @@ class CapsuleService:
                 continue
         self._cleanup_staging()
 
-    def _resolve_project(self, explicit: Path | None, session: BridgeSession | None = None) -> Path:
+    @staticmethod
+    def _rack_names_match(saved: list[str], live: list[str]) -> bool:
+        if len(saved) != len(live):
+            return False
+        mismatches = sum(
+            left.strip().casefold() != right.strip().casefold()
+            for left, right in zip(saved, live, strict=True)
+        )
+        # FL can display a wrapper/preset-derived name while the saved channel
+        # event still contains the generator name, and an unsaved channel rename
+        # exists only in the live rack. One discrepancy in an otherwise-identical
+        # rack of four or more channels remains a strong project signature; if
+        # multiple saved FLPs match, ProjectLocator still refuses the ambiguity.
+        allowed = max(1, len(saved) // 12) if len(saved) >= 4 else 0
+        return mismatches <= allowed
+
+    @staticmethod
+    def _project_matches_session(path: Path, session: BridgeSession) -> bool:
+        try:
+            project = FLPFile.read(path)
+            sections = project.channel_sections()
+        except (OSError, ValueError, RuntimeError):
+            return False
+        if project.ppq != session.ppq:
+            return False
+        if session.channel_names:
+            if session.channel_count != len(sections):
+                return False
+            if not CapsuleService._rack_names_match(
+                [section.name for section in sections], session.channel_names
+            ):
+                return False
+        else:
+            if len(session.selected_channels) != len(session.selected_channel_names):
+                return False
+            for index, expected_name in zip(
+                session.selected_channels, session.selected_channel_names, strict=True
+            ):
+                if not 0 <= index < len(sections):
+                    return False
+                if sections[index].name.strip().casefold() != expected_name.strip().casefold():
+                    return False
+        return True
+
+    @staticmethod
+    def _session_project_cache_key(session: BridgeSession) -> str:
+        signature = {
+            "load_sequence": session.load_sequence,
+            "ppq": session.ppq,
+            "channel_count": session.channel_count,
+            "channel_names": [name.strip().casefold() for name in session.channel_names],
+        }
+        return "session-" + hashlib.sha256(
+            json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _resolve_project(
+        self,
+        explicit: Path | None,
+        session: BridgeSession | None = None,
+        *,
+        require_clean: bool = True,
+    ) -> Path:
         if explicit:
             return explicit.expanduser().resolve()
         session = session or self.bridge.session()
         if session.midi_api_version < 38:
             raise FLPUnsupportedError("Sound Capsule requires FL Studio MIDI scripting API 38 or newer")
-        if session.changed:
+        if require_clean and session.changed:
             raise FLPUnsupportedError("save the FL Studio project before using Sound Capsule")
         changed_after = session.last_save_requested_at
         if changed_after <= 0 or time.time() - changed_after > 5 * 60:
@@ -73,7 +135,12 @@ class CapsuleService:
         return ProjectLocator(
             self.settings.project_roots,
             cache_path=self.settings.data_dir / "project-paths.json",
-        ).find_current(session.project_title, changed_after=changed_after)
+        ).find_current(
+            session.project_title,
+            changed_after=changed_after,
+            candidate_validator=lambda path: self._project_matches_session(path, session),
+            cache_key=self._session_project_cache_key(session),
+        )
 
     @staticmethod
     def _session_channel_ids(project: FLPFile, session: BridgeSession) -> list[int]:
@@ -170,7 +237,6 @@ class CapsuleService:
         staged_source, source_hash = self._stage_project(project_path, "import")
         project = FLPFile.read(staged_source)
         require_mutation_profile(project.fl_version)
-        self._check_version_compatibility(manifest.source_fl_version, project.fl_version)
 
         progress(32, "Restoring instruments, samples, and MIDI")
         sections: list[ChannelSection] = []
@@ -283,7 +349,7 @@ class CapsuleService:
         if open_project:
             progress(86, "Reopening the project in FL Studio")
             before_load = session.load_sequence if session else None
-            self._open(destination)
+            self._open(destination, session)
             progress(92, "Waiting for FL Studio to reconnect")
             result.reload_confirmed = self._wait_for_reload(before_load) if session else None
         # Usage is non-critical bookkeeping and must never turn a completed,
@@ -336,7 +402,7 @@ class CapsuleService:
         self._write_undo_transaction(result)
         if open_project:
             before_load = session.load_sequence if session else None
-            self._open(project_path)
+            self._open(project_path, session)
             result.reload_confirmed = self._wait_for_reload(before_load) if session else None
         return result
 
@@ -359,18 +425,6 @@ class CapsuleService:
             }
         except (OSError, ValueError, FLPUnsupportedError):
             return {"available": False, "remaining_seconds": 0, "window_minutes": self.settings.undo_window_minutes}
-
-    def _check_version_compatibility(self, source: str, target: str) -> None:
-        def parts(value: str) -> tuple[int, ...]:
-            import re
-            return tuple(int(item) for item in re.findall(r"\d+", value))
-
-        source_parts, target_parts = parts(source), parts(target)
-        width = max(len(source_parts), len(target_parts))
-        source_normalized = source_parts + (0,) * (width - len(source_parts))
-        target_normalized = target_parts + (0,) * (width - len(target_parts))
-        if target_parts and source_normalized > target_normalized:
-            raise FLPUnsupportedError(f"capsule was created with newer FL Studio {source}; target is {target}")
 
     def _versioned_import_path(self, source: Path, capsule_name: str) -> Path:
         stem = f"{source.stem[:120]}_capsule-{slugify(capsule_name)[:80]}"
@@ -534,14 +588,80 @@ class CapsuleService:
             time.sleep(0.1)
         return False
 
-    def _open(self, path: Path) -> None:
+    @staticmethod
+    def _mac_host_application(session: BridgeSession) -> Path | None:
+        executable = Path(session.host_executable).expanduser() if session.host_executable else None
+        if executable is not None:
+            for candidate in (executable, *executable.parents):
+                if (
+                    candidate.suffix.casefold() == ".app"
+                    and candidate.name.casefold().startswith("fl studio")
+                    and candidate.is_dir()
+                ):
+                    return candidate
+        name = session.host_name.strip()
+        if not name.casefold().startswith("fl studio"):
+            return None
+        for root in (Path("/Applications"), Path.home() / "Applications"):
+            candidate = root / f"{name}.app"
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    @staticmethod
+    def _windows_host_executable(session: BridgeSession) -> Path | None:
+        executable = Path(session.host_executable).expanduser() if session.host_executable else None
+        if (
+            executable is not None
+            and executable.is_file()
+            and "fl" in executable.name.casefold()
+        ):
+            return executable
+        name = session.host_name.strip()
+        if not name.casefold().startswith("fl studio"):
+            return None
+        import os
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(variable)
+            if not root:
+                continue
+            candidate = Path(root) / "Image-Line" / name / "FL64.exe"
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _open(self, path: Path, session: BridgeSession | None = None) -> None:
         import platform
         import subprocess
         if platform.system() == "Darwin":
-            subprocess.Popen(["open", str(path)])
+            application = (
+                self._mac_host_application(session)
+                if session is not None
+                else self.settings.fl_executable
+            )
+            if session is not None and application is None:
+                raise FLPUnsupportedError(
+                    "could not identify the connected FL Studio application; "
+                    "reload the updated Sound Capsule MIDI script"
+                )
+            command = ["open", "-a", str(application), str(path)] if application else ["open", str(path)]
+            subprocess.Popen(command)
         elif platform.system() == "Windows":
-            import os
-            os.startfile(path)  # type: ignore[attr-defined]
+            executable = (
+                self._windows_host_executable(session)
+                if session is not None
+                else self.settings.fl_executable
+            )
+            if session is not None and executable is None:
+                raise FLPUnsupportedError(
+                    "could not identify the connected FL Studio application; "
+                    "reload the updated Sound Capsule MIDI script"
+                )
+            if executable is not None:
+                subprocess.Popen([str(executable), str(path)])
+            else:
+                import os
+                os.startfile(path)  # type: ignore[attr-defined]
         else:
             subprocess.Popen(["xdg-open", str(path)])
 

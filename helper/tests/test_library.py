@@ -114,6 +114,7 @@ class LibraryTests(unittest.TestCase):
             library.rename(capsule.manifest.id, "Dark Lead")
             row = library.list("dark")[0]
             self.assertEqual(row["name"], "Dark Lead")
+            self.assertEqual(row["source_fl_version"], project.fl_version)
             self.assertEqual(row["favorite"], 1)
             self.assertIn("bass", row["tags"])
             self.assertEqual(len(library.list("bass, dark")), 1)

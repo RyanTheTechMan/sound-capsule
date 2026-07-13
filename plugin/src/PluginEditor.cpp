@@ -3,6 +3,7 @@
 
 #include <juce_cryptography/juce_cryptography.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -32,6 +33,57 @@ std::array<int, 3> versionParts(juce::String version)
 bool isNewerVersion(const juce::String& candidate, const juce::String& current)
 {
     return versionParts(candidate) > versionParts(current);
+}
+
+int flStudioMajor(const juce::String& value)
+{
+    juce::String digits;
+    auto position = value.getCharPointer();
+    while (!position.isEmpty())
+    {
+        const auto character = position.getAndAdvance();
+        if (juce::CharacterFunctions::isDigit(character))
+            digits += character;
+        else if (digits.isNotEmpty())
+            break;
+    }
+    auto major = digits.getIntValue();
+    if (major >= 2000 && major < 2100)
+        major -= 2000;
+    return major;
+}
+
+bool capsuleIsNewerThanHost(const juce::String& sourceVersion,
+                            const juce::String& hostName)
+{
+    const auto sourceMajor = flStudioMajor(sourceVersion);
+    const auto hostMajor = flStudioMajor(hostName);
+    return sourceMajor > 0 && hostMajor > 0 && sourceMajor > hostMajor;
+}
+
+juce::String shortFlStudioVersion(const juce::String& value)
+{
+    const auto tokens = juce::StringArray::fromTokens(value, ".-+ ", "");
+    if (tokens.isEmpty())
+        return value;
+    auto version = juce::String(tokens[0].getIntValue());
+    if (tokens.size() > 1)
+        version += "." + juce::String(tokens[1].getIntValue());
+    return version;
+}
+
+juce::String compatibilityTooltip(const juce::String& sourceVersion,
+                                  const juce::String& hostName)
+{
+    return "Saved in FL Studio " + shortFlStudioVersion(sourceVersion)
+         + ", which is newer than the connected FL Studio "
+         + juce::String(flStudioMajor(hostName))
+         + ". Import may not be fully compatible.";
+}
+
+juce::Rectangle<int> compatibilityWarningBounds()
+{
+    return {46, 5, 16, 14};
 }
 
 juce::String releaseAssetUrl(const juce::var& assets, const juce::String& wantedName)
@@ -645,7 +697,7 @@ void ImportProgressOverlay::resized()
 }
 
 SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleAudioProcessor& p)
-    : AudioProcessorEditor(&p), audioProcessor(p)
+    : AudioProcessorEditor(&p), audioProcessor(p), tooltipWindow(this, 0)
 {
     const auto helperReady = audioProcessor.ensureHelperRunning();
     thumbnailFormats.registerBasicFormats();
@@ -986,6 +1038,15 @@ void SoundCapsuleAudioProcessorEditor::resized()
 
 int SoundCapsuleAudioProcessorEditor::getNumRows() { return static_cast<int>(rows.size()); }
 
+juce::String SoundCapsuleAudioProcessorEditor::getTooltipForRow(int rowNumber)
+{
+    if (rowNumber != hoveredRow || hoveredTarget != RowHoverTarget::versionWarning
+        || !juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
+        return {};
+    const auto& row = rows[static_cast<size_t>(rowNumber)];
+    return compatibilityTooltip(row.sourceFlVersion, currentFlHostName);
+}
+
 void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Graphics& graphics,
                                                          int width, int height, bool selectedRow)
 {
@@ -1026,9 +1087,32 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
     constexpr int contentX = 46;
     constexpr int actionsWidth = 108;
     const auto actionsX = width - actionsWidth;
+    const auto incompatible = capsuleIsNewerThanHost(row.sourceFlVersion,
+                                                       currentFlHostName);
     graphics.setColour(juce::Colours::white);
     graphics.setFont(15.0f);
-    graphics.drawText(row.name, contentX, 2, actionsX - contentX - 215, 20,
+    auto nameX = contentX;
+    if (incompatible)
+    {
+        const auto warning = compatibilityWarningBounds().toFloat();
+        juce::Path triangle;
+        triangle.addTriangle(warning.getCentreX(), warning.getY(),
+                             warning.getX(), warning.getBottom(),
+                             warning.getRight(), warning.getBottom());
+        graphics.setColour(juce::Colours::orange);
+        graphics.fillPath(triangle);
+        graphics.setColour(juce::Colour(0xff2a1b0a));
+        graphics.fillRoundedRectangle(
+            warning.getCentreX() - 1.2f, warning.getY() + 3.2f,
+            2.4f, 6.3f, 0.8f);
+        graphics.fillEllipse(warning.getCentreX() - 1.2f,
+                             warning.getBottom() - 3.1f, 2.4f, 2.4f);
+        nameX = compatibilityWarningBounds().getRight() + 6;
+    }
+    graphics.setColour(juce::Colours::white);
+    graphics.setFont(15.0f);
+    graphics.drawText(row.name, nameX, 2,
+                      juce::jmax(0, actionsX - 215 - nameX), 20,
                       juce::Justification::centredLeft);
     graphics.setColour(juce::Colours::lightgrey);
     graphics.setFont(12.0f);
@@ -1339,10 +1423,13 @@ void SoundCapsuleAudioProcessorEditor::timerCallback()
 }
 
 SoundCapsuleAudioProcessorEditor::RowHoverTarget
-SoundCapsuleAudioProcessorEditor::hitTestRow(juce::Point<int> position, int rowWidth)
+SoundCapsuleAudioProcessorEditor::hitTestRow(juce::Point<int> position, int rowWidth,
+                                             bool versionWarningVisible)
 {
     if (position.x < 42)
         return RowHoverTarget::play;
+    if (versionWarningVisible && compatibilityWarningBounds().contains(position))
+        return RowHoverTarget::versionWarning;
     const auto actionsX = rowWidth - 108;
     if (position.y >= 39 && position.x >= 46 && position.x < actionsX - 8)
         return RowHoverTarget::seek;
@@ -1365,7 +1452,10 @@ void SoundCapsuleAudioProcessorEditor::updateRowHover(juce::Point<int> position)
         if (juce::isPositiveAndBelow(nextRow, static_cast<int>(rows.size())))
         {
             const auto rowBounds = list.getRowPosition(nextRow, true);
-            nextTarget = hitTestRow({position.x, position.y - rowBounds.getY()}, rowBounds.getWidth());
+            const auto& row = rows[static_cast<size_t>(nextRow)];
+            nextTarget = hitTestRow(
+                {position.x, position.y - rowBounds.getY()}, rowBounds.getWidth(),
+                capsuleIsNewerThanHost(row.sourceFlVersion, currentFlHostName));
         }
         else
             nextRow = -1;
@@ -1396,7 +1486,11 @@ void SoundCapsuleAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
         return;
     const auto rowBounds = list.getRowPosition(rowNumber, true);
     const auto rowPosition = juce::Point<int>(position.x, position.y - rowBounds.getY());
-    if (hitTestRow(rowPosition, rowBounds.getWidth()) != RowHoverTarget::none)
+    const auto& row = rows[static_cast<size_t>(rowNumber)];
+    if (hitTestRow(
+            rowPosition, rowBounds.getWidth(),
+            capsuleIsNewerThanHost(row.sourceFlVersion, currentFlHostName))
+        != RowHoverTarget::none)
         return;
     for (const auto& [chip, tag] : tagHitAreas(
              rows[static_cast<size_t>(rowNumber)], rowBounds.getWidth()))
@@ -1558,6 +1652,7 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
                 CapsuleRow row;
                 row.id = value.getProperty("id", "").toString();
                 row.name = value.getProperty("name", "").toString();
+                row.sourceFlVersion = value.getProperty("source_fl_version", "").toString();
                 row.favorite = static_cast<bool>(value.getProperty("favorite", false));
                 row.channelCount = static_cast<int>(value.getProperty("channel_count", 0));
                 row.useCount = static_cast<int>(value.getProperty("use_count", 0));
@@ -1661,6 +1756,12 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         if (projectTitle.isEmpty())
             projectTitle = "Unnamed project";
         const auto patternName = response.getProperty("pattern_name", "Pattern").toString();
+        const auto hostName = response.getProperty("host_name", "").toString();
+        if (hostName != safe->currentFlHostName)
+        {
+            safe->currentFlHostName = hostName;
+            safe->list.repaint();
+        }
         auto selectedCount = 0;
         juce::StringArray selectedNames;
         if (auto* selectedChannels = response.getProperty("selected_channels", juce::var()).getArray())
@@ -1686,6 +1787,9 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->connectionSetup.setVisible(false);
         safe->capsuleName.setVisible(true);
         safe->tagsInput.setVisible(true);
+        if (safe->status.getText() == "Waiting for FL Studio"
+            || safe->status.getText() == "Connecting...")
+            safe->status.setText("Ready", juce::dontSendNotification);
         safe->projectStatus.setText("Project: " + projectTitle + (dirty ? " (unsaved)" : ""),
                                     juce::dontSendNotification);
         safe->projectStatus.setColour(juce::Label::textColourId,
@@ -1727,6 +1831,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
 
 void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
 {
+    stopPreviewPlayback();
     const auto name = capsuleName.getText().trim().isNotEmpty()
                         ? capsuleName.getText().trim()
                         : (suggestedCapsuleName.isNotEmpty() ? suggestedCapsuleName : "Sound Capsule");
@@ -2392,9 +2497,11 @@ void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(std::function<void()
         const auto previousSequence = static_cast<int>(response.getProperty("save_sequence", 0));
         if (changed == 0)
         {
-            // The helper resolves clean projects from FL's recent-project metadata,
-            // so there is no save transition to wait for here.
-            continuation();
+            // Project metadata titles may be blank, and FL's MRU can be
+            // temporarily headed by a rendered Sound Capsule preview. Even a
+            // clean project is saved so the helper can identify the exact FLP
+            // from its fresh modification time instead of guessing.
+            safe->waitForFlSave(previousSequence, std::move(continuation));
             return;
         }
         juce::AlertWindow::showAsync(
@@ -2462,6 +2569,17 @@ void SoundCapsuleAudioProcessorEditor::waitForFlSave(int previousSaveSequence, s
         });
         });
     }, 5000);
+}
+
+void SoundCapsuleAudioProcessorEditor::stopPreviewPlayback()
+{
+    ++previewGeneration;
+    audioProcessor.stopPreview();
+    playingCapsuleId.clear();
+    completedPreviewId.clear();
+    pendingPreviewId.clear();
+    pendingPreviewStart = 0.0;
+    list.repaint();
 }
 
 void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normalizedStart,
@@ -2537,6 +2655,39 @@ void SoundCapsuleAudioProcessorEditor::startPreview(int rowNumber, double normal
 
 void SoundCapsuleAudioProcessorEditor::importCapsule(const juce::String& id,
                                                       ImportMode mode)
+{
+    stopPreviewPlayback();
+
+    const auto found = std::find_if(
+        rows.begin(), rows.end(), [&id](const CapsuleRow& row) { return row.id == id; });
+    if (found != rows.end()
+        && capsuleIsNewerThanHost(found->sourceFlVersion, currentFlHostName))
+    {
+        const auto sourceVersion = found->sourceFlVersion;
+        const auto rowName = found->name;
+        const auto hostName = currentFlHostName;
+        juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+        juce::AlertWindow::showAsync(
+            juce::MessageBoxOptions::makeOptionsOkCancel(
+                juce::MessageBoxIconType::WarningIcon,
+                "FL Studio version warning",
+                "\"" + rowName + "\" was saved with FL Studio " + sourceVersion
+                    + ", but the connected app is " + hostName + ".\n\n"
+                      "The older FL Studio version may not understand all of the capsule's "
+                      "project data. You can try the import, but it may fail or produce an "
+                      "incomplete project. Sound Capsule will still create its normal safety backup.",
+                "Try import", "Cancel", safe.getComponent()),
+            [safe, id, mode](int result) {
+                if (safe != nullptr && result == 1)
+                    safe->performImportCapsule(id, mode);
+            });
+        return;
+    }
+    performImportCapsule(id, mode);
+}
+
+void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& id,
+                                                             ImportMode mode)
 {
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     runAfterProjectSaved([safe, id, mode] {

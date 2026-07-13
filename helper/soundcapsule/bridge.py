@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import time
@@ -24,6 +24,10 @@ class BridgeSession:
     load_sequence: int
     last_load_status: int
     last_load_at: float
+    channel_count: int = 0
+    channel_names: list[str] = field(default_factory=list)
+    host_name: str = ""
+    host_executable: str = ""
 
     @classmethod
     def read(cls, path: Path) -> "BridgeSession":
@@ -48,6 +52,10 @@ class BridgeSession:
         payload.setdefault("load_sequence", 0)
         payload.setdefault("last_load_status", -1)
         payload.setdefault("last_load_at", 0.0)
+        payload.setdefault("channel_count", 0)
+        payload.setdefault("channel_names", [])
+        payload.setdefault("host_name", "")
+        payload.setdefault("host_executable", "")
         if "pattern_length_steps" not in payload:
             payload["pattern_length_steps"] = payload.pop("pattern_length_beats", 0)
         else:

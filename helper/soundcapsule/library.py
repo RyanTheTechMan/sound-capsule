@@ -13,7 +13,7 @@ import threading
 
 from .capsule import Capsule, unique_capsule_path
 
-INDEX_VERSION = 6
+INDEX_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS capsules (
     path TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    source_fl_version TEXT NOT NULL DEFAULT '',
     plugin_names TEXT NOT NULL,
     tags TEXT NOT NULL,
     favorite INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +53,11 @@ class CapsuleLibrary:
                 database.execute("UPDATE capsules SET modified_ns = -1")
             if "use_count" not in columns:
                 database.execute("ALTER TABLE capsules ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0")
+            if "source_fl_version" not in columns:
+                database.execute(
+                    "ALTER TABLE capsules ADD COLUMN source_fl_version TEXT NOT NULL DEFAULT ''"
+                )
+                database.execute("UPDATE capsules SET modified_ns = -1")
             indexed_version = database.execute(
                 "SELECT value FROM metadata WHERE key = 'index_version'"
             ).fetchone()
@@ -110,16 +116,19 @@ class CapsuleLibrary:
                         )
                     database.execute(
                         """INSERT INTO capsules
-                        (id, path, name, created_at, plugin_names, tags, favorite,
-                         channel_count, note_preview, modified_ns)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, path, name, created_at, source_fl_version, plugin_names,
+                         tags, favorite, channel_count, note_preview, modified_ns)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET path=excluded.path, name=excluded.name,
-                        created_at=excluded.created_at, plugin_names=excluded.plugin_names,
-                        tags=excluded.tags, favorite=excluded.favorite,
+                        created_at=excluded.created_at,
+                        source_fl_version=excluded.source_fl_version,
+                        plugin_names=excluded.plugin_names, tags=excluded.tags,
+                        favorite=excluded.favorite,
                         channel_count=excluded.channel_count, note_preview=excluded.note_preview,
                         modified_ns=excluded.modified_ns""",
                         (
                             manifest.id, resolved, manifest.name, manifest.created_at,
+                            manifest.source_fl_version,
                             json.dumps(plugin_names),
                             json.dumps(manifest.tags), int(manifest.favorite), len(manifest.channels),
                             json.dumps(self._note_preview(

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from soundcapsule import __version__
-from soundcapsule.bridge import BridgeQueue
+from soundcapsule.bridge import BridgeQueue, BridgeSession
 from soundcapsule.capsule import Capsule
 from soundcapsule.config import Settings
 from soundcapsule.server import SoundCapsuleServer
@@ -140,6 +140,157 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(payload["load_sequence"], 9)
             self.assertEqual(payload["last_load_status"], 100)
             self.assertEqual(payload["pattern_length_steps"], 32)
+
+    def test_session_heartbeat_does_not_wait_for_project_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            settings.ensure()
+            (settings.bridge_dir / "session.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "project_title": "",
+                        "midi_api_version": 40,
+                        "selected_channels": [0],
+                        "selected_channel_names": ["Lead"],
+                        "current_pattern": 1,
+                        "pattern_name": "Pattern 1",
+                        "pattern_length_steps": 16,
+                        "ppq": 96,
+                        "changed": 0,
+                        "save_sequence": 0,
+                        "last_save_requested_at": 0.0,
+                        "load_sequence": 1,
+                        "last_load_status": 100,
+                        "last_load_at": time.time(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            resolver_started = threading.Event()
+            release_resolver = threading.Event()
+
+            def slow_resolver(*_args, **_kwargs):
+                resolver_started.set()
+                release_resolver.wait(2)
+                return None
+
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "_resolve_project", side_effect=slow_resolver
+            ):
+                started = time.monotonic()
+                payload = server.dispatch({"command": "session", "args": {}})
+                elapsed = time.monotonic() - started
+                self.assertTrue(resolver_started.wait(1))
+                release_resolver.set()
+
+            self.assertLess(elapsed, 0.25)
+            self.assertEqual(payload["pattern_name"], "Pattern 1")
+            self.assertIsNone(payload["project_path"])
+
+    def test_full_rack_project_identity_ignores_channel_selection(self) -> None:
+        session = BridgeSession(
+            timestamp=time.time(), project_title="", midi_api_version=42,
+            selected_channels=[0], selected_channel_names=["Lead"],
+            current_pattern=1, pattern_name="Pattern 1", pattern_length_steps=16,
+            ppq=96, changed=0, save_sequence=0, last_save_requested_at=0.0,
+            load_sequence=1, last_load_status=100, last_load_at=time.time(),
+            channel_count=2, channel_names=["Lead", "Bass"],
+        )
+        before = SoundCapsuleServer._session_resolution_token(session)
+        session.selected_channels = [1]
+        session.selected_channel_names = ["Bass"]
+
+        self.assertEqual(
+            SoundCapsuleServer._session_resolution_token(session), before
+        )
+
+    def test_session_publishes_project_after_background_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "temp.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            (settings.bridge_dir / "session.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "project_title": "",
+                        "midi_api_version": 40,
+                        "selected_channels": [0],
+                        "selected_channel_names": ["Serum Lead"],
+                        "current_pattern": 3,
+                        "pattern_name": "Verse",
+                        "pattern_length_steps": 16,
+                        "ppq": 96,
+                        "changed": 0,
+                        "save_sequence": 1,
+                        "last_save_requested_at": time.time(),
+                        "load_sequence": 1,
+                        "last_load_status": 100,
+                        "last_load_at": time.time(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "_resolve_project", return_value=project
+            ):
+                server.dispatch({"command": "session", "args": {}})
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    payload = server.dispatch({"command": "session", "args": {}})
+                    if payload["project_path"]:
+                        break
+                    time.sleep(0.01)
+
+            self.assertEqual(payload["project_title"], "temp")
+            self.assertEqual(payload["project_path"], str(project))
+
+    def test_session_retries_project_discovery_after_transient_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "temp2.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            (settings.bridge_dir / "session.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "project_title": "",
+                        "midi_api_version": 42,
+                        "selected_channels": [0],
+                        "selected_channel_names": ["Serum Lead"],
+                        "current_pattern": 3,
+                        "pattern_name": "Verse",
+                        "pattern_length_steps": 16,
+                        "ppq": 96,
+                        "changed": 0,
+                        "save_sequence": 0,
+                        "last_save_requested_at": 0.0,
+                        "load_sequence": 0,
+                        "last_load_status": -1,
+                        "last_load_at": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "_resolve_project", side_effect=[None, project]
+            ) as resolver:
+                deadline = time.monotonic() + 1
+                payload = server.dispatch({"command": "session", "args": {}})
+                while time.monotonic() < deadline and not payload["project_path"]:
+                    time.sleep(0.01)
+                    payload = server.dispatch({"command": "session", "args": {}})
+
+            self.assertEqual(resolver.call_count, 2)
+            self.assertEqual(payload["project_title"], "temp2")
+            self.assertEqual(payload["project_path"], str(project))
 
     def test_server_publishes_save_request_for_live_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

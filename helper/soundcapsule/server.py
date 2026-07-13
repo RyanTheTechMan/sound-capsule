@@ -14,7 +14,6 @@ from .capsule import Capsule
 from .config import Settings
 from .library import CapsuleLibrary
 from .project import CapsuleService
-from .project_locator import ProjectLocator
 
 
 class SoundCapsuleRequestHandler(socketserver.StreamRequestHandler):
@@ -49,6 +48,10 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         self.service = CapsuleService(settings)
         self.operation_lock = threading.RLock()
         self.progress_lock = threading.Lock()
+        self.session_project_lock = threading.Lock()
+        self.session_project_token: str | None = None
+        self.session_project_path: Path | None = None
+        self.session_project_resolution: str | None = None
         self.import_progress: dict = {
             "operation_id": None,
             "active": False,
@@ -58,6 +61,75 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             "updated_at": time.time(),
         }
         super().__init__((settings.server_host, settings.server_port), SoundCapsuleRequestHandler)
+
+    @staticmethod
+    def _session_resolution_token(session) -> str:
+        """Identify one live FL session without using its changing heartbeat."""
+        has_full_rack = (
+            bool(session.channel_names)
+            and session.channel_count == len(session.channel_names)
+        )
+        payload = {
+            "midi_api_version": session.midi_api_version,
+            "host_name": session.host_name,
+            "host_executable": session.host_executable,
+            "project_title": session.project_title,
+            # Selection belongs to the UI state, not project identity. Retain
+            # it only as a compatibility fallback for an older MIDI script
+            # that does not yet publish the full Channel Rack signature.
+            "selected_channels": [] if has_full_rack else session.selected_channels,
+            "selected_channel_names": [] if has_full_rack else session.selected_channel_names,
+            "channel_count": session.channel_count,
+            "channel_names": session.channel_names,
+            "ppq": session.ppq,
+            "load_sequence": session.load_sequence,
+            "save_sequence": session.save_sequence,
+            "last_save_requested_at": session.last_save_requested_at,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _resolve_session_project_in_background(self, token: str, session) -> None:
+        try:
+            project_path = self.service._resolve_project(
+                None, session, require_clean=False
+            )
+        except (OSError, RuntimeError, ValueError):
+            project_path = None
+        with self.session_project_lock:
+            if self.session_project_resolution != token:
+                return
+            self.session_project_token = token
+            self.session_project_path = project_path
+            if project_path is None:
+                # FL can publish its first heartbeat before its MRU/save state
+                # settles. Let a later UI poll retry without ever blocking it.
+                self.session_project_resolution = None
+
+    def _project_for_live_session(self, session) -> Path | None:
+        """Return cached project identity immediately and resolve misses off-thread.
+
+        A live MIDI heartbeat is the connection signal. Locating an untitled FLP
+        may require parsing several recent projects and must never delay that
+        signal long enough for the client to report a false disconnect.
+        """
+        token = self._session_resolution_token(session)
+        with self.session_project_lock:
+            if self.session_project_token == token and self.session_project_path is not None:
+                return self.session_project_path
+            if self.session_project_resolution == token:
+                return None
+            self.session_project_resolution = token
+            self.session_project_token = token
+            self.session_project_path = None
+        threading.Thread(
+            target=self._resolve_session_project_in_background,
+            args=(token, session),
+            name="SoundCapsuleProjectResolver",
+            daemon=True,
+        ).start()
+        return None
 
     def _update_import_progress(
         self,
@@ -212,20 +284,15 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             return {"version": __version__}
         if command == "session":
             session = self.service.bridge.session()
-            project_path = None
-            try:
-                project_path = ProjectLocator(
-                    self.settings.project_roots,
-                    cache_path=self.settings.data_dir / "project-paths.json",
-                ).find_current(session.project_title)
-            except (OSError, RuntimeError, ValueError):
-                pass
+            project_path = self._project_for_live_session(session)
             undo = self.service.undo_status(project_path)
             return {
                 "timestamp": session.timestamp,
                 "project_title": session.project_title or (project_path.stem if project_path else ""),
                 "project_path": str(project_path) if project_path else None,
                 "midi_api_version": session.midi_api_version,
+                "host_name": session.host_name,
+                "host_executable": session.host_executable,
                 "selected_channels": session.selected_channels,
                 "selected_channel_names": session.selected_channel_names,
                 "current_pattern": session.current_pattern,

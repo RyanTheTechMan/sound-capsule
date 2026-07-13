@@ -7,6 +7,7 @@ import platform
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 import xml.etree.ElementTree as ET
 
 from .capsule import slugify
@@ -149,41 +150,69 @@ class ProjectLocator:
         self.recent_provider = recent_provider
         self.indexed_provider = indexed_provider
 
-    def find_current(self, title: str, *, changed_after: float | None = None) -> Path:
+    def find_current(
+        self,
+        title: str,
+        *,
+        changed_after: float | None = None,
+        candidate_validator: Callable[[Path], bool] | None = None,
+        cache_key: str | None = None,
+    ) -> Path:
         recent = self._valid_unique(self.recent_provider())
         rooted = self._root_candidates()
-        if not title.strip():
-            ordered = self._valid_unique(recent + rooted)
-            if changed_after is not None:
-                changed = [
-                    path for path in ordered
-                    if path.stat().st_mtime >= changed_after - 2.0
-                ]
-                if changed:
-                    changed.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
-                    return changed[0]
-            if recent:
-                return recent[0]
-            if len(ordered) == 1:
-                return ordered[0]
-            raise FileNotFoundError(
-                "FL did not publish a project title and no current FLP was found; save the project once and retry"
-            )
-        cached = self._cached(title)
-        indexed = self._valid_unique(self.indexed_provider(title))
-        ordered = self._valid_unique(recent + ([cached] if cached else []) + indexed + rooted)
-        matching = [path for path in ordered if _matching_title(path, title)]
         if changed_after is not None:
             changed = [
-                path for path in matching
-                if path.stat().st_mtime >= changed_after - 2.0
+                path
+                for path in self._valid_unique(recent + rooted)
+                if (not title.strip() or _matching_title(path, title))
+                and path.stat().st_mtime >= changed_after - 2.0
             ]
+            if candidate_validator is not None:
+                changed = [path for path in changed if candidate_validator(path)]
             if changed:
                 changed.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
                 selected = changed[0]
-                self._remember(title, selected)
+                if title.strip():
+                    self._remember(title, selected)
+                elif cache_key:
+                    self._remember_key(cache_key, selected)
                 return selected
-
+        if not title.strip() and cache_key:
+            cached = self._cached_key(cache_key)
+            if cached is not None:
+                valid_cached = self._valid_unique([cached])
+                if valid_cached and (
+                    candidate_validator is None or candidate_validator(valid_cached[0])
+                ):
+                    return valid_cached[0]
+        if candidate_validator is not None:
+            recent = [path for path in recent if candidate_validator(path)]
+            rooted = [path for path in rooted if candidate_validator(path)]
+        if not title.strip():
+            ordered = self._valid_unique(recent + rooted)
+            if len(recent) == 1:
+                if cache_key:
+                    self._remember_key(cache_key, recent[0])
+                return recent[0]
+            if len(recent) > 1:
+                names = ", ".join(str(path) for path in recent[:4])
+                raise FLPUnsupportedError(
+                    "multiple saved FLPs match the live Channel Rack and FL did not publish a "
+                    f"project title; save the current project to disambiguate it: {names}"
+                )
+            if len(ordered) == 1:
+                return ordered[0]
+            raise FileNotFoundError(
+                "FL did not publish a project title and no saved FLP matched the live Channel Rack; "
+                "save the project once and retry"
+            )
+        cached = self._cached(title)
+        indexed = self._valid_unique(self.indexed_provider(title))
+        if candidate_validator is not None:
+            cached = cached if cached is not None and candidate_validator(cached) else None
+            indexed = [path for path in indexed if candidate_validator(path)]
+        ordered = self._valid_unique(recent + ([cached] if cached else []) + indexed + rooted)
+        matching = [path for path in ordered if _matching_title(path, title)]
         recent_matching = [path for path in recent if _matching_title(path, title)]
         if recent_matching:
             selected = recent_matching[0]
@@ -237,17 +266,27 @@ class ProjectLocator:
         return self._valid_unique(result)
 
     def _cached(self, title: str) -> Path | None:
-        if not title.strip() or self.cache_path is None or not self.cache_path.is_file():
+        if not title.strip():
+            return None
+        return self._cached_key(_title_key(title))
+
+    def _cached_key(self, key: str) -> Path | None:
+        if not key or self.cache_path is None or not self.cache_path.is_file():
             return None
         try:
             payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            value = payload.get(_title_key(title), {}).get("path")
+            value = payload.get(key, {}).get("path")
             return Path(value) if isinstance(value, str) else None
         except (OSError, ValueError, AttributeError):
             return None
 
     def _remember(self, title: str, path: Path) -> None:
-        if not title.strip() or self.cache_path is None:
+        if not title.strip():
+            return
+        self._remember_key(_title_key(title), path)
+
+    def _remember_key(self, key: str, path: Path) -> None:
+        if not key or self.cache_path is None:
             return
         payload: dict = {}
         if self.cache_path.is_file():
@@ -257,7 +296,7 @@ class ProjectLocator:
                     payload = value
             except (OSError, ValueError):
                 pass
-        payload[_title_key(title)] = {"path": str(path), "last_seen": time.time()}
+        payload[key] = {"path": str(path), "last_seen": time.time()}
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps(payload, indent=2, sort_keys=True).encode()
         with tempfile.NamedTemporaryFile(

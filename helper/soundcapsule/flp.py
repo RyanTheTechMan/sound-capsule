@@ -43,8 +43,9 @@ EVENT_CHANNEL_SAMPLE_PATH = 196
 
 # Event ownership began with the model independently established by PyFLP and
 # is extended here for FL Studio 25.2.  Image-Line changed several IDs used at
-# the end of the Channel Rack region; the three boundary IDs below were
-# validated across every FLP bundled with build 25.2.5.5055.
+# the end of the Channel Rack region; the three boundary IDs below and opaque
+# per-channel event 251 were validated with build 25.2.5.5055 projects loaded
+# and rendered by FL Studio 26.1.0.5294 on macOS.
 POST_CHANNEL_BOUNDARY_IDS = frozenset({99, 233, 238})
 CHANNEL_EVENT_IDS = frozenset(
     {
@@ -57,7 +58,7 @@ CHANNEL_EVENT_IDS = frozenset(
 )
 PLUGIN_EVENT_IDS = frozenset({128, 155, 201, 203, 228, 229})
 FL25_CHANNEL_EVENT_IDS = frozenset(
-    {41, 48, 50, 51, 104, 170, 209, 212, 213, 215, 218, 219, 221}
+    {41, 48, 50, 51, 104, 170, 209, 212, 213, 215, 218, 219, 221, 251}
 )
 CHANNEL_OWNED_EVENT_IDS = CHANNEL_EVENT_IDS | PLUGIN_EVENT_IDS | FL25_CHANNEL_EVENT_IDS
 RACK_GLOBAL_EVENT_IDS = frozenset({11, 13, 133})
@@ -236,6 +237,12 @@ class NoteRecord:
         }
 
 
+def _normalized_note_payload(notes: Sequence[NoteRecord]) -> bytes:
+    # FL builds playback and Piano Roll redraw indexes from event order. Keep
+    # equal-position notes stable while ensuring time never moves backwards.
+    return b"".join(note.raw for note in sorted(notes, key=lambda note: note.position))
+
+
 @dataclass(frozen=True, slots=True)
 class ChannelSection:
     iid: int
@@ -364,7 +371,7 @@ class FLPFile:
     def validate(self) -> None:
         if self.ppq <= 0:
             raise FLPFormatError("PPQ must be positive")
-        new_channels = sum(1 for event in self.events if event.id == EVENT_CHANNEL_NEW)
+        new_channels = len(self._channel_start_indices())
         if self.format == FORMAT_PROJECT and new_channels != self.channel_count:
             raise FLPFormatError(
                 f"header declares {self.channel_count} channels but event stream contains {new_channels}"
@@ -395,7 +402,7 @@ class FLPFile:
         return None
 
     def channel_sections(self) -> list[ChannelSection]:
-        starts = [index for index, event in enumerate(self.events) if event.id == EVENT_CHANNEL_NEW]
+        starts = self._channel_start_indices()
         starts = starts[: self.channel_count]
         sections: list[ChannelSection] = []
         for position, start in enumerate(starts):
@@ -412,6 +419,33 @@ class FLPFile:
             # preserves newer wrapper/plugin state before an ID has a name.
             sections.append(ChannelSection(owned[0].scalar, owned))
         return sections
+
+    def _channel_start_indices(self) -> list[int]:
+        # FL 26 overloads event 64 in pre-rack project state. A real channel
+        # declaration contains a channel-type event before the next rack or
+        # pattern boundary; the global form does not. Preview mutation may add
+        # an enabled event between the declaration and its type, so do not
+        # require the pair to be immediately adjacent.
+        starts: list[int] = []
+        for index, event in enumerate(self.events):
+            if event.id != EVENT_CHANNEL_NEW:
+                continue
+            end = next(
+                (
+                    candidate
+                    for candidate in range(index + 1, len(self.events))
+                    if self.events[candidate].id == EVENT_CHANNEL_NEW
+                    or self.events[candidate].id == EVENT_PATTERN_NEW
+                    or self.events[candidate].id in POST_CHANNEL_BOUNDARY_IDS
+                ),
+                len(self.events),
+            )
+            if any(
+                candidate.id == EVENT_CHANNEL_TYPE
+                for candidate in self.events[index + 1 : end]
+            ):
+                starts.append(index)
+        return starts
 
     def pattern_notes(self) -> dict[int, list[NoteRecord]]:
         result: dict[int, list[NoteRecord]] = {}
@@ -541,7 +575,7 @@ class FLPFile:
             unicode_text = _uses_unicode_text(target)
             pattern_events = [
                 scalar_event(EVENT_PATTERN_NEW, pattern_id),
-                data_event(EVENT_PATTERN_NOTES, b"".join(note.raw for note in imported_notes)),
+                data_event(EVENT_PATTERN_NOTES, _normalized_note_payload(imported_notes)),
                 scalar_event(EVENT_PATTERN_NEW, pattern_id),
                 text_event(EVENT_PATTERN_NAME, pattern_name, unicode_text=unicode_text),
             ]
@@ -617,7 +651,7 @@ class FLPFile:
         for index, event in enumerate(self.events):
             if id(event) in note_events:
                 kept = [note for note in NoteRecord.parse_many(event.payload) if note.rack_channel in channels]
-                self.events[index] = event.with_payload(b"".join(note.raw for note in kept))
+                self.events[index] = event.with_payload(_normalized_note_payload(kept))
                 found = True
         if not found:
             raise FLPUnsupportedError(f"pattern {pattern_id} has no note event to render")
@@ -627,10 +661,18 @@ class FLPFile:
         for index, event in enumerate(self.events):
             if id(event) in note_events:
                 kept = [note for note in NoteRecord.parse_many(event.payload) if note.rack_channel not in channels]
-                payload = b"".join(note.raw for note in (*kept, *replacement_notes))
+                payload = _normalized_note_payload((*kept, *replacement_notes))
                 self.events[index] = event.with_payload(payload)
                 return
-        self.events.extend([scalar_event(EVENT_PATTERN_NEW, pattern_id), data_event(EVENT_PATTERN_NOTES, b"".join(note.raw for note in replacement_notes))])
+        self.events.extend(
+            [
+                scalar_event(EVENT_PATTERN_NEW, pattern_id),
+                data_event(
+                    EVENT_PATTERN_NOTES,
+                    _normalized_note_payload(replacement_notes),
+                ),
+            ]
+        )
 
     def _append_pattern_notes(
         self, pattern_id: int, imported_notes: Sequence[NoteRecord]
@@ -642,8 +684,12 @@ class FLPFile:
         }
         for index, event in enumerate(self.events):
             if id(event) in note_events:
+                notes = [
+                    *NoteRecord.parse_many(event.payload),
+                    *imported_notes,
+                ]
                 self.events[index] = event.with_payload(
-                    event.payload + b"".join(note.raw for note in imported_notes)
+                    _normalized_note_payload(notes)
                 )
                 return
         self.events.extend(
@@ -651,7 +697,7 @@ class FLPFile:
                 scalar_event(EVENT_PATTERN_NEW, pattern_id),
                 data_event(
                     EVENT_PATTERN_NOTES,
-                    b"".join(note.raw for note in imported_notes),
+                    _normalized_note_payload(imported_notes),
                 ),
             ]
         )

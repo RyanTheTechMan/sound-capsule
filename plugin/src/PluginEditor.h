@@ -65,7 +65,7 @@ public:
 
 private:
     enum class WaveformChannels { mono = 1, stereo = 2 };
-    enum class RowHoverTarget { none, play, seek, favorite, append, menu };
+    enum class RowHoverTarget { none, play, seek, versionWarning, favorite, append, menu };
     enum class ImportMode { currentPattern, newPattern, overrideSelection };
 
     struct NotePreview
@@ -82,6 +82,7 @@ private:
         juce::String name;
         juce::String plugins;
         juce::String tags;
+        juce::String sourceFlVersion;
         juce::StringArray tagItems;
         bool favorite = false;
         int channelCount = 0;
@@ -94,6 +95,7 @@ private:
     };
 
     int getNumRows() override;
+    juce::String getTooltipForRow(int row) override;
     void paintListBoxItem(int row, juce::Graphics&, int width, int height, bool selected) override;
     void listBoxItemClicked(int row, const juce::MouseEvent&) override;
     void selectedRowsChanged(int row) override;
@@ -118,8 +120,10 @@ private:
     void showSetup(bool initial);
     void runAfterProjectSaved(std::function<void()> action);
     void waitForFlSave(int previousSaveSequence, std::function<void()> action);
+    void stopPreviewPlayback();
     void startPreview(int row, double normalizedStart, bool toggleIfPlaying);
     void importCapsule(const juce::String& id, ImportMode mode);
+    void performImportCapsule(const juce::String& id, ImportMode mode);
     void showImportMenu(const juce::String& id, juce::Point<int> screenPosition);
     void pollImportProgress();
     void showRowMenu(int row, juce::Point<int> screenPosition);
@@ -138,7 +142,8 @@ private:
     void toggleTagSearch(const juce::String& tag);
     std::vector<std::pair<juce::Rectangle<int>, juce::String>>
         tagHitAreas(const CapsuleRow&, int rowWidth) const;
-    static RowHoverTarget hitTestRow(juce::Point<int> rowPosition, int rowWidth);
+    static RowHoverTarget hitTestRow(juce::Point<int> rowPosition, int rowWidth,
+                                     bool versionWarningVisible);
     void sendCommand(const juce::String& command,
                      const juce::var& arguments,
                      std::function<void(juce::var)> onSuccess = {},
@@ -149,6 +154,7 @@ private:
     static juce::var object(std::initializer_list<std::pair<juce::Identifier, juce::var>> values);
 
     SoundCapsuleAudioProcessor& audioProcessor;
+    juce::TooltipWindow tooltipWindow;
     juce::AudioFormatManager thumbnailFormats;
     juce::AudioThumbnailCache thumbnailCache{64};
     std::vector<CapsuleRow> rows;
@@ -168,6 +174,7 @@ private:
     juce::String completedPreviewId;
     juce::String pendingPreviewId;
     juce::String importOperationId;
+    juce::String currentFlHostName;
     juce::String availableUpdateTag;
     juce::String availableInstallerName;
     juce::String availableInstallerUrl;

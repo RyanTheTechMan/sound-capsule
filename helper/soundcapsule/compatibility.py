@@ -14,7 +14,14 @@ class CompatibilityProfile:
 # Mutation is deliberately allowlisted. Adding a profile requires round-trip
 # fixtures and the logical append/override acceptance suite for that FL line.
 PROFILES = (
-    CompatibilityProfile("25.2.5.5055", "FL Studio 25.2.5 macOS event layout"),
+    CompatibilityProfile(
+        "25.2.5.5055",
+        "FL Studio 25.2.5 project layout; host-tested with FL Studio 26.1.0.5294 on macOS",
+    ),
+    CompatibilityProfile(
+        "26.1.0.5294",
+        "FL Studio 26.1.0 macOS event layout",
+    ),
 )
 
 

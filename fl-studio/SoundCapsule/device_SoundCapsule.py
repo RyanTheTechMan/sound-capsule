@@ -17,6 +17,7 @@ import general
 import midi
 import patterns
 import transport
+import ui
 
 
 if sys.platform == "win32":
@@ -82,12 +83,15 @@ def _read_json(path):
 def _selected_channels():
     selected = []
     names = []
+    channel_names = []
     count = channels.channelCount(1)
     for index in range(count):
+        channel_name = channels.getChannelName(index, True)
+        channel_names.append(channel_name)
         if channels.isChannelSelected(index, True):
             selected.append(index)
-            names.append(channels.getChannelName(index, True))
-    return selected, names
+            names.append(channel_name)
+    return selected, names, channel_names
 
 
 def _midi_api_version():
@@ -97,19 +101,37 @@ def _midi_api_version():
         return 0
 
 
+def _host_name():
+    try:
+        return str(ui.getProgTitle())
+    except Exception:
+        return ""
+
+
+def _host_executable():
+    try:
+        return str(sys.executable or "")
+    except Exception:
+        return ""
+
+
 def _publish_session(force=False):
     global _last_publish
     now = time.time()
     if not force and now - _last_publish < 0.25:
         return
-    selected, names = _selected_channels()
+    selected, names, channel_names = _selected_channels()
     pattern = patterns.patternNumber()
     payload = {
         "timestamp": now,
         "project_title": general.getProjectTitle(),
         "midi_api_version": _midi_api_version(),
+        "host_name": _host_name(),
+        "host_executable": _host_executable(),
         "selected_channels": selected,
         "selected_channel_names": names,
+        "channel_count": len(channel_names),
+        "channel_names": channel_names,
         "current_pattern": pattern,
         "pattern_name": patterns.getPatternName(pattern),
         # FL 25.2 reports this timeline in Channel Rack step units (four per

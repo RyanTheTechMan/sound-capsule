@@ -6,16 +6,76 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from soundcapsule.capsule import Capsule
 from soundcapsule.bridge import BridgeSession
 from soundcapsule.config import Settings
-from soundcapsule.flp import EVENT_PROJECT_DATA_PATH, FLPFile, FLPUnsupportedError, text_event
+from soundcapsule.flp import (
+    EVENT_FL_VERSION,
+    EVENT_PROJECT_DATA_PATH,
+    FLPFile,
+    FLPUnsupportedError,
+    text_event,
+)
 from soundcapsule.project import CapsuleService, ProjectLocator
 from test_flp import fixture_project, write_silence
 
 
 class ProjectServiceTests(unittest.TestCase):
+    def test_reopen_targets_the_connected_macos_fl_application(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            application = root / "FL Studio 2025.app"
+            executable = application / "Contents" / "MacOS" / "OsxFL"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"")
+            project = root / "temp.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            session = BridgeSession(
+                timestamp=time.time(), project_title="", midi_api_version=40,
+                selected_channels=[0], selected_channel_names=["Lead"],
+                current_pattern=1, pattern_name="Pattern 1",
+                pattern_length_steps=16, ppq=96, changed=0,
+                save_sequence=0, last_save_requested_at=0.0,
+                load_sequence=1, last_load_status=100, last_load_at=time.time(),
+                host_name="FL Studio 2025", host_executable=str(executable),
+            )
+            service = CapsuleService(Settings(data_dir=root / "data"))
+
+            with mock.patch("platform.system", return_value="Darwin"), mock.patch(
+                "subprocess.Popen"
+            ) as launch:
+                service._open(project, session)
+
+            launch.assert_called_once_with(
+                ["open", "-a", str(application), str(project)]
+            )
+
+    def test_live_reopen_never_falls_back_to_the_default_fl_application(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "temp.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            session = BridgeSession(
+                timestamp=time.time(), project_title="", midi_api_version=40,
+                selected_channels=[0], selected_channel_names=["Lead"],
+                current_pattern=1, pattern_name="Pattern 1",
+                pattern_length_steps=16, ppq=96, changed=0,
+                save_sequence=0, last_save_requested_at=0.0,
+                load_sequence=1, last_load_status=100, last_load_at=time.time(),
+            )
+            service = CapsuleService(Settings(data_dir=root / "data"))
+
+            with mock.patch("platform.system", return_value="Darwin"), mock.patch(
+                "subprocess.Popen"
+            ) as launch, self.assertRaisesRegex(
+                FLPUnsupportedError, "identify the connected FL Studio"
+            ):
+                service._open(project, session)
+
+            launch.assert_not_called()
+
     def test_bridge_global_positions_resolve_to_sparse_flp_ids(self) -> None:
         session = BridgeSession(
             timestamp=0, project_title="Song", midi_api_version=38, selected_channels=[1],
@@ -92,6 +152,121 @@ class ProjectServiceTests(unittest.TestCase):
             )
             self.assertEqual(locator.find_current(""), current.resolve())
 
+    def test_project_locator_filters_blank_title_recent_files_by_live_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "stale.flp"
+            current = root / "temp2.flp"
+            stale.write_bytes(fixture_project().to_bytes())
+            current.write_bytes(fixture_project().to_bytes())
+            locator = ProjectLocator(
+                [],
+                recent_provider=lambda: [stale, current],
+                indexed_provider=lambda _: [],
+            )
+
+            self.assertEqual(
+                locator.find_current(
+                    "", candidate_validator=lambda path: path.name == "temp2.flp"
+                ),
+                current.resolve(),
+            )
+
+    def test_project_locator_rejects_ambiguous_blank_title_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.flp"
+            second = root / "second.flp"
+            first.write_bytes(fixture_project().to_bytes())
+            second.write_bytes(fixture_project().to_bytes())
+            locator = ProjectLocator(
+                [],
+                recent_provider=lambda: [first, second],
+                indexed_provider=lambda _: [],
+            )
+
+            with self.assertRaisesRegex(FLPUnsupportedError, "save the current project"):
+                locator.find_current("", candidate_validator=lambda _: True)
+
+    def test_live_channel_names_reject_a_stale_recent_project(self) -> None:
+        session = BridgeSession(
+            timestamp=0, project_title="", midi_api_version=42,
+            selected_channels=[1], selected_channel_names=["Kick"],
+            current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+            ppq=96, changed=0, save_sequence=0, last_save_requested_at=0.0,
+            load_sequence=0, last_load_status=-1, last_load_at=0.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "temp2.flp"
+            path.write_bytes(fixture_project().to_bytes())
+            self.assertTrue(CapsuleService._project_matches_session(path, session))
+            session.selected_channel_names = ["Wrong project"]
+            self.assertFalse(CapsuleService._project_matches_session(path, session))
+
+    def test_full_live_rack_signature_rejects_an_identical_selected_channel(self) -> None:
+        session = BridgeSession(
+            timestamp=0, project_title="", midi_api_version=42,
+            selected_channels=[1], selected_channel_names=["Kick"],
+            current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+            ppq=96, changed=0, save_sequence=0, last_save_requested_at=0.0,
+            load_sequence=4, last_load_status=100, last_load_at=0.0,
+            channel_count=2, channel_names=["Serum Lead", "Kick"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "temp2.flp"
+            path.write_bytes(fixture_project().to_bytes())
+            self.assertTrue(CapsuleService._project_matches_session(path, session))
+            session.channel_names[0] = "Different rack"
+            self.assertFalse(CapsuleService._project_matches_session(path, session))
+
+    def test_large_rack_identity_tolerates_one_dynamic_wrapper_name(self) -> None:
+        saved = [f"Channel {index}" for index in range(13)]
+        live = list(saved)
+        live[-1] = "Preset-derived wrapper name"
+
+        self.assertTrue(CapsuleService._rack_names_match(saved, live))
+        live[-2] = "Another mismatch"
+        self.assertFalse(CapsuleService._rack_names_match(saved, live))
+
+    def test_seven_channel_rack_identity_tolerates_one_unsaved_rename(self) -> None:
+        saved = ["Sampler", "Wa", "Vital", "FLEX", "FLEX", "Cling On Keys", "TYea"]
+        live = list(saved)
+        live[-1] = "broken"
+
+        self.assertTrue(CapsuleService._rack_names_match(saved, live))
+        live[1] = "Second unsaved rename"
+        self.assertFalse(CapsuleService._rack_names_match(saved, live))
+
+    def test_save_confirmed_blank_title_path_is_cached_by_session_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "paths.json"
+            old = root / "old.flp"
+            saved = root / "temp2.flp"
+            old.write_bytes(fixture_project().to_bytes())
+            saved.write_bytes(fixture_project().to_bytes())
+            started = time.time()
+            os.utime(old, (started - 60, started - 60))
+            os.utime(saved, (started + 1, started + 1))
+            locator = ProjectLocator(
+                [], cache_path=cache,
+                recent_provider=lambda: [old, saved], indexed_provider=lambda _: [],
+            )
+
+            self.assertEqual(
+                locator.find_current(
+                    "", changed_after=started,
+                    candidate_validator=lambda _: True, cache_key="rack-signature",
+                ),
+                saved.resolve(),
+            )
+            self.assertEqual(
+                locator.find_current(
+                    "", candidate_validator=lambda _: True, cache_key="rack-signature"
+                ),
+                saved.resolve(),
+            )
+
     def test_project_locator_uses_the_flp_modified_by_the_save(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -114,11 +289,31 @@ class ProjectServiceTests(unittest.TestCase):
                 locator.find_current("Song.flp", changed_after=started), saved.resolve()
             )
 
-    def test_newer_minor_capsule_version_is_rejected(self) -> None:
+    def test_save_time_shortlists_before_expensive_session_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            service = CapsuleService(Settings(data_dir=Path(temporary)))
-            with self.assertRaises(FLPUnsupportedError):
-                service._check_version_compatibility("25.3.1", "25.2.9")
+            root = Path(temporary)
+            old = root / "old.flp"
+            saved = root / "saved.flp"
+            old.write_bytes(fixture_project().to_bytes())
+            saved.write_bytes(fixture_project().to_bytes())
+            started = time.time()
+            os.utime(old, (started - 60, started - 60))
+            os.utime(saved, (started + 1, started + 1))
+            inspected: list[Path] = []
+            locator = ProjectLocator(
+                [],
+                recent_provider=lambda: [old, saved],
+                indexed_provider=lambda _: [],
+            )
+
+            selected = locator.find_current(
+                "",
+                changed_after=started,
+                candidate_validator=lambda path: not inspected.append(path),
+            )
+
+            self.assertEqual(selected, saved.resolve())
+            self.assertEqual(inspected, [saved.resolve()])
 
     def test_import_writes_new_version_and_never_changes_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -147,6 +342,35 @@ class ProjectServiceTests(unittest.TestCase):
             merged = FLPFile.read(result.merged_project)
             self.assertEqual(merged.channel_count, 3)
             self.assertEqual(result.channel_mapping, {2: 6})
+
+    def test_newer_fl_capsule_can_be_tried_after_ui_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            target = root / "FL25.flp"
+            target.write_bytes(fixture_project().to_bytes())
+            newer = fixture_project()
+            newer.events[0] = text_event(
+                EVENT_FL_VERSION, "26.1.0.5294", unicode_text=False
+            )
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "FL26.flcapsule",
+                name="FL 26 Lead", project=newer, channel_ids=[2], pattern_id=3,
+                preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+            service.library.reindex()
+
+            result = service.import_capsule(
+                capsule.manifest.id, mode="append", project_path=target,
+                open_project=False,
+            )
+
+            self.assertEqual(capsule.manifest.source_fl_version, "26.1.0.5294")
+            self.assertEqual(FLPFile.read(result.merged_project).channel_count, 3)
 
     def test_in_place_import_creates_backup_and_custom_undo_restores_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -209,7 +433,7 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(result.import_destination, "current_pattern")
             self.assertEqual(result.pattern_id, 3)
             self.assertEqual(merged.max_pattern_id(), 3)
-            self.assertEqual([note.rack_channel for note in merged.pattern_notes()[3]], [2, 5, 6])
+            self.assertEqual([note.rack_channel for note in merged.pattern_notes()[3]], [2, 6, 5])
             self.assertEqual(updates[-1], (100, "Import complete"))
             self.assertGreaterEqual(len(updates), 6)
 

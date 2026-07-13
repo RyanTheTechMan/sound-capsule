@@ -64,6 +64,13 @@ def fixture_project(*, ppq: int = 96) -> FLPFile:
         scalar_event(EVENT_CHANNEL_ROUTED_TO, 7),
         text_event(EVENT_PLUGIN_INTERNAL_NAME, "Fruity Wrapper"),
         text_event(EVENT_PLUGIN_NAME, "Serum Lead"),
+        data_event(
+            251,
+            bytes.fromhex(
+                "02000000ffffffffffffffffffffffffffffff7f000000000000f0bf"
+                "ffffffff00ffffff7fffffff7f0000"
+            ),
+        ),
         data_event(213, b"opaque-plugin-state\x00\xff\x10"),
         scalar_event(EVENT_CHANNEL_NEW, 5),
         scalar_event(EVENT_CHANNEL_TYPE, 0),
@@ -107,7 +114,28 @@ class FLPRoundTripTests(unittest.TestCase):
         self.assertEqual(encoded, parsed.to_bytes())
         self.assertEqual(parsed.fl_version, "25.2.5.5055")
         self.assertEqual([section.iid for section in parsed.channel_sections()], [2, 5])
+        self.assertEqual(
+            next(event.payload for event in parsed.channel_sections()[0].events if event.id == 251),
+            bytes.fromhex(
+                "02000000ffffffffffffffffffffffffffffff7f000000000000f0bf"
+                "ffffffff00ffffff7fffffff7f0000"
+            ),
+        )
         self.assertEqual(parsed.channel_sections()[0].events[-1].payload, b"opaque-plugin-state\x00\xff\x10")
+
+    def test_fl26_global_event_64_is_not_counted_as_a_channel(self) -> None:
+        source = fixture_project()
+        source.events[1:1] = [
+            scalar_event(EVENT_CHANNEL_NEW, 2),
+            scalar_event(48, 0),
+            scalar_event(0, 0),
+        ]
+
+        parsed = FLPFile.from_bytes(source.to_bytes())
+
+        self.assertEqual(parsed.channel_count, 2)
+        self.assertEqual([section.iid for section in parsed.channel_sections()], [2, 5])
+        self.assertEqual(parsed.to_bytes(), source.to_bytes())
 
     def test_channel_ownership_stops_before_mixer_and_ignores_rack_events(self) -> None:
         project = fixture_project()
@@ -215,9 +243,13 @@ class FLPRoundTripTests(unittest.TestCase):
         self.assertEqual(pattern_id, 3)
         self.assertEqual(merged.max_pattern_id(), 3)
         merged_notes = merged.pattern_notes()[3]
-        self.assertEqual([item.rack_channel for item in merged_notes], [2, 5, 6])
-        imported = merged_notes[-1]
+        self.assertEqual([item.rack_channel for item in merged_notes], [2, 6, 5])
+        imported = merged_notes[1]
         self.assertEqual((imported.position, imported.length), (48, 192))
+        self.assertEqual(
+            [item.position for item in merged_notes],
+            sorted(item.position for item in merged_notes),
+        )
 
     def test_wrapped_instrument_channel_type_is_supported(self) -> None:
         project = fixture_project()

@@ -21,7 +21,10 @@ favorite filtering, explicit recent/name/usage sorting and usage counters,
 validated external capsule ingestion, duplicate-ID skipping, collision-safe
 library filenames, partial batch results,
 the local JSON protocol, pollable import progress, persisted first-run setup, automatic current-project
-resolution, and Save-time disambiguation.
+resolution, Save-time disambiguation, and non-blocking live-session heartbeats
+while current-project discovery is still running. It also verifies chronological
+FLP note-event normalization, indexed source-FL version metadata, and the
+explicit newer-version try-import path.
 
 Audit every real FLP below a fixture tree without modifying a source file:
 
@@ -43,9 +46,20 @@ ad-hoc signed, not notarized.
 
 The current macOS development validation includes a real FL command-line render
 of an isolated channel and current pattern from Image-Line's bundled
-`NewStuff.flp`. The result must be non-silent and pass RIFF/WAVE structure,
-duration, sample-rate, channel-count, and finite-sample checks. Silent or
-malformed renders are rejected rather than packaged.
+`NewStuff.flp`. FL Studio 26.1.0.5294 has loaded and rendered both a generated
+25.2.5.5055-layout project containing opaque per-channel event 251 and an
+isolated 26.1.0.5294-layout channel from `temp2.flp`. The latter validates FL
+26's overloaded pre-rack event 64, exact 11-channel detection, byte-identical
+round-trip, selected-channel isolation, 12 retained notes, and a non-silent
+48 kHz stereo render. Results must pass RIFF/WAVE structure, duration,
+sample-rate, channel-count, and finite-sample checks. Silent or malformed
+renders are rejected rather than packaged.
+
+FL Studio 25.2.5.5055 also rendered a disposable copy of the reported Pattern 3
+channel with every other channel muted. The append-order form rendered silence;
+the otherwise identical project with note records stably sorted by position
+rendered non-silent audio. This is the regression fixture for Piano Roll notes
+that disappeared during zooming or remained silent until individually clicked.
 
 The following still require explicit interactive host acceptance before a
 public release profile is claimed:
@@ -67,12 +81,16 @@ public release profile is claimed:
    unrelated notes remain unchanged. Reject count mismatches.
 6. Exercise the in-place transaction on disposable projects. Verify the backup
    before replacement, atomic main-file write, OS reopen, `PL_LoadOk` reload
-   acknowledgment, exact custom Undo during the configured recovery window,
+   acknowledgment, reopen in the same FL Studio major version that initiated
+   the import even when another version is the OS default, exact custom Undo
+   during the configured recovery window,
    before-Undo safety backup after later project saves, and expired-Undo
    rejection.
 7. Exercise unsaved projects, duplicate titles, nonstandard project locations, project
    data folders, locked files, helper/app termination, render failures,
-   corrupted capsules, missing plugins/assets, and newer FL formats.
+   corrupted capsules, missing plugins/assets, and newer FL formats. Confirm a
+   newer-version capsule has an orange warning on its library row, shows a
+   Try-import confirmation, and can still proceed after explicit acceptance.
 8. Exercise capsule sharing on macOS and Windows: drag a row to Finder/Explorer,
    another folder, and Discord; confirm the library source remains present. Drop
    single and multiple valid capsules back into the window, then repeat with a

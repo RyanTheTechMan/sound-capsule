@@ -6,7 +6,34 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- Capsule rows show a warning icon beside the title when they contain newer FL
+  Studio project data than the connected host. Hovering explains the version
+  mismatch, and importing requires explicit confirmation while still allowing
+  the user to try it.
+
+### Fixed
+
+- Appended MIDI notes are now written in chronological event order. This keeps
+  newly imported notes visible while zooming the Piano Roll and makes them play
+  immediately without clicking each note to force FL Studio to rebuild it.
+- Starting an import now stops the capsule preview immediately, including when
+  loop playback is enabled or the user subsequently cancels a version warning.
+- FL Studio 2026 on macOS can capture and import 25.2.5.5055-layout projects
+  containing opaque per-channel event 251 without dropping its state.
+- FL Studio 26.1 projects no longer treat the overloaded pre-rack event 64 as
+  an extra channel, and blank project metadata now resolves against live MIDI
+  Channel Rack names instead of silently selecting an unrelated recent FLP.
+- Live FL Studio connection checks no longer wait for recent-project discovery;
+  untitled FLP matching now runs in the background so large project histories
+  cannot cause intermittent false disconnects in either FL Studio 25 or 26.
+- Changing the selected Channel Rack channel no longer temporarily resets the
+  displayed project to "Unnamed project" when the full rack identity is known,
+  and one unsaved rename in an otherwise matching rack still resolves safely.
+- Imported and restored projects reopen in the exact FL Studio application that
+  published the live MIDI session instead of the operating system's default FL
+  version; a missing host identity now fails safely rather than guessing.
 
 ## [0.2.1] - 2026-07-12
 
