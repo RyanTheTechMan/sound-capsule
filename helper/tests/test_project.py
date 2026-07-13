@@ -10,6 +10,7 @@ from unittest import mock
 
 from soundcapsule.capsule import Capsule
 from soundcapsule.bridge import BridgeSession
+from soundcapsule.compatibility import require_mutation_profile
 from soundcapsule.config import Settings
 from soundcapsule.flp import (
     EVENT_FL_VERSION,
@@ -633,6 +634,38 @@ class ProjectServiceTests(unittest.TestCase):
             service = CapsuleService(settings)
             with self.assertRaises(FLPUnsupportedError):
                 service.capture("Future", project_path=source, preview_wav=preview)
+
+    def test_fl25_windows_range_allows_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project()
+            version = next(
+                event for event in project.events if event.id == EVENT_FL_VERSION
+            )
+            project.events[project.events.index(version)] = version.with_payload(
+                b"25.2.5.5319\0"
+            )
+            source = root / "FL25-Windows.flp"
+            source.write_bytes(project.to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+
+            capsules = CapsuleService(Settings(data_dir=root / "data")).capture(
+                "FL 25 Windows", project_path=source, preview_wav=preview
+            )
+
+            self.assertEqual(len(capsules), 1)
+
+    def test_mutation_profiles_cover_verified_major_ranges(self) -> None:
+        self.assertEqual(require_mutation_profile("25.2.5.5319").name, "fl25")
+        self.assertEqual(require_mutation_profile("25.9.0.1").name, "fl25")
+        self.assertEqual(require_mutation_profile("26.1.0.5530").name, "fl26")
+        self.assertEqual(require_mutation_profile("26.9.0.1").name, "fl26")
+        for unsupported in ("25.2.5.5054", "26.1.0.5293", "27.0.0", "unknown"):
+            with self.subTest(unsupported=unsupported), self.assertRaises(
+                FLPUnsupportedError
+            ):
+                require_mutation_profile(unsupported)
 
     def test_backup_uses_project_data_folder_but_rejects_unresolved_macros(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

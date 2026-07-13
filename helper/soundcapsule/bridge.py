@@ -186,14 +186,14 @@ class BridgeQueue:
 
     def session(self, *, maximum_age: float = 10.0) -> BridgeSession:
         session = BridgeSession.read(self.session_path)
-        if not session.bridge_active:
-            raise RuntimeError("FL Studio bridge is disabled; enable the Sound Capsule MIDI script")
-        if time.time() - session.timestamp > maximum_age:
-            if not _windows_process_is_running(session.host_pid, session.host_executable):
-                raise RuntimeError("FL Studio bridge session is stale; enable the Sound Capsule MIDI script")
-        if sys.platform == "win32" and _windows_process_is_running(
+        windows_host_alive = sys.platform == "win32" and _windows_process_is_running(
             session.host_pid, session.host_executable
-        ):
+        )
+        if sys.platform == "win32" and not session.bridge_active:
+            raise RuntimeError("FL Studio bridge is disabled; enable the Sound Capsule MIDI script")
+        if time.time() - session.timestamp > maximum_age and not windows_host_alive:
+            raise RuntimeError("FL Studio bridge session is stale; enable the Sound Capsule MIDI script")
+        if windows_host_alive:
             # general.getProjectTitle() exposes optional project metadata, not
             # reliably the current FLP filename. The exact script-host process
             # owns a caption such as "Song.flp - FL Studio 2026", which avoids

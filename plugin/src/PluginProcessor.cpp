@@ -22,16 +22,12 @@ SoundCapsuleAudioProcessor::SoundCapsuleAudioProcessor()
     : AudioProcessor(soundCapsuleBuses())
 {
     formatManager.registerBasicFormats();
-    // The standalone app owns the virtual controller port. Creating the same
-    // endpoint in every VST instance causes CoreMIDI conflicts and is not
-    // needed for the VST-only library/preview surface.
+    // The standalone app owns native virtual ports where the OS supports them.
+    // Creating one in every VST instance causes CoreMIDI conflicts.
+#if ! JUCE_WINDOWS
     if (isRunningStandalone())
-   #if JUCE_WINDOWS
-        controllerMidiEndpoint = std::make_unique<
-            soundcapsule::midi::ControllerMidiEndpointManager>();
-   #else
         initialiseFlControlMidi();
-   #endif
+#endif
 }
 
 SoundCapsuleAudioProcessor::~SoundCapsuleAudioProcessor()

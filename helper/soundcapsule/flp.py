@@ -55,8 +55,8 @@ EVENT_PADDING = -1
 # Event ownership began with the model independently established by PyFLP and
 # is extended here for FL Studio 25.2.  Image-Line changed several IDs used at
 # the end of the Channel Rack region; the three boundary IDs below and opaque
-# per-channel event 251 were validated with build 25.2.5.5055 projects loaded
-# and rendered by FL Studio 26.1.0.5294 on macOS.
+# per-channel event 251 were validated with 25.2.5.5055 and 25.2.5.5319 projects
+# loaded and rendered on macOS and Windows.
 POST_CHANNEL_BOUNDARY_IDS = frozenset({99, 233, 238})
 CHANNEL_EVENT_IDS = frozenset(
     {

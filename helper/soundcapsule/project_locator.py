@@ -57,14 +57,17 @@ def _mac_recent_projects() -> list[Path]:
     return [path for _, path in sorted(group, key=lambda item: item[0])]
 
 
+def _windows_document_roots() -> list[Path]:
+    result = [Path.home() / "Documents"]
+    for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        if value := os.environ.get(variable):
+            result.append(Path(value) / "Documents")
+    return result
+
+
 def _windows_browser_recent_projects(document_roots: list[Path] | None = None) -> list[Path]:
     """Read the current FL Studio Browser recent-files list on Windows."""
-    if document_roots is None:
-        document_roots = [Path.home() / "Documents"]
-        for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-            value = os.environ.get(variable)
-            if value:
-                document_roots.append(Path(value) / "Documents")
+    document_roots = document_roots or _windows_document_roots()
 
     local_app_data = Path(
         os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
@@ -206,12 +209,7 @@ def _windows_indexed_projects(
     # when called directly with unexpected title metadata.
     if Path(filename).name != filename:
         return []
-    if document_roots is None:
-        document_roots = [Path.home() / "Documents"]
-        for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-            value = os.environ.get(variable)
-            if value:
-                document_roots.append(Path(value) / "Documents")
+    document_roots = document_roots or _windows_document_roots()
 
     result: list[Path] = []
     seen: set[str] = set()

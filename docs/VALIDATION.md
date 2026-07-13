@@ -66,16 +66,21 @@ Pattern 4 FLEX channel from a byte-exact project containing its single zero
 event-stream padding byte. The generated 48 kHz stereo WAV was non-silent and
 passed the helper's RIFF/WAVE validation.
 
+FL Studio 25.2.5.5319 on Windows byte-exactly parsed and rewrote the live
+`sound-capsule-2025-test2.flp`, then captured its selected Pattern 1 channel
+through the isolated renderer. The original project remained open and the
+generated 431,008-byte WAV passed non-silent RIFF/WAVE validation.
+
 The following still require explicit interactive host acceptance before a
 public release profile is claimed:
 
 1. On Windows, validate **Sound Capsule MIDI** through loopMIDI; preserve
    **Sound Capsule Control** for an upgraded legacy setup. Confirm the selected
-   port appears under FL Studio Input and can be assigned to the installed
-   controller script without Sound Capsule transmitting musical MIDI. Make a
-   clean and dirty save, plus a first save that opens FL's normal Save dialog,
-   and confirm the unchanged JSON bridge reports an incremented Save sequence
-   and clean state.
+   port appears under FL Studio Input and Output, is enabled in both, and can be
+   assigned to the installed controller script as an Input without Sound Capsule
+   transmitting musical MIDI. Make a clean and dirty save, plus a first save
+   that opens FL's normal Save dialog, and confirm the unchanged JSON bridge
+   reports an incremented Save sequence and clean state.
 2. Capture single, grouped, and individual selections containing FL Sampler,
    3xOsc, FLEX, Sytrus, wrapped VST2/VST3, CLAP, Serum, Kontakt, Unicode names,
    unusual wrapper flags, missing samples, and trial placeholders.

@@ -328,45 +328,6 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "check_updates_on_startup": current.check_updates_on_startup,
                 "library_dir": str(current.library_dir),
                 "app_path": str(current.app_path) if current.app_path else None,
-                "midi_output_mode": current.midi_output_mode,
-                "midi_external_device_identifier": current.midi_external_device_identifier,
-                "midi_external_device_name": current.midi_external_device_name,
-                "midi_setup_complete": current.midi_setup_complete,
-            }
-        if command == "configure_midi":
-            with self.operation_lock:
-                current = Settings.load(self.settings.data_dir)
-                mode = str(args.get("mode", current.midi_output_mode))
-                if mode not in ("not_configured", "external_midi_port"):
-                    raise ValueError("Invalid MIDI output mode")
-                identifier = args.get(
-                    "external_device_identifier", current.midi_external_device_identifier
-                )
-                display_name = args.get(
-                    "external_device_name", current.midi_external_device_name
-                )
-                current.midi_output_mode = mode
-                current.midi_external_device_identifier = (
-                    str(identifier).strip() if identifier else None
-                )
-                current.midi_external_device_name = (
-                    str(display_name).strip() if display_name else None
-                )
-                current.midi_setup_complete = bool(
-                    args.get("setup_complete", current.midi_setup_complete)
-                )
-                current.save()
-                self.settings.midi_output_mode = current.midi_output_mode
-                self.settings.midi_external_device_identifier = (
-                    current.midi_external_device_identifier
-                )
-                self.settings.midi_external_device_name = current.midi_external_device_name
-                self.settings.midi_setup_complete = current.midi_setup_complete
-            return {
-                "midi_output_mode": current.midi_output_mode,
-                "midi_external_device_identifier": current.midi_external_device_identifier,
-                "midi_external_device_name": current.midi_external_device_name,
-                "midi_setup_complete": current.midi_setup_complete,
             }
         if command == "set_library_location":
             with self.operation_lock:

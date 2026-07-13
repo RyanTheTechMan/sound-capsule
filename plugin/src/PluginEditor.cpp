@@ -216,247 +216,67 @@ private:
 };
 
 #if JUCE_WINDOWS
-class MidiSettingsStatusComponent final : public juce::Component
+inline constexpr auto loopMidiSuggestedName = "Sound Capsule MIDI";
+inline constexpr auto loopMidiDownloadUrl =
+    "https://www.tobias-erichsen.de/software/loopmidi.html";
+inline constexpr auto loopMidiIdentifierPreference =
+    R"(HKEY_CURRENT_USER\Software\Sound Capsule\LastLoopMidiPortIdentifier)";
+inline constexpr auto loopMidiNamePreference =
+    R"(HKEY_CURRENT_USER\Software\Sound Capsule\LastLoopMidiPortName)";
+
+bool isLoopMidiPort(const juce::MidiDeviceInfo& device)
 {
-public:
-    explicit MidiSettingsStatusComponent(const juce::String& text)
-    {
-        setSize(360, 42);
-        heading.setText("MIDI integration:", juce::dontSendNotification);
-        heading.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-        value.setText(text, juce::dontSendNotification);
-        value.setColour(juce::Label::textColourId, accent);
-        value.setTooltip(text);
-        addAndMakeVisible(heading);
-        addAndMakeVisible(value);
-    }
+    return device.identifier.containsIgnoreCase("tevmidi")
+        || device.identifier.containsIgnoreCase("tevirtualmidi")
+        || device.name.containsIgnoreCase("loopMIDI");
+}
 
-    void resized() override
-    {
-        auto bounds = getLocalBounds();
-        heading.setBounds(bounds.removeFromTop(18));
-        value.setBounds(bounds);
-    }
-
-private:
-    juce::Label heading;
-    juce::Label value;
-};
-
-class ExternalMidiSetupComponent final : public juce::Component
+std::vector<juce::MidiDeviceInfo> loopMidiPorts()
 {
-public:
-    ExternalMidiSetupComponent(soundcapsule::midi::LoopMidiInstallation installation,
-                               juce::String savedIdentifier,
-                               juce::String savedName)
-        : savedId(std::move(savedIdentifier)), savedPortName(std::move(savedName)),
-          loopMidiInstallation(std::move(installation)),
-          openLoopMidi("Open loopMIDI website"), refresh("Refresh MIDI devices"),
-          copyName("Copy suggested port name"), verify("Verify endpoint")
-    {
-        setSize(570, 415);
-        title.setText("Set up loopMIDI", juce::dontSendNotification);
-        title.setFont(juce::FontOptions(17.0f, juce::Font::bold));
-        title.setColour(juce::Label::textColourId, accent);
-        if (loopMidiInstallation.installed)
-            explanation.setText(
-                "loopMIDI is installed. Open it, create or start a port, then refresh. "
-                "Other third-party virtual MIDI cables are also supported.",
-                juce::dontSendNotification);
-        else
-            explanation.setText(
-                "loopMIDI is not installed. Install it from its official website, or use "
-                "another third-party virtual MIDI cable.", juce::dontSendNotification);
-        explanation.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-        explanation.setMinimumHorizontalScale(0.8f);
-        if (loopMidiInstallation.canLaunch())
-        {
-            openLoopMidi.setButtonText("Open loopMIDI");
-            openLoopMidi.setTooltip("Open the installed loopMIDI application");
-        }
-        else if (loopMidiInstallation.installed)
-        {
-            openLoopMidi.setButtonText("loopMIDI detected");
-            openLoopMidi.setEnabled(false);
-            openLoopMidi.setTooltip("Open loopMIDI from the Windows Start menu");
-        }
-        else
-        {
-            openLoopMidi.setButtonText("Install loopMIDI");
-            openLoopMidi.setTooltip("Open the official loopMIDI website");
-        }
-        portLabel.setText("MIDI output:", juce::dontSendNotification);
-        portLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-        status.setText(savedPortName.isNotEmpty() ? "Selected MIDI port is unavailable"
-                                                  : "Select a MIDI output port",
-                       juce::dontSendNotification);
-        status.setColour(juce::Label::textColourId, juce::Colours::orange);
-        status.setTooltip(status.getText());
-        const auto portName = juce::String(soundcapsule::midi::canonicalEndpointName);
-        instructions.setText(
-            "1. Download and install loopMIDI from its official website.\n"
-            "2. Open loopMIDI.\n"
-            "3. Enter " + portName + " under 'New port-name'.\n"
-            "4. Press the plus button to create the port.\n"
-            "5. Leave loopMIDI running. Enabling autostart is recommended.\n"
-            "6. Return here and press 'Refresh MIDI devices'.\n"
-            "7. Select " + portName + " as the MIDI output.\n"
-            "8. In FL Studio, open Options > MIDI settings.\n"
-            "9. Under Input, select " + portName + " and press 'Enable'.",
-            juce::dontSendNotification);
-        instructions.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-        instructions.setJustificationType(juce::Justification::topLeft);
+    std::vector<juce::MidiDeviceInfo> result;
+    for (const auto& device : juce::MidiOutput::getAvailableDevices())
+        if (isLoopMidiPort(device))
+            result.push_back(device);
+    return result;
+}
 
-        openLoopMidi.onClick = [this] {
-            if (loopMidiInstallation.canLaunch())
-                loopMidiInstallation.executable.startAsProcess();
-            else if (!loopMidiInstallation.installed)
-                juce::URL(soundcapsule::midi::loopMidiDownloadUrl).launchInDefaultBrowser();
-        };
-        refresh.onClick = [this] { if (onRefresh) onRefresh(); };
-        copyName.onClick = [this] { if (onCopyName) onCopyName(); };
-        verify.onClick = [this] { if (onVerify) onVerify(); };
-
-        for (auto* component : std::initializer_list<juce::Component*>{
-                 &title, &explanation, &portLabel, &ports, &status, &instructions,
-                 &openLoopMidi, &refresh, &copyName, &verify})
-            addAndMakeVisible(component);
-    }
-
-    void setPorts(std::vector<soundcapsule::midi::ExternalPort> available)
-    {
-        const auto previousId = selectedIdentifier();
-        const auto previousName = selectedName();
-        entries = std::move(available);
-        ports.clear(juce::dontSendNotification);
-        auto selectedIndex = -1;
-        for (int index = 0; index < static_cast<int>(entries.size()); ++index)
-        {
-            ports.addItem(entries[static_cast<size_t>(index)].name, index + 1);
-            const auto& entry = entries[static_cast<size_t>(index)];
-            if ((previousId.isNotEmpty() && entry.identifier == previousId)
-                || (previousId.isEmpty() && previousName.isNotEmpty()
-                    && entry.name.equalsIgnoreCase(previousName)))
-                selectedIndex = index;
-        }
-        if (selectedIndex < 0 && previousName.isNotEmpty())
-        {
-            entries.push_back({previousId, previousName});
-            ports.addItem(previousName + " (unavailable)", static_cast<int>(entries.size()));
-            selectedIndex = static_cast<int>(entries.size()) - 1;
-        }
-        if (selectedIndex >= 0)
-            ports.setSelectedId(selectedIndex + 1, juce::dontSendNotification);
-        else if (!entries.empty())
-            ports.setSelectedId(1, juce::dontSendNotification);
-    }
-
-    juce::String selectedIdentifier() const
-    {
-        const auto index = ports.getSelectedId() - 1;
-        return juce::isPositiveAndBelow(index, static_cast<int>(entries.size()))
-                 ? entries[static_cast<size_t>(index)].identifier : savedId;
-    }
-
-    juce::String selectedName() const
-    {
-        const auto index = ports.getSelectedId() - 1;
-        return juce::isPositiveAndBelow(index, static_cast<int>(entries.size()))
-                 ? entries[static_cast<size_t>(index)].name : savedPortName;
-    }
-
-    void setStatus(const juce::String& text, bool connected)
-    {
-        status.setText(text, juce::dontSendNotification);
-        status.setTooltip(text);
-        status.setColour(juce::Label::textColourId,
-                         connected ? accent : juce::Colours::orange);
-    }
-
-    void resized() override
-    {
-        auto bounds = getLocalBounds();
-        title.setBounds(bounds.removeFromTop(26));
-        explanation.setBounds(bounds.removeFromTop(34));
-        bounds.removeFromTop(6);
-        auto portRow = bounds.removeFromTop(30);
-        portLabel.setBounds(portRow.removeFromLeft(84));
-        refresh.setBounds(portRow.removeFromRight(152));
-        portRow.removeFromRight(6);
-        ports.setBounds(portRow);
-        status.setBounds(bounds.removeFromTop(28));
-        auto actions = bounds.removeFromTop(30);
-        openLoopMidi.setBounds(actions.removeFromLeft(162));
-        actions.removeFromLeft(5);
-        copyName.setBounds(actions.removeFromLeft(184));
-        actions.removeFromLeft(5);
-        verify.setBounds(actions.removeFromLeft(118));
-        bounds.removeFromTop(8);
-        instructions.setBounds(bounds);
-    }
-
-    std::function<void()> onRefresh;
-    std::function<void()> onCopyName;
-    std::function<void()> onVerify;
-
-private:
-    juce::String savedId;
-    juce::String savedPortName;
-    soundcapsule::midi::LoopMidiInstallation loopMidiInstallation;
-    std::vector<soundcapsule::midi::ExternalPort> entries;
-    juce::Label title;
-    juce::Label explanation;
-    juce::Label portLabel;
-    juce::ComboBox ports;
-    juce::Label status;
-    juce::Label instructions;
-    juce::TextButton openLoopMidi;
-    juce::TextButton refresh;
-    juce::TextButton copyName;
-    juce::TextButton verify;
-};
-
-class ExternalMidiSetupWindow final : public juce::AlertWindow
+void rememberLoopMidiPort(const juce::MidiDeviceInfo& device)
 {
-public:
-    ExternalMidiSetupWindow(soundcapsule::midi::LoopMidiInstallation installation,
-                            const juce::String& identifier, const juce::String& name,
-                            juce::Component* associated)
-        : juce::AlertWindow("Set up an external MIDI port", {},
-                            juce::MessageBoxIconType::InfoIcon, associated),
-          content(std::move(installation), identifier, name)
-    {
-        addCustomComponent(&content);
-        addButton("Save MIDI setup", 1, juce::KeyPress(juce::KeyPress::returnKey));
-        addButton("Close", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-    }
+    juce::WindowsRegistry::setValue(loopMidiIdentifierPreference, device.identifier);
+    juce::WindowsRegistry::setValue(loopMidiNamePreference, device.name);
+}
 
-    ~ExternalMidiSetupWindow() override { removeCustomComponent(0); }
-    ExternalMidiSetupComponent content;
-};
+juce::File loopMidiExecutable()
+{
+    juce::Array<juce::File> candidates;
+    for (const auto& rootName : { "ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA" })
+    {
+        const auto root = juce::File(
+            juce::SystemStats::getEnvironmentVariable(rootName, {}));
+        if (root == juce::File())
+            continue;
+        candidates.add(root.getChildFile("Tobias Erichsen")
+                           .getChildFile("loopMIDI").getChildFile("loopMIDI.exe"));
+        candidates.add(root.getChildFile("loopMIDI").getChildFile("loopMIDI.exe"));
+    }
+    for (const auto& candidate : candidates)
+        if (candidate.existsAsFile())
+            return candidate;
+    return {};
+}
 #endif
 
 class SettingsAlertWindow final : public juce::AlertWindow
 {
 public:
     SettingsAlertWindow(const juce::String& title, bool checkOnStartup,
-                        const juce::String& libraryDirectory
-                       #if JUCE_WINDOWS
-                        , const juce::String& midiStatusText
-                       #endif
-                        )
+                        const juce::String& libraryDirectory)
         : juce::AlertWindow(title, {}, juce::MessageBoxIconType::QuestionIcon),
           updateSettings(checkOnStartup),
           libraryLocation(libraryDirectory),
-         #if JUCE_WINDOWS
-          midiStatus(midiStatusText),
-         #endif
           flSetup("FL Setup")
     {
         addCustomComponent(&libraryLocation);
-       #if JUCE_WINDOWS
-        addCustomComponent(&midiStatus);
-       #endif
         addCustomComponent(&updateSettings);
         updateSettings.onCheckNow = [this] { exitModalState(3); };
         updateSettings.attachCallbacks();
@@ -467,9 +287,6 @@ public:
 
     ~SettingsAlertWindow() override
     {
-       #if JUCE_WINDOWS
-        removeCustomComponent(2);
-       #endif
         removeCustomComponent(1);
         removeCustomComponent(0);
     }
@@ -486,9 +303,6 @@ public:
 private:
     UpdateSettingsComponent updateSettings;
     LibraryLocationComponent libraryLocation;
-   #if JUCE_WINDOWS
-    MidiSettingsStatusComponent midiStatus;
-   #endif
     juce::TextButton flSetup;
 };
 
@@ -670,14 +484,22 @@ juce::String finishSetupInstructions(const juce::String& configuredMidiInput = {
     const auto appName = juce::String("Sound Capsule.exe");
     const auto midiInput = configuredMidiInput.isNotEmpty()
                          ? configuredMidiInput
-                         : juce::String(soundcapsule::midi::canonicalEndpointName);
+                         : juce::String(loopMidiSuggestedName);
+    const auto midiInstructions =
+        juce::String("1. Under Input, select and enable ") + midiInput
+        + ", then choose Sound Capsule (user) as its Controller type.\n"
+          "2. Under Output, select and enable the same " + midiInput + " port.";
    #elif JUCE_MAC
     const auto appName = juce::String("Sound Capsule.app");
-    const auto midiInput = juce::String("Sound Capsule Control");
+    const auto midiInstructions = juce::String(
+        "Enable the Sound Capsule Control input and choose Sound Capsule (user) "
+        "as its Controller type.");
     juce::ignoreUnused(configuredMidiInput);
    #else
     const auto appName = juce::String("Sound Capsule application");
-    const auto midiInput = juce::String("Sound Capsule Control");
+    const auto midiInstructions = juce::String(
+        "Enable the Sound Capsule Control input and choose Sound Capsule (user) "
+        "as its Controller type.");
     juce::ignoreUnused(configuredMidiInput);
    #endif
 
@@ -687,8 +509,8 @@ juce::String finishSetupInstructions(const juce::String& configuredMidiInput = {
            "3. Name it Sound Capsule and enable Launch at startup.\n\n"
            "This FL option launches Sound Capsule with FL Studio, not at system login.\n\n"
            "Required MIDI bridge:\n\n"
-           "Open Options > MIDI Settings, enable the " + midiInput + " input, "
-           "and choose Sound Capsule (user) as its Controller type.\n\n"
+           "Open Options > MIDI Settings.\n"
+         + midiInstructions + "\n\n"
            "These FL assignments only need to be done once.";
 }
 
@@ -944,18 +766,6 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     : AudioProcessorEditor(&p), audioProcessor(p), tooltipWindow(this, 0)
 {
     const auto helperReady = audioProcessor.ensureHelperRunning();
-#if JUCE_WINDOWS
-    if (auto* midiManager = audioProcessor.getControllerMidiEndpointManager(); midiManager != nullptr)
-    {
-        juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
-        midiManager->setStatusListener([safe](soundcapsule::midi::EndpointStatus endpoint) {
-            juce::MessageManager::callAsync([safe, endpoint = std::move(endpoint)] {
-                if (safe == nullptr) return;
-                safe->midiEndpointStatus = endpoint;
-            });
-        });
-    }
-#endif
     thumbnailFormats.registerBasicFormats();
     setSize(860, 540);
     setResizable(true, true);
@@ -1141,10 +951,6 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
 
 SoundCapsuleAudioProcessorEditor::~SoundCapsuleAudioProcessorEditor()
 {
-#if JUCE_WINDOWS
-    if (auto* midiManager = audioProcessor.getControllerMidiEndpointManager(); midiManager != nullptr)
-        midiManager->setStatusListener({});
-#endif
     stopTimer();
     list.removeMouseListener(this);
     shuttingDown.store(true);
@@ -2138,34 +1944,13 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
         safe->list.repaint();
         const auto generalSetupComplete = static_cast<bool>(
             response.getProperty("setup_complete", false));
-#if JUCE_WINDOWS
-        safe->midiOutputMode = soundcapsule::midi::outputModeFromString(
-            response.getProperty("midi_output_mode", "not_configured").toString());
-        safe->midiExternalIdentifier = response.getProperty(
-            "midi_external_device_identifier", "").toString();
-        safe->midiExternalName = response.getProperty(
-            "midi_external_device_name", "").toString();
-        safe->midiSetupComplete = static_cast<bool>(
-            response.getProperty("midi_setup_complete", false));
-#endif
         if (safe->audioProcessor.isRunningStandalone()
             && static_cast<bool>(response.getProperty("check_updates_on_startup", true)))
             safe->checkForUpdates();
         if (!safe->audioProcessor.isRunningStandalone())
             return;
-#if JUCE_WINDOWS
-        auto continueGeneralSetup = [safe, generalSetupComplete] {
-            if (safe != nullptr && !generalSetupComplete)
-                safe->showSetup(true);
-        };
-        if (!safe->midiSetupComplete)
-            safe->showExternalMidiSetup(true, std::move(continueGeneralSetup));
-        else
-            safe->activateSavedMidiConfiguration(true, std::move(continueGeneralSetup));
-#else
         if (!generalSetupComplete)
             safe->showSetup(true);
-#endif
     });
 }
 
@@ -2574,143 +2359,165 @@ void SoundCapsuleAudioProcessorEditor::runSetupRepair()
 }
 
 #if JUCE_WINDOWS
-juce::String SoundCapsuleAudioProcessorEditor::currentMidiStatusText() const
-{
-    return soundcapsule::midi::endpointStatusText(midiOutputMode, midiEndpointStatus);
-}
-
-void SoundCapsuleAudioProcessorEditor::saveMidiConfiguration(
-    soundcapsule::midi::OutputMode mode, const juce::String& identifier,
-    const juce::String& name, bool setupComplete, std::function<void()> continuation)
-{
-    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
-    sendCommand(
-        "configure_midi",
-        object({{"mode", soundcapsule::midi::outputModeToString(mode)},
-                {"external_device_identifier", identifier},
-                {"external_device_name", name},
-                {"setup_complete", setupComplete}}),
-        [safe, mode, identifier, name, setupComplete,
-         continuation = std::move(continuation)](juce::var) mutable {
-            if (safe == nullptr) return;
-            safe->midiOutputMode = mode;
-            safe->midiExternalIdentifier = identifier;
-            safe->midiExternalName = name;
-            safe->midiSetupComplete = setupComplete;
-            if (continuation) continuation();
-        });
-}
-
-void SoundCapsuleAudioProcessorEditor::activateSavedMidiConfiguration(
-    bool notifyOnFailure, std::function<void()> continuation)
-{
-    auto* manager = audioProcessor.getControllerMidiEndpointManager();
-    if (manager == nullptr)
-    {
-        if (continuation) continuation();
-        return;
-    }
-    if (midiOutputMode == soundcapsule::midi::OutputMode::externalMidiPort)
-    {
-        juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
-        manager->activateExternalAsync(
-            midiExternalIdentifier, midiExternalName,
-            [safe, notifyOnFailure, continuation = std::move(continuation)](
-                soundcapsule::midi::EndpointStatus endpoint) mutable {
-                juce::MessageManager::callAsync(
-                    [safe, notifyOnFailure, endpoint = std::move(endpoint),
-                     continuation = std::move(continuation)]() mutable {
-                        if (safe == nullptr) return;
-                        safe->midiEndpointStatus = endpoint;
-                        if (notifyOnFailure && endpoint.state
-                                == soundcapsule::midi::EndpointState::selectedPortUnavailable)
-                            safe->status.setText(endpoint.userMessage,
-                                                 juce::dontSendNotification);
-                        if (continuation) continuation();
-                    });
-            });
-        return;
-    }
-    manager->stopAsync();
-    if (continuation) continuation();
-}
-
 void SoundCapsuleAudioProcessorEditor::showExternalMidiSetup(
-    bool initial, std::function<void()> continuation)
+    std::function<void(juce::String)> continuation, juce::String notice)
 {
-    auto* manager = audioProcessor.getControllerMidiEndpointManager();
-    if (manager == nullptr)
-    {
-        if (continuation) continuation();
-        return;
-    }
-    auto* window = new ExternalMidiSetupWindow(
-        soundcapsule::midi::detectLoopMidiInstallation(),
-        midiExternalIdentifier, midiExternalName, this);
+    const auto generation = ++midiSetupGeneration;
+    status.setText("Looking for loopMIDI ports...", juce::dontSendNotification);
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
-    juce::Component::SafePointer<ExternalMidiSetupWindow> safeWindow(window);
+    requestPool.addJob(
+        [safe, generation, notice = std::move(notice),
+         continuation = std::move(continuation)]() mutable {
+            auto ports = loopMidiPorts();
+            juce::MessageManager::callAsync(
+                [safe, generation, notice = std::move(notice), ports = std::move(ports),
+                 continuation = std::move(continuation)]() mutable {
+                    if (safe == nullptr || generation != safe->midiSetupGeneration)
+                        return;
 
-    auto refreshPorts = [safe, safeWindow] {
-        if (safe == nullptr || safeWindow == nullptr) return;
-        if (auto* midiManager = safe->audioProcessor.getControllerMidiEndpointManager())
-            midiManager->enumerateExternalPortsAsync(
-                [safeWindow](std::vector<soundcapsule::midi::ExternalPort> ports) mutable {
-                    juce::MessageManager::callAsync(
-                        [safeWindow, ports = std::move(ports)]() mutable {
-                            if (safeWindow != nullptr)
-                                safeWindow->content.setPorts(std::move(ports));
-                        });
+                    auto message = juce::String(
+                        "Create or start a port in loopMIDI, then choose it below.\n\n"
+                        "Suggested port name: ")
+                        + loopMidiSuggestedName
+                        + "\n\nOnly ports created by loopMIDI are listed.";
+                    if (notice.isNotEmpty())
+                        message += "\n\n" + notice;
+                    auto* dialog = new juce::AlertWindow(
+                        "Set up loopMIDI", message,
+                        juce::MessageBoxIconType::InfoIcon, safe.getComponent());
+
+                    juce::StringArray names;
+                    for (const auto& port : ports)
+                        names.add(port.name);
+                    if (names.isEmpty())
+                        names.add("No loopMIDI ports found");
+                    dialog->addComboBox("loopmidi_port", names, "loopMIDI port:");
+                    if (auto* chooser = dialog->getComboBoxComponent("loopmidi_port"))
+                    {
+                        auto preferredIndex = -1;
+                        const auto preferredIdentifier = juce::WindowsRegistry::getValue(
+                            loopMidiIdentifierPreference);
+                        const auto preferredName = juce::WindowsRegistry::getValue(
+                            loopMidiNamePreference);
+                        if (preferredIdentifier.isNotEmpty())
+                            for (auto index = 0; index < static_cast<int>(ports.size()); ++index)
+                                if (ports[static_cast<size_t>(index)].identifier
+                                        == preferredIdentifier)
+                                    preferredIndex = index;
+                        if (preferredIndex < 0 && preferredName.isNotEmpty())
+                            for (auto index = 0; index < static_cast<int>(ports.size()); ++index)
+                                if (ports[static_cast<size_t>(index)].name == preferredName)
+                                    preferredIndex = index;
+                        chooser->setSelectedId(juce::jmax(0, preferredIndex) + 1,
+                                               juce::dontSendNotification);
+                        chooser->setEnabled(!ports.empty());
+                        chooser->onChange = [chooser, ports] {
+                            const auto index = chooser->getSelectedId() - 1;
+                            if (juce::isPositiveAndBelow(index, static_cast<int>(ports.size())))
+                                rememberLoopMidiPort(ports[static_cast<size_t>(index)]);
+                        };
+                    }
+
+                    const auto executable = loopMidiExecutable();
+                    dialog->addButton("Use Port", 1,
+                                      juce::KeyPress(juce::KeyPress::returnKey));
+                    dialog->addButton("Refresh", 2);
+                    dialog->addButton(executable.existsAsFile()
+                                          ? "Open loopMIDI" : "Get loopMIDI",
+                                      3);
+                    dialog->addButton("Copy Name", 4);
+                    dialog->addButton("Close", 0,
+                                      juce::KeyPress(juce::KeyPress::escapeKey));
+                    if (auto* usePort = dialog->getButton("Use Port"))
+                        usePort->setEnabled(!ports.empty());
+
+                    dialog->enterModalState(
+                        true,
+                        juce::ModalCallbackFunction::create(
+                            [safe, dialog, generation, ports = std::move(ports), executable,
+                             continuation = std::move(continuation)](int result) mutable {
+                                if (safe == nullptr
+                                    || generation != safe->midiSetupGeneration)
+                                    return;
+                                if (result == 0)
+                                {
+                                    ++safe->midiSetupGeneration;
+                                    if (continuation) continuation({});
+                                    return;
+                                }
+                                if (result == 2)
+                                {
+                                    safe->showExternalMidiSetup(std::move(continuation));
+                                    return;
+                                }
+                                if (result == 3)
+                                {
+                                    if (executable.existsAsFile())
+                                        executable.startAsProcess();
+                                    else
+                                        juce::URL(loopMidiDownloadUrl).launchInDefaultBrowser();
+                                    safe->showExternalMidiSetup(std::move(continuation));
+                                    return;
+                                }
+                                if (result == 4)
+                                {
+                                    juce::SystemClipboard::copyTextToClipboard(
+                                        loopMidiSuggestedName);
+                                    safe->showExternalMidiSetup(
+                                        std::move(continuation), "Suggested port name copied.");
+                                    return;
+                                }
+                                const auto* chooser =
+                                    dialog->getComboBoxComponent("loopmidi_port");
+                                const auto index = chooser != nullptr
+                                    ? chooser->getSelectedId() - 1 : -1;
+                                if (result != 1 || !juce::isPositiveAndBelow(
+                                        index, static_cast<int>(ports.size())))
+                                {
+                                    safe->showExternalMidiSetup(
+                                        std::move(continuation),
+                                        "Choose an available loopMIDI port.");
+                                    return;
+                                }
+
+                                const auto selected = ports[static_cast<size_t>(index)];
+                                const auto verification = ++safe->midiSetupGeneration;
+                                safe->status.setText("Checking loopMIDI port...",
+                                                     juce::dontSendNotification);
+                                safe->requestPool.addJob(
+                                    [safe, verification, selected,
+                                     continuation = std::move(continuation)]() mutable {
+                                        const auto available = loopMidiPorts();
+                                        const auto found = std::any_of(
+                                            available.begin(), available.end(),
+                                            [&selected](const auto& port) {
+                                                return port.identifier == selected.identifier;
+                                            });
+                                        juce::MessageManager::callAsync(
+                                            [safe, verification, selected, found,
+                                             continuation = std::move(continuation)]() mutable {
+                                                if (safe == nullptr || verification
+                                                        != safe->midiSetupGeneration)
+                                                    return;
+                                                if (found)
+                                                {
+                                                    rememberLoopMidiPort(selected);
+                                                    safe->status.setText(
+                                                        "loopMIDI port selected",
+                                                        juce::dontSendNotification);
+                                                    if (continuation)
+                                                        continuation(selected.name);
+                                                    return;
+                                                }
+                                                safe->showExternalMidiSetup(
+                                                    std::move(continuation),
+                                                    "The selected loopMIDI port is no longer available.");
+                                            });
+                                    });
+                            }),
+                        true);
                 });
-    };
-    window->content.onCopyName = [] {
-        juce::SystemClipboard::copyTextToClipboard(
-            soundcapsule::midi::canonicalEndpointName);
-    };
-    window->content.onRefresh = refreshPorts;
-    window->content.onVerify = [safe, safeWindow] {
-        if (safe == nullptr || safeWindow == nullptr) return;
-        const auto identifier = safeWindow->content.selectedIdentifier();
-        const auto name = safeWindow->content.selectedName();
-        if (auto* midiManager = safe->audioProcessor.getControllerMidiEndpointManager())
-            midiManager->activateExternalAsync(
-                identifier, name,
-                [safeWindow](soundcapsule::midi::EndpointStatus endpoint) {
-                    juce::MessageManager::callAsync([safeWindow, endpoint = std::move(endpoint)] {
-                        if (safeWindow != nullptr)
-                            safeWindow->content.setStatus(
-                                endpoint.userMessage, endpoint.isUsable());
-                    });
-                });
-    };
-    refreshPorts();
-    window->enterModalState(
-        true,
-        juce::ModalCallbackFunction::create(
-            [safe, window, initial,
-             continuation = std::move(continuation)](int result) mutable {
-                if (safe == nullptr) return;
-                if (result == 1)
-                {
-                    const auto identifier = window->content.selectedIdentifier();
-                    const auto name = window->content.selectedName();
-                    safe->saveMidiConfiguration(
-                        soundcapsule::midi::OutputMode::externalMidiPort,
-                        identifier, name, true,
-                        [safe, continuation = std::move(continuation)]() mutable {
-                            if (safe != nullptr)
-                                safe->activateSavedMidiConfiguration(
-                                    false, std::move(continuation));
-                        });
-                }
-                else if (initial)
-                    safe->saveMidiConfiguration(
-                        soundcapsule::midi::OutputMode::notConfigured,
-                        safe->midiExternalIdentifier, safe->midiExternalName, true,
-                        std::move(continuation));
-                else if (continuation)
-                    continuation();
-            }),
-        true);
+        });
 }
 #endif
 
@@ -2734,11 +2541,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
         const auto appPath = response.getProperty("app_path", "").toString();
         const auto titleText = initial ? "Welcome to Sound Capsule" : "Sound Capsule settings";
         auto* dialog = new SettingsAlertWindow(
-            titleText, currentCheckUpdatesOnStartup, currentLibraryDirectory
-           #if JUCE_WINDOWS
-            , safe->currentMidiStatusText()
-           #endif
-            );
+            titleText, currentCheckUpdatesOnStartup, currentLibraryDirectory);
         dialog->addTextEditor("undo_minutes", juce::String(currentUndoMinutes),
                               "Undo minutes (1-1440):");
         juce::StringArray waveformModes;
@@ -2883,12 +2686,13 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                 return;
                             }
                            #if JUCE_WINDOWS
-                            safe->showExternalMidiSetup(false, [safe, appPath] {
+                            safe->showExternalMidiSetup([safe, appPath](juce::String midiName) {
                                 if (safe == nullptr) return;
-                                const auto midiName = safe->midiOutputMode
-                                        == soundcapsule::midi::OutputMode::externalMidiPort
-                                    ? safe->midiExternalName
-                                    : juce::String(soundcapsule::midi::canonicalEndpointName);
+                                if (midiName.isEmpty())
+                                {
+                                    safe->refreshSessionStatus();
+                                    return;
+                                }
                                 auto* setupDialog = new FinishSetupAlertWindow(
                                     finishSetupInstructions(midiName), appPath,
                                     safe.getComponent());

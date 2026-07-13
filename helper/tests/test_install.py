@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest import mock
 
 from scripts.install import configure, record_app_path
 
@@ -17,6 +16,10 @@ class InstallTests(unittest.TestCase):
                     "library_dir": str(root / "My Library"),
                     "check_updates_on_startup": False,
                     "undo_window_minutes": 42,
+                    "midi_output_mode": "external_midi_port",
+                    "midi_external_device_identifier": "obsolete-id",
+                    "midi_external_device_name": "obsolete-name",
+                    "midi_setup_complete": True,
                 }),
                 encoding="utf-8",
             )
@@ -29,37 +32,7 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(settings["library_dir"], str(root / "My Library"))
             self.assertFalse(settings["check_updates_on_startup"])
             self.assertEqual(settings["undo_window_minutes"], 42)
-
-    def test_existing_completed_windows_setup_migrates_to_legacy_external_port(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "scripts.install.platform.system", return_value="Windows"
-        ), mock.patch.dict("os.environ", {}, clear=False):
-            root = Path(temporary) / "SoundCapsule"
-            root.mkdir()
-            (root / "settings.json").write_text(
-                json.dumps({"setup_complete": True}), encoding="utf-8"
-            )
-            configure(root)
-            settings = json.loads((root / "settings.json").read_text(encoding="utf-8"))
-
-            self.assertEqual(settings["midi_output_mode"], "external_midi_port")
-            self.assertEqual(settings["midi_external_device_name"], "Sound Capsule Control")
-            self.assertIsNone(settings["midi_external_device_identifier"])
-            self.assertTrue(settings["midi_setup_complete"])
-
-    def test_windows_midi_environment_override_migrates_even_when_port_is_absent(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "scripts.install.platform.system", return_value="Windows"
-        ), mock.patch.dict(
-            "os.environ", {"SOUNDCAPSULE_MIDI_OUTPUT": "Studio Cable"}, clear=False
-        ):
-            root = Path(temporary) / "SoundCapsule"
-            configure(root)
-            settings = json.loads((root / "settings.json").read_text(encoding="utf-8"))
-
-            self.assertEqual(settings["midi_output_mode"], "external_midi_port")
-            self.assertEqual(settings["midi_external_device_name"], "Studio Cable")
-            self.assertTrue(settings["midi_setup_complete"])
+            self.assertFalse(any(key.startswith("midi_") for key in settings))
 
 
 if __name__ == "__main__":

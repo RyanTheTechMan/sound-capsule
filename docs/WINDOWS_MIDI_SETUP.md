@@ -1,38 +1,26 @@
 # Windows MIDI setup
 
-Sound Capsule uses a manually configured virtual MIDI port on Windows so FL
-Studio can host the Sound Capsule controller script. The port carries endpoint
-plumbing only; save requests continue to use Sound Capsule's local JSON bridge.
+Sound Capsule uses [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) only
+so FL Studio can host its controller script. The app never opens or sends data through
+the port; commands use the local JSON bridge. loopMIDI is a third-party tool and is not
+shipped, downloaded, installed, or controlled by Sound Capsule.
 
-## loopMIDI
-
-[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) is a
-third-party virtual MIDI cable. Sound Capsule does not ship or control it.
-
-Sound Capsule detects whether loopMIDI is installed separately from MIDI-port
-enumeration. If it finds the application, setup offers to open it even when no
-port is currently running. Otherwise, setup links to the official website and
-does not automatically download or run an installer. Any other virtual MIDI
-output that JUCE enumerates may also be selected.
+FL Setup lists only loopMIDI ports. Discovery and the final availability check
+run in the background, and any custom-named loopMIDI port can be selected.
 
 1. Download and install loopMIDI from its official website.
-2. Open loopMIDI.
-3. Enter `Sound Capsule MIDI` under **New port-name**.
-4. Press the plus button to create the port.
-5. Leave loopMIDI running. Enabling its autostart option is recommended.
-6. Return to Sound Capsule and press **Refresh MIDI devices**.
-7. Select **Sound Capsule MIDI** as the MIDI output.
-8. In FL Studio, open **Options -> MIDI settings**.
-9. Under Input, select **Sound Capsule MIDI** and press **Enable**.
-10. Choose **Sound Capsule (user)** as the controller type.
+2. Open loopMIDI, create a port (suggested name: `Sound Capsule MIDI`), and
+   leave loopMIDI running.
+3. In Sound Capsule, open **Settings -> FL Setup**, refresh, select the port,
+   and choose **Use Port**.
+4. In FL Studio's MIDI settings, enable that port under Input and choose
+   **Sound Capsule (user)** as its controller type.
+5. Under Output, enable the same loopMIDI port.
 
-Existing installations that used **Sound Capsule Control** keep that saved port
-name. If the saved port is not running, Sound Capsule reports **Selected MIDI
-port is unavailable** without discarding the selection.
+The selection is used for the displayed FL instructions, not stored as a Sound
+Capsule runtime preference. loopMIDI and FL Studio retain the actual port and
+controller assignment.
 
-## Manual validation
-
-Before release, verify startup with loopMIDI running and stopped, refresh after
-creating or restarting the port, FL Studio launched before and after Sound
-Capsule, application restart, controller-script assignment, and clean, dirty,
-and first-save projects through the JSON bridge.
+Verify startup with loopMIDI running and stopped, refresh/close races, multiple
+custom port names, controller-script assignment, and clean, dirty, and
+first-save projects through the JSON bridge.

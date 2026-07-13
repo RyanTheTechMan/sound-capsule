@@ -498,45 +498,6 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(runtime_update_check)
             self.assertFalse(persisted["check_updates_on_startup"])
 
-    def test_midi_configuration_is_persisted_without_completing_general_setup(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            settings = Settings(data_dir=Path(temporary), server_port=0)
-            settings.save()
-            with SoundCapsuleServer(settings) as server:
-                initial = server.dispatch({"command": "setup_status", "args": {}})
-                configured = server.dispatch(
-                    {
-                        "command": "configure_midi",
-                        "args": {
-                            "mode": "external_midi_port",
-                            "external_device_identifier": "device-42",
-                            "external_device_name": "Offline Cable",
-                            "setup_complete": True,
-                        },
-                    }
-                )
-                persisted = server.dispatch({"command": "setup_status", "args": {}})
-
-            self.assertFalse(initial["midi_setup_complete"])
-            self.assertFalse(persisted["setup_complete"])
-            self.assertEqual(configured["midi_output_mode"], "external_midi_port")
-            self.assertEqual(persisted["midi_external_device_identifier"], "device-42")
-            self.assertEqual(persisted["midi_external_device_name"], "Offline Cable")
-            self.assertTrue(persisted["midi_setup_complete"])
-
-    def test_midi_configuration_rejects_unknown_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            settings = Settings(data_dir=Path(temporary), server_port=0)
-            settings.save()
-            with SoundCapsuleServer(settings) as server:
-                with self.assertRaisesRegex(ValueError, "Invalid MIDI output mode"):
-                    server.dispatch(
-                        {
-                            "command": "configure_midi",
-                            "args": {"mode": "surprise"},
-                        }
-                    )
-
     def test_library_location_switches_without_moving_existing_capsules(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

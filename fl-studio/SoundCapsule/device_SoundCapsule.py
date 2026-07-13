@@ -35,8 +35,6 @@ _last_save_requested_at = 0.0
 _load_sequence = 0
 _last_load_status = -1
 _last_load_at = 0.0
-_idle_callback_count = 0
-
 _SYSEX_PREFIX = bytes((0x7D, 0x53, 0x43, 0x41, 0x50))  # Non-commercial ID + "SCAP"
 _COMMAND_SAVE = 1
 
@@ -129,8 +127,6 @@ def _publish_session(force=False, bridge_active=True):
         "midi_api_version": _midi_api_version(),
         "host_name": _host_name(),
         "host_executable": _host_executable(),
-        "host_pid": os.getpid(),
-        "bridge_active": bool(bridge_active),
         "selected_channels": selected,
         "selected_channel_names": names,
         "channel_count": len(channel_names),
@@ -148,44 +144,31 @@ def _publish_session(force=False, bridge_active=True):
         "last_load_status": _last_load_status,
         "last_load_at": _last_load_at,
     }
+    if sys.platform == "win32":
+        payload["host_pid"] = os.getpid()
+        payload["bridge_active"] = bool(bridge_active)
     _atomic_json(_SESSION, payload)
     _last_publish = now
 
 
-def _run_bridge_callback(callback_name):
-    try:
-        _ensure_directories()
-        _process_command()
-        _publish_session()
-    except Exception as error:
-        # Keep FL's callback scheduler alive and leave a concise diagnostic in
-        # Script Output. The next callback can recover from transient errors.
-        print("Sound Capsule: {} failed: {!r}".format(callback_name, error))
-
-
 def OnInit():
-    print("Sound Capsule: initializing bridge")
-    try:
-        _ensure_directories()
-        _publish_session(True)
-    except Exception as error:
-        print("Sound Capsule: initialization failed: {!r}".format(error))
+    _ensure_directories()
+    _publish_session(True)
 
 
 def OnDeInit():
+    if sys.platform != "win32":
+        return
     try:
         _publish_session(True, bridge_active=False)
-    except Exception as error:
-        print("Sound Capsule: shutdown state failed: {!r}".format(error))
-    print("Sound Capsule: bridge stopped")
+    except Exception:
+        pass
 
 
 def OnIdle():
-    global _idle_callback_count
-    _idle_callback_count += 1
-    if _idle_callback_count == 1:
-        print("Sound Capsule: first idle callback received")
-    _run_bridge_callback("idle callback")
+    _ensure_directories()
+    _process_command()
+    _publish_session()
 
 
 def _perform_save():
@@ -224,9 +207,10 @@ def OnSysEx(eventData):
             payload = payload[:-1]
         if len(payload) != len(_SYSEX_PREFIX) + 1 or not payload.startswith(_SYSEX_PREFIX):
             return
+        if payload[-1] != _COMMAND_SAVE:
+            return
         eventData.handled = True
-        if payload[-1] == _COMMAND_SAVE:
-            _perform_save()
+        _perform_save()
     except Exception:
         # Keep controller scripts alive if FL rejects a command while a modal
         # dialog or project transition is already in progress.
