@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from soundcapsule.capsule import Capsule
 from soundcapsule.library import CapsuleLibrary
-from test_flp import fixture_project, write_silence
+from test_flp import fixture_project, write_float_silence, write_silence
 
 
 class LibraryTests(unittest.TestCase):
@@ -154,6 +154,25 @@ class LibraryTests(unittest.TestCase):
 
             self.assertAlmostEqual(notes[0][0], 24 / note_end, places=6)
             self.assertAlmostEqual(notes[0][1], 96 / note_end, places=6)
+            self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
+
+    def test_v2_midi_preview_uses_float_render_duration_on_mac(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_float_silence(preview, duration_seconds=4.0)
+            project = fixture_project()
+            capsule = Capsule.build(
+                root / "library" / "Lead.flcapsule", name="Lead",
+                project=project, channel_ids=[2], pattern_id=3,
+                pattern_length_steps=16, preview_wav=preview,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+            library.reindex()
+
+            row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
+            midi_seconds = 120 * 60.0 / (project.ppq * project.tempo_bpm)
+
             self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
 
     def test_v1_midi_preview_keeps_legacy_pattern_length_timing(self) -> None:

@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import tempfile
 import uuid
-import wave
 import zipfile
 
 from .flp import FLPFile, NoteRecord
@@ -207,11 +207,11 @@ class Capsule:
     def preview_duration_seconds(self) -> float | None:
         manifest = self.manifest
         try:
-            with zipfile.ZipFile(self.path) as archive, archive.open(manifest.preview_path) as source:
-                with wave.open(source, "rb") as reader:
-                    rate = reader.getframerate()
-                    return reader.getnframes() / rate if rate > 0 else None
-        except (KeyError, OSError, ValueError, wave.Error):
+            with zipfile.ZipFile(self.path) as archive:
+                info = archive.getinfo(manifest.preview_path)
+                with archive.open(info) as source:
+                    return _wave_duration_seconds(source, info.file_size)
+        except (KeyError, OSError, ValueError, struct.error):
             return None
 
     def export_preview(self, destination: Path) -> Path:
@@ -419,6 +419,78 @@ def _validate_wave_member(archive: zipfile.ZipFile, member: str) -> None:
         or header[8:12] != b"WAVE"
     ):
         raise ValueError("preview is not a valid-size RIFF/RF64 WAVE file")
+
+
+def _wave_duration_seconds(source, file_size: int) -> float | None:
+    """Read PCM/IEEE-float WAVE timing without decoding the audio payload.
+
+    Python's wave module rejects IEEE-float WAVE files (format 3), which is the
+    format FL Studio renders on macOS. Duration only depends on the RIFF chunk
+    sizes, sample rate, and block alignment, so parsing those fields also keeps
+    RF64 previews working without loading their audio into memory.
+    """
+    header = source.read(12)
+    if (
+        file_size < 12
+        or len(header) != 12
+        or header[:4] not in {b"RIFF", b"RF64"}
+        or header[8:12] != b"WAVE"
+    ):
+        return None
+
+    offset = 12
+    sample_rate: int | None = None
+    block_align: int | None = None
+    rf64_data_size: int | None = None
+    while offset + 8 <= file_size:
+        chunk_header = source.read(8)
+        if len(chunk_header) != 8:
+            return None
+        chunk_id = chunk_header[:4]
+        chunk_size = struct.unpack_from("<I", chunk_header, 4)[0]
+        offset += 8
+
+        if chunk_id == b"ds64":
+            if chunk_size < 28 or offset + chunk_size > file_size:
+                return None
+            payload = source.read(28)
+            if len(payload) != 28:
+                return None
+            rf64_data_size = struct.unpack_from("<Q", payload, 8)[0]
+            consumed = 28
+        elif chunk_id == b"fmt ":
+            if chunk_size < 16 or offset + chunk_size > file_size:
+                return None
+            payload = source.read(16)
+            if len(payload) != 16:
+                return None
+            _, _, sample_rate, _, block_align, _ = struct.unpack("<HHIIHH", payload)
+            consumed = 16
+        elif chunk_id == b"data":
+            data_size = rf64_data_size if chunk_size == 0xFFFFFFFF else chunk_size
+            if (
+                data_size is None
+                or offset + data_size > file_size
+                or not sample_rate
+                or not block_align
+            ):
+                return None
+            return data_size / (sample_rate * block_align)
+        else:
+            if offset + chunk_size > file_size:
+                return None
+            consumed = 0
+
+        skip = chunk_size - consumed
+        if skip:
+            source.seek(skip, 1)
+        offset += chunk_size
+        if chunk_size & 1:
+            if offset >= file_size:
+                return None
+            source.seek(1, 1)
+            offset += 1
+    return None
 
 
 def _sha256_path(path: Path) -> str:

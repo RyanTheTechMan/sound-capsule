@@ -13,7 +13,7 @@ import threading
 
 from .capsule import Capsule, unique_capsule_path
 
-INDEX_VERSION = 8
+INDEX_VERSION = 9
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (

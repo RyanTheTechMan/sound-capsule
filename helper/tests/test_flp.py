@@ -5,6 +5,7 @@ import unittest
 import wave
 import hashlib
 import json
+import struct
 import zipfile
 from pathlib import Path
 
@@ -96,6 +97,23 @@ def write_silence(path: Path, duration_seconds: float | None = None) -> None:
         output.setframerate(44_100)
         frames = 256 if duration_seconds is None else round(44_100 * duration_seconds)
         output.writeframes(b"\0\0\0\0" * frames)
+
+
+def write_float_silence(path: Path, duration_seconds: float = 1.0) -> None:
+    sample_rate = 48_000
+    channels = 2
+    block_align = channels * 4
+    data = b"\0" * (round(sample_rate * duration_seconds) * block_align)
+    path.write_bytes(
+        b"RIFF"
+        + struct.pack("<I", 36 + len(data))
+        + b"WAVEfmt "
+        + struct.pack("<IHHIIHH", 16, 3, channels, sample_rate,
+                      sample_rate * block_align, block_align, 32)
+        + b"data"
+        + struct.pack("<I", len(data))
+        + data
+    )
 
 
 class FLPRoundTripTests(unittest.TestCase):
@@ -370,6 +388,18 @@ class FLPRoundTripTests(unittest.TestCase):
 
 
 class CapsuleTests(unittest.TestCase):
+    def test_float_preview_duration_matches_fl_studio_mac_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_float_silence(preview, duration_seconds=1.25)
+            capsule = Capsule.build(
+                root / "Float.flcapsule", name="Float", project=fixture_project(),
+                channel_ids=[2], pattern_id=3, preview_wav=preview,
+            )
+
+            self.assertAlmostEqual(capsule.preview_duration_seconds(), 1.25)
+
     def test_capsule_is_portable_and_checksum_verified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
