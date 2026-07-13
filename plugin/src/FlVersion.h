@@ -41,10 +41,49 @@ inline bool sourceIsNewer(const juce::String& source,
          > std::tie(destinationRelease->major, destinationRelease->minor);
 }
 
+inline std::optional<int> hostMajorRelease(const juce::String& value)
+{
+    juce::String digits;
+    auto position = value.getCharPointer();
+    while (!position.isEmpty())
+    {
+        const auto character = position.getAndAdvance();
+        if (juce::CharacterFunctions::isDigit(character))
+            digits += character;
+        else if (digits.isNotEmpty())
+            break;
+    }
+    auto major = digits.getIntValue();
+    if (major >= 2000 && major < 2100)
+        major -= 2000;
+    return major > 0 ? std::optional<int>(major) : std::nullopt;
+}
+
+inline bool sourceIsNewer(const juce::String& source,
+                          const juce::String& destination,
+                          const juce::String& hostName)
+{
+    if (compatibilityRelease(destination))
+        return sourceIsNewer(source, destination);
+    const auto sourceRelease = compatibilityRelease(source);
+    const auto hostMajor = hostMajorRelease(hostName);
+    return sourceRelease && hostMajor && sourceRelease->major > *hostMajor;
+}
+
 inline juce::String displayRelease(const juce::String& value)
 {
     if (const auto release = compatibilityRelease(value))
         return juce::String(release->major) + "." + juce::String(release->minor);
+    return {};
+}
+
+inline juce::String displayDestinationRelease(const juce::String& destination,
+                                              const juce::String& hostName)
+{
+    if (const auto exact = displayRelease(destination); exact.isNotEmpty())
+        return exact;
+    if (const auto major = hostMajorRelease(hostName))
+        return juce::String(*major);
     return {};
 }
 }

@@ -38,12 +38,18 @@ bool isNewerVersion(const juce::String& candidate, const juce::String& current)
 }
 
 juce::String compatibilityTooltip(const juce::String& sourceVersion,
-                                  const juce::String& destinationVersion)
+                                  const juce::String& destinationVersion,
+                                  const juce::String& hostName)
 {
+    const auto destination = soundcapsule::flversion::displayDestinationRelease(
+        destinationVersion, hostName);
+    const auto exact = soundcapsule::flversion::compatibilityRelease(destinationVersion)
+                       .has_value();
     return "Saved in FL Studio "
          + soundcapsule::flversion::displayRelease(sourceVersion)
-         + ", which is newer than the current project's FL Studio "
-         + soundcapsule::flversion::displayRelease(destinationVersion)
+         + ", which is newer than "
+         + (exact ? "the current project's FL Studio " : "the connected FL Studio ")
+         + destination
          + ". Import may not be fully compatible.";
 }
 
@@ -1250,7 +1256,8 @@ juce::String SoundCapsuleAudioProcessorEditor::getTooltipForRow(int rowNumber)
         || !juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
         return {};
     const auto& row = rows[static_cast<size_t>(rowNumber)];
-    return compatibilityTooltip(row.sourceFlVersion, currentProjectFlVersion);
+    return compatibilityTooltip(
+        row.sourceFlVersion, currentProjectFlVersion, currentHostName);
 }
 
 void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Graphics& graphics,
@@ -1294,7 +1301,7 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
     constexpr int actionsWidth = 108;
     const auto actionsX = width - actionsWidth;
     const auto incompatible = soundcapsule::flversion::sourceIsNewer(
-        row.sourceFlVersion, currentProjectFlVersion);
+        row.sourceFlVersion, currentProjectFlVersion, currentHostName);
     graphics.setColour(juce::Colours::white);
     graphics.setFont(15.0f);
     auto nameX = contentX;
@@ -1665,7 +1672,7 @@ void SoundCapsuleAudioProcessorEditor::updateRowHover(juce::Point<int> position)
             nextTarget = hitTestRow(
                 {position.x, position.y - rowBounds.getY()}, rowBounds.getWidth(),
                 soundcapsule::flversion::sourceIsNewer(
-                    row.sourceFlVersion, currentProjectFlVersion));
+                    row.sourceFlVersion, currentProjectFlVersion, currentHostName));
         }
         else
             nextRow = -1;
@@ -1700,7 +1707,7 @@ void SoundCapsuleAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
     if (hitTestRow(
             rowPosition, rowBounds.getWidth(),
             soundcapsule::flversion::sourceIsNewer(
-                row.sourceFlVersion, currentProjectFlVersion))
+                row.sourceFlVersion, currentProjectFlVersion, currentHostName))
         != RowHoverTarget::none)
         return;
     for (const auto& [chip, tag] : tagHitAreas(
@@ -1977,9 +1984,12 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         const auto patternName = response.getProperty("pattern_name", "Pattern").toString();
         const auto projectFlVersion = response.getProperty(
             "project_fl_version", "").toString();
-        if (projectFlVersion != safe->currentProjectFlVersion)
+        const auto hostName = response.getProperty("host_name", "").toString();
+        if (projectFlVersion != safe->currentProjectFlVersion
+            || hostName != safe->currentHostName)
         {
             safe->currentProjectFlVersion = projectFlVersion;
+            safe->currentHostName = hostName;
             safe->list.repaint();
         }
         auto selectedCount = 0;
@@ -3149,11 +3159,12 @@ void SoundCapsuleAudioProcessorEditor::importCapsule(const juce::String& id,
         rows.begin(), rows.end(), [&id](const CapsuleRow& row) { return row.id == id; });
     if (found != rows.end()
         && soundcapsule::flversion::sourceIsNewer(
-            found->sourceFlVersion, currentProjectFlVersion))
+            found->sourceFlVersion, currentProjectFlVersion, currentHostName))
     {
         const auto sourceVersion = found->sourceFlVersion;
         const auto rowName = found->name;
         const auto destinationVersion = currentProjectFlVersion;
+        const auto hostName = currentHostName;
         juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
         juce::AlertWindow::showAsync(
             juce::MessageBoxOptions::makeOptionsOkCancel(
@@ -3161,8 +3172,11 @@ void SoundCapsuleAudioProcessorEditor::importCapsule(const juce::String& id,
                 "FL Studio version warning",
                 "\"" + rowName + "\" was saved with FL Studio "
                     + soundcapsule::flversion::displayRelease(sourceVersion)
-                    + ", but the current project was saved with FL Studio "
-                    + soundcapsule::flversion::displayRelease(destinationVersion)
+                    + (soundcapsule::flversion::compatibilityRelease(destinationVersion)
+                               ? ", but the current project was saved with FL Studio "
+                               : ", but the connected app is FL Studio ")
+                    + soundcapsule::flversion::displayDestinationRelease(
+                        destinationVersion, hostName)
                     + ".\n\n"
                       "The older FL Studio version may not understand all of the capsule's "
                       "project data. You can try the import, but it may fail or produce an "
