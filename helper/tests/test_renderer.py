@@ -7,7 +7,7 @@ import wave
 from pathlib import Path
 from unittest import mock
 
-from soundcapsule.renderer import render_project
+from soundcapsule.renderer import RenderError, render_project
 
 
 def write_audible_wave(path: Path) -> None:
@@ -20,7 +20,7 @@ def write_audible_wave(path: Path) -> None:
 
 
 class RendererTests(unittest.TestCase):
-    def test_windows_live_host_uses_a_separate_interactive_instance(self) -> None:
+    def test_windows_uses_native_command_line_renderer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             executable = root / "FL64.exe"
@@ -29,38 +29,27 @@ class RendererTests(unittest.TestCase):
             executable.write_bytes(b"")
             project.write_bytes(b"FLhd")
 
-            def fake_windows_render(
-                actual_project,
-                actual_output,
-                *,
-                executable,
-                host_pid,
-                timeout,
-            ):
-                self.assertEqual(actual_project, project)
-                self.assertEqual(actual_output, output)
-                self.assertEqual(executable, root / "FL64.exe")
-                self.assertEqual(host_pid, 321)
-                self.assertEqual(timeout, 12.0)
-                write_audible_wave(actual_output)
+            def fake_run(command, **_kwargs):
+                write_audible_wave(output)
+                return subprocess.CompletedProcess(command, 0, "", "")
 
             with mock.patch("platform.system", return_value="Windows"), mock.patch(
-                "soundcapsule.renderer._render_windows_separate_instance",
-                side_effect=fake_windows_render,
-            ) as separate_render, mock.patch(
-                "soundcapsule.renderer.subprocess.run"
-            ) as cli_render:
+                "soundcapsule.renderer.subprocess.run", side_effect=fake_run
+            ) as launch:
                 result = render_project(
                     project,
                     output,
                     fl_executable=executable,
-                    host_pid=321,
                     timeout=12.0,
                 )
 
             self.assertEqual(result, output)
-            separate_render.assert_called_once()
-            cli_render.assert_not_called()
+            self.assertEqual(
+                launch.call_args.args[0],
+                [str(executable), f"/R{output.with_suffix('')}", "/Ewav", str(project)],
+            )
+            self.assertFalse(launch.call_args.kwargs["shell"])
+            self.assertEqual(launch.call_args.kwargs["timeout"], 12.0)
 
     def test_macos_still_forces_a_new_application_instance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,13 +71,104 @@ class RendererTests(unittest.TestCase):
                     project,
                     output,
                     fl_executable=application,
-                    host_pid=321,
                 )
 
             self.assertEqual(result, output)
             command = launch.call_args.args[0]
             self.assertEqual(command[:4], ["open", "-n", "-W", str(application)])
             self.assertIn(str(project), command)
+
+    def test_timeout_is_reported_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "FL64.exe"
+            executable.write_bytes(b"")
+            with mock.patch("platform.system", return_value="Windows"), mock.patch(
+                "soundcapsule.renderer.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("FL64.exe", 3),
+            ):
+                with self.assertRaisesRegex(RenderError, "timed out after 3 seconds"):
+                    render_project(
+                        root / "preview.flp",
+                        root / "preview.wav",
+                        fl_executable=executable,
+                        timeout=3,
+                    )
+
+    def test_nonzero_exit_is_reported_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "FL64.exe"
+            executable.write_bytes(b"")
+            completed = subprocess.CompletedProcess([], 7, "", "render rejected")
+            with mock.patch("platform.system", return_value="Windows"), mock.patch(
+                "soundcapsule.renderer.subprocess.run", return_value=completed
+            ):
+                with self.assertRaisesRegex(RenderError, r"failed \(7\).*render rejected"):
+                    render_project(
+                        root / "preview.flp",
+                        root / "preview.wav",
+                        fl_executable=executable,
+                    )
+
+    def test_missing_output_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "FL64.exe"
+            executable.write_bytes(b"")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with mock.patch("platform.system", return_value="Windows"), mock.patch(
+                "soundcapsule.renderer.subprocess.run", return_value=completed
+            ):
+                with self.assertRaisesRegex(RenderError, "requested WAV"):
+                    render_project(
+                        root / "preview.flp",
+                        root / "preview.wav",
+                        fl_executable=executable,
+                    )
+
+    def test_malformed_or_silent_output_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "FL64.exe"
+            output = root / "preview.wav"
+            executable.write_bytes(b"")
+
+            def malformed(command, **_kwargs):
+                output.write_bytes(b"not a wave")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch("platform.system", return_value="Windows"), mock.patch(
+                "soundcapsule.renderer.subprocess.run", side_effect=malformed
+            ):
+                with self.assertRaisesRegex(RenderError, "not a WAVE"):
+                    render_project(
+                        root / "preview.flp", output, fl_executable=executable
+                    )
+
+    def test_silent_wave_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "FL64.exe"
+            output = root / "preview.wav"
+            executable.write_bytes(b"")
+
+            def silent(command, **_kwargs):
+                output.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(output), "wb") as rendered:
+                    rendered.setnchannels(1)
+                    rendered.setsampwidth(2)
+                    rendered.setframerate(44100)
+                    rendered.writeframes(b"\0\0" * 128)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch("platform.system", return_value="Windows"), mock.patch(
+                "soundcapsule.renderer.subprocess.run", side_effect=silent
+            ):
+                with self.assertRaisesRegex(RenderError, "rendered silence"):
+                    render_project(
+                        root / "preview.flp", output, fl_executable=executable
+                    )
 
 
 if __name__ == "__main__":

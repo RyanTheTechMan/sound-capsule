@@ -26,11 +26,12 @@ from soundcapsule.project_locator import (
     _windows_browser_recent_projects,
     _windows_indexed_projects,
 )
+from soundcapsule.renderer import RenderError
 from test_flp import fixture_project, write_silence
 
 
 class ProjectServiceTests(unittest.TestCase):
-    def test_windows_capture_renders_beside_the_connected_fl_session(self) -> None:
+    def test_windows_capture_uses_connected_fl_executable_and_cleans_staging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "Song.flp"
@@ -57,19 +58,104 @@ class ProjectServiceTests(unittest.TestCase):
                 host_pid=1234,
             )
 
-            def fake_render(_project, output, *, fl_executable, host_pid):
-                self.assertEqual(host_pid, session.host_pid)
+            generated: list[Path] = []
+
+            def fake_render(project, output, *, fl_executable):
                 self.assertEqual(fl_executable, connected_executable)
                 self.assertNotEqual(fl_executable, configured_executable)
+                generated.extend((project, output))
                 write_silence(output)
                 return output
 
             with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
                 "soundcapsule.project.platform.system", return_value="Windows"
-            ), mock.patch("soundcapsule.project.render_project", side_effect=fake_render):
+            ), mock.patch(
+                "soundcapsule.project.close_windows_fl_studio"
+            ) as close_fl, mock.patch.object(service, "_open") as reopen, mock.patch(
+                "soundcapsule.project.render_project", side_effect=fake_render
+            ):
                 capsules = service.capture("Lead")
 
             self.assertEqual(len(capsules), 1)
+            close_fl.assert_called_once_with(
+                session.host_pid, expected_executable=connected_executable
+            )
+            reopen.assert_called_once_with(source.resolve(), session)
+            self.assertTrue(generated)
+            self.assertTrue(all(not path.exists() for path in generated))
+            self.assertEqual(list(settings.staging_dir.iterdir()), [])
+
+    def test_windows_render_failure_reopens_original_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            executable = root / "FL Studio 2025" / "FL64.exe"
+            executable.parent.mkdir()
+            executable.write_bytes(b"FL")
+            settings = Settings(data_dir=root / "data", project_roots=[root])
+            service = CapsuleService(settings)
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+                ppq=96, changed=0, save_sequence=1,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                host_name="FL Studio 2025", host_executable=str(executable),
+                host_pid=4321,
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.platform.system", return_value="Windows"
+            ), mock.patch(
+                "soundcapsule.project.close_windows_fl_studio"
+            ) as close_fl, mock.patch.object(service, "_open") as reopen, mock.patch(
+                "soundcapsule.project.render_project",
+                side_effect=RenderError("CLI render failed"),
+            ):
+                with self.assertRaisesRegex(RenderError, "CLI render failed"):
+                    service.capture("Lead")
+
+            close_fl.assert_called_once()
+            reopen.assert_called_once_with(source.resolve(), session)
+            self.assertEqual(list(settings.staging_dir.iterdir()), [])
+
+    def test_windows_close_failure_does_not_render_or_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            executable = root / "FL Studio 2025" / "FL64.exe"
+            executable.parent.mkdir()
+            executable.write_bytes(b"FL")
+            settings = Settings(data_dir=root / "data", project_roots=[root])
+            service = CapsuleService(settings)
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+                ppq=96, changed=0, save_sequence=1,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                host_name="FL Studio 2025", host_executable=str(executable),
+                host_pid=4321,
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.platform.system", return_value="Windows"
+            ), mock.patch(
+                "soundcapsule.project.close_windows_fl_studio",
+                side_effect=RenderError("did not close safely"),
+            ), mock.patch.object(service, "_open") as reopen, mock.patch(
+                "soundcapsule.project.render_project"
+            ) as render:
+                with self.assertRaisesRegex(RenderError, "did not close safely"):
+                    service.capture("Lead")
+
+            render.assert_not_called()
+            reopen.assert_not_called()
+            self.assertEqual(list(settings.staging_dir.iterdir()), [])
 
     def test_windows_browser_recent_projects_reads_current_fl_studio_list(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -727,6 +813,59 @@ class ProjectServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(len(capsules), 1)
+
+    def test_failed_render_cleans_capture_project_preview_and_wave(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            settings = Settings(data_dir=root / "data")
+            service = CapsuleService(settings)
+            generated: list[Path] = []
+
+            def fail_render(project, output, *, fl_executable):
+                generated.extend((project, output))
+                output.write_bytes(b"partial render")
+                raise RuntimeError("native command-line render failed")
+
+            with mock.patch(
+                "soundcapsule.project.render_project", side_effect=fail_render
+            ):
+                with self.assertRaisesRegex(RuntimeError, "command-line render failed"):
+                    service.capture("Lead", project_path=source)
+
+            self.assertTrue(generated)
+            self.assertTrue(all(not path.exists() for path in generated))
+            self.assertEqual(list(settings.staging_dir.iterdir()), [])
+
+    def test_grouped_and_individual_generated_renders_are_cleaned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            settings = Settings(data_dir=root / "data")
+            service = CapsuleService(settings)
+            generated: list[Path] = []
+
+            def fake_render(project, output, *, fl_executable):
+                self.assertTrue(all(not path.exists() for path in generated))
+                generated.extend((project, output))
+                write_silence(output)
+                return output
+
+            with mock.patch(
+                "soundcapsule.project.render_project", side_effect=fake_render
+            ):
+                grouped = service.capture("Group", project_path=source)
+                individual = service.capture(
+                    "Ignored", project_path=source, individually=True
+                )
+
+            self.assertEqual(len(grouped), 1)
+            self.assertEqual(len(individual), 2)
+            self.assertEqual(len(generated), 6)
+            self.assertTrue(all(not path.exists() for path in generated))
+            self.assertEqual(list(settings.staging_dir.iterdir()), [])
 
     def test_windows_capture_never_falls_back_to_another_fl_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

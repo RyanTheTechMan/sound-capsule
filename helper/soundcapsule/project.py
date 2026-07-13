@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
@@ -18,7 +19,7 @@ from .config import Settings
 from .flp import ChannelSection, FLPFile, FLPUnsupportedError, NoteRecord
 from .library import CapsuleLibrary
 from .project_locator import ProjectLocator
-from .renderer import render_project
+from .renderer import close_windows_fl_studio, render_project
 
 
 @dataclass(slots=True)
@@ -175,69 +176,150 @@ class CapsuleService:
         project_path = self._resolve_project(project_path, session)
         progress(12, "Staging the saved project")
         staged_source, _ = self._stage_project(project_path, "capture")
-        progress(18, "Reading and validating the FL Studio project")
-        project = FLPFile.read(staged_source)
-        require_mutation_profile(project.fl_version)
-        if project.tempo_bpm is None:
-            raise FLPUnsupportedError("the project does not contain a supported static tempo")
-        progress(24, "Reading the selected channels and pattern")
-        channel_ids = self._session_channel_ids(project, session) if session else [section.iid for section in project.channel_sections()]
-        pattern_id = session.current_pattern if session else project.current_pattern
-        if not channel_ids:
-            raise FLPUnsupportedError("select at least one Channel Rack channel")
-
-        render_executable = self.settings.fl_executable
-        if preview_wav is None and session is not None and platform.system() == "Windows":
-            render_executable = self._windows_host_executable(session)
-            if render_executable is None:
+        generated_files = [staged_source]
+        try:
+            progress(18, "Reading and validating the FL Studio project")
+            project = FLPFile.read(staged_source)
+            require_mutation_profile(project.fl_version)
+            if project.tempo_bpm is None:
                 raise FLPUnsupportedError(
-                    "could not identify the connected FL Studio executable; "
-                    "reload the updated Sound Capsule MIDI script"
+                    "the project does not contain a supported static tempo"
                 )
-
-        captures = [[iid] for iid in channel_ids] if individually else [channel_ids]
-        results: list[Capsule] = []
-        for capture_index, selected in enumerate(captures):
-            start = 28 + round(capture_index * 62 / len(captures))
-            finish = 28 + round((capture_index + 1) * 62 / len(captures))
-            selected_name = name if not individually else next(section.name for section in project.channel_sections() if section.iid == selected[0])
-            selected_preview = preview_wav
-            if selected_preview is None:
-                progress(start, f"Preparing preview for {selected_name}")
-                staged = self._build_preview_project(project, selected, pattern_id, selected_name)
-                progress(start + max(1, (finish - start) // 8), f"Rendering preview for {selected_name}")
-                selected_preview = render_project(
-                    staged,
-                    self.settings.staging_dir / f"{slugify(selected_name)}.wav",
-                    fl_executable=render_executable,
-                    host_pid=session.host_pid if session is not None else None,
-                )
-            progress(max(start + 1, finish - 8), f"Packaging {selected_name}")
-            destination = unique_capsule_path(self.settings.library_dir, selected_name)
-            results.append(
-                Capsule.build(
-                    destination,
-                    name=selected_name,
-                    project=project,
-                    channel_ids=selected,
-                    pattern_id=pattern_id,
-                    pattern_length_steps=session.pattern_length_steps if session else None,
-                    preview_wav=selected_preview,
-                    save_mode="individual" if individually else "group",
-                    tags=tags,
-                )
+            progress(24, "Reading the selected channels and pattern")
+            channel_ids = (
+                self._session_channel_ids(project, session)
+                if session
+                else [section.iid for section in project.channel_sections()]
             )
-            progress(finish, f"Saved {selected_name}")
-        progress(94, "Indexing the capsule library")
-        self.library.reindex()
-        progress(100, "Capsule saved")
-        return results
+            pattern_id = session.current_pattern if session else project.current_pattern
+            if not channel_ids:
+                raise FLPUnsupportedError("select at least one Channel Rack channel")
+
+            render_executable = self.settings.fl_executable
+            live_windows_render = (
+                preview_wav is None
+                and session is not None
+                and platform.system() == "Windows"
+            )
+            if live_windows_render:
+                render_executable = self._windows_host_executable(session)
+                if render_executable is None:
+                    raise FLPUnsupportedError(
+                        "could not identify the connected FL Studio executable; "
+                        "reload the updated Sound Capsule MIDI script"
+                    )
+
+            render_lifecycle = (
+                self._windows_render_lifecycle(
+                    session,
+                    project_path,
+                    render_executable,
+                    progress,
+                )
+                if live_windows_render
+                else nullcontext()
+            )
+            with render_lifecycle:
+                captures = [[iid] for iid in channel_ids] if individually else [channel_ids]
+                results: list[Capsule] = []
+                for capture_index, selected in enumerate(captures):
+                    start = 28 + round(capture_index * 62 / len(captures))
+                    finish = 28 + round((capture_index + 1) * 62 / len(captures))
+                    selected_name = (
+                        name
+                        if not individually
+                        else next(
+                            section.name
+                            for section in project.channel_sections()
+                            if section.iid == selected[0]
+                        )
+                    )
+                    selected_preview = preview_wav
+                    if selected_preview is None:
+                        progress(start, f"Preparing preview for {selected_name}")
+                        staged = self._build_preview_project(
+                            project, selected, pattern_id, selected_name
+                        )
+                        generated_files.append(staged)
+                        output = self.settings.staging_dir / f"{slugify(selected_name)}.wav"
+                        generated_files.append(output)
+                        progress(
+                            start + max(1, (finish - start) // 8),
+                            f"Rendering preview for {selected_name}",
+                        )
+                        selected_preview = render_project(
+                            staged,
+                            output,
+                            fl_executable=render_executable,
+                        )
+                    progress(max(start + 1, finish - 8), f"Packaging {selected_name}")
+                    destination = unique_capsule_path(
+                        self.settings.library_dir, selected_name
+                    )
+                    results.append(
+                        Capsule.build(
+                            destination,
+                            name=selected_name,
+                            project=project,
+                            channel_ids=selected,
+                            pattern_id=pattern_id,
+                            pattern_length_steps=(
+                                session.pattern_length_steps if session else None
+                            ),
+                            preview_wav=selected_preview,
+                            save_mode="individual" if individually else "group",
+                            tags=tags,
+                        )
+                    )
+                    if preview_wav is None:
+                        for generated in (output, staged):
+                            self._delete_staged_file(generated)
+                            if not generated.exists():
+                                generated_files.remove(generated)
+                    progress(finish, f"Saved {selected_name}")
+                progress(94, "Indexing the capsule library")
+                self.library.reindex()
+            progress(100, "Capsule saved")
+            return results
+        finally:
+            for generated in reversed(generated_files):
+                self._delete_staged_file(generated)
 
     def _build_preview_project(self, source: FLPFile, channel_ids: list[int], pattern_id: int, name: str) -> Path:
         preview = source.isolated_preview_project(channel_ids, pattern_id)
         path = self.settings.staging_dir / f"preview-{slugify(name)}-{int(time.time() * 1000)}.flp"
         self._atomic_write(path, preview.to_bytes())
         return path
+
+    @contextmanager
+    def _windows_render_lifecycle(
+        self,
+        session: BridgeSession,
+        project_path: Path,
+        executable: Path,
+        progress: Callable[[int, str], None],
+    ):
+        progress(27, "Closing FL Studio for command-line rendering")
+        close_windows_fl_studio(
+            session.host_pid,
+            expected_executable=executable,
+        )
+        operation_error: BaseException | None = None
+        try:
+            yield
+        except BaseException as error:
+            operation_error = error
+            raise
+        finally:
+            progress(97, "Reopening the original FL Studio project")
+            try:
+                self._open(project_path, session)
+            except Exception as reopen_error:
+                if operation_error is None:
+                    raise
+                operation_error.add_note(
+                    f"The original FL Studio project could not be reopened: {reopen_error}"
+                )
 
     def import_capsule(
         self,
@@ -518,6 +600,16 @@ class CapsuleService:
                     path.unlink()
             except OSError:
                 continue
+
+    @staticmethod
+    def _delete_staged_file(path: Path, attempts: int = 10) -> None:
+        for attempt in range(attempts):
+            try:
+                path.unlink(missing_ok=True)
+                return
+            except OSError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.05)
 
     def _atomic_write(self, path: Path, data: bytes, *, overwrite: bool = True) -> None:
         import os
