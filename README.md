@@ -53,15 +53,19 @@ uv run --python 3.12 scripts/install.py --build . --with-vst
 ## First-time setup
 
 1. Launch **Sound Capsule**.
-2. Open **Settings** with the gear icon, then select **FL Setup** for the
-   guided connection steps.
-3. In FL Studio, add Sound Capsule as an external tool if you want it to open
+2. On Windows, follow the loopMIDI setup screen. Sound Capsule detects an
+   installed copy separately from its available ports; it offers to open an
+   installed copy or links to the official website otherwise. Other enumerated
+   virtual MIDI cables can also be selected.
+3. Open **Settings** with the gear icon, then select **FL Setup** to configure
+   the MIDI port or review the guided connection steps.
+4. In FL Studio, add Sound Capsule as an external tool if you want it to open
    alongside FL. Then open **Options → MIDI Settings**, enable **Sound Capsule
-   Control**, and choose **Sound Capsule (user)** as its Controller type.
-4. Keep the standalone app open while you use the library.
+   MIDI** (or a preserved legacy **Sound Capsule Control** port), and choose
+   **Sound Capsule (user)** as its Controller type.
+5. Keep the standalone app open while you use the library.
 
-On Windows, create a loopback MIDI input named **Sound Capsule Control** if
-one is not already available. The FL Setup guide explains the connection.
+See [Windows MIDI setup](docs/WINDOWS_MIDI_SETUP.md) for the full loopMIDI steps.
 
 In **Settings**, **Capsule save location** chooses where `.flcapsule` files are
 stored without moving Sound Capsule's program settings or cache. When changing

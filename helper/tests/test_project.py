@@ -19,10 +19,93 @@ from soundcapsule.flp import (
     text_event,
 )
 from soundcapsule.project import CapsuleService, ProjectLocator
+from soundcapsule.project_locator import (
+    _windows_browser_recent_projects,
+    _windows_indexed_projects,
+)
 from test_flp import fixture_project, write_silence
 
 
 class ProjectServiceTests(unittest.TestCase):
+    def test_windows_capture_renders_beside_the_connected_fl_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            settings = Settings(data_dir=root / "data", project_roots=[root])
+            service = CapsuleService(settings)
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+                ppq=96, changed=0, save_sequence=1,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                host_name="FL Studio 2026", host_executable="C:/FL64.exe",
+                host_pid=1234,
+            )
+
+            def fake_render(_project, output, *, fl_executable, host_pid):
+                self.assertEqual(host_pid, session.host_pid)
+                write_silence(output)
+                return output
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.render_project", side_effect=fake_render
+            ):
+                capsules = service.capture("Lead")
+
+            self.assertEqual(len(capsules), 1)
+
+    def test_windows_browser_recent_projects_reads_current_fl_studio_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            documents = root / "Documents"
+            recent = (
+                documents
+                / "Image-Line"
+                / "FL Studio"
+                / "Settings"
+                / "Browser"
+                / "Recent files.scr"
+            )
+            recent.parent.mkdir(parents=True)
+            project = root / "temp.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            recent.write_text(
+                f"{project}\n{root / 'preview.wav'}\n{project}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _windows_browser_recent_projects([documents]), [project]
+            )
+
+    def test_windows_browser_recent_projects_ignores_sound_capsule_previews(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            documents = root / "Documents"
+            recent = (
+                documents
+                / "Image-Line"
+                / "FL Studio"
+                / "Settings"
+                / "Browser"
+                / "Recent files.scr"
+            )
+            recent.parent.mkdir(parents=True)
+            project = root / "temp.flp"
+            preview = root / "LocalAppData" / "SoundCapsule" / "Staging" / "preview.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            preview.parent.mkdir(parents=True)
+            preview.write_bytes(fixture_project().to_bytes())
+            recent.write_text(f"{preview}\n{project}\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(root / "LocalAppData")}):
+                self.assertEqual(
+                    _windows_browser_recent_projects([documents]), [project]
+                )
+
     def test_reopen_targets_the_connected_macos_fl_application(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -151,6 +234,27 @@ class ProjectServiceTests(unittest.TestCase):
                 [], recent_provider=lambda: [current], indexed_provider=lambda _: []
             )
             self.assertEqual(locator.find_current(""), current.resolve())
+
+    def test_windows_project_search_finds_exact_current_flp_in_standard_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            documents = Path(temporary) / "Documents"
+            project = (
+                documents
+                / "Image-Line"
+                / "FL Studio"
+                / "Projects"
+                / "temp-sound-2026"
+                / "temp-sound-2026.flp"
+            )
+            project.parent.mkdir(parents=True)
+            project.write_bytes(fixture_project().to_bytes())
+
+            self.assertEqual(
+                _windows_indexed_projects(
+                    "temp-sound-2026", document_roots=[documents]
+                ),
+                [project],
+            )
 
     def test_project_locator_filters_blank_title_recent_files_by_live_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

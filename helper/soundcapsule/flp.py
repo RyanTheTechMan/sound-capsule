@@ -41,6 +41,17 @@ EVENT_PLUGIN_NAME = 203
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
 
+# Although event IDs 128-191 normally carry four-byte scalar payloads, current
+# FL 25/26 projects write event 172 with three bytes. Treating its following
+# byte as payload swallows the next event ID and can hide the Pattern Notes
+# block later in the stream.
+FIXED_EVENT_SIZE_OVERRIDES = {172: 3}
+
+# Some FL Studio 26 Windows projects contain a single zero padding byte between
+# otherwise normally encoded events.  It is not an event and must remain byte
+# exact when the project is written again.
+EVENT_PADDING = -1
+
 # Event ownership began with the model independently established by PyFLP and
 # is extended here for FL Studio 25.2.  Image-Line changed several IDs used at
 # the end of the Channel Rack region; the three boundary IDs below and opaque
@@ -128,14 +139,19 @@ class Event:
         return Event(self.id, payload, encode_event(self.id, payload), self.source_offset)
 
     def with_scalar(self, value: int) -> "Event":
-        size = 1 if self.id < 64 else 2 if self.id < 128 else 4
+        size = FIXED_EVENT_SIZE_OVERRIDES.get(
+            self.id, 1 if self.id < 64 else 2 if self.id < 128 else 4
+        )
         return self.with_payload(value.to_bytes(size, "little", signed=False))
 
 
 def encode_event(event_id: int, payload: bytes) -> bytes:
     if not 0 <= event_id <= 255:
         raise ValueError("event id outside byte range")
-    expected = 1 if event_id < 64 else 2 if event_id < 128 else 4 if event_id < 192 else None
+    expected = FIXED_EVENT_SIZE_OVERRIDES.get(
+        event_id,
+        1 if event_id < 64 else 2 if event_id < 128 else 4 if event_id < 192 else None,
+    )
     if expected is not None and len(payload) != expected:
         raise ValueError(f"event {event_id} requires {expected} payload bytes")
     if expected is None:
@@ -144,7 +160,9 @@ def encode_event(event_id: int, payload: bytes) -> bytes:
 
 
 def scalar_event(event_id: int, value: int) -> Event:
-    size = 1 if event_id < 64 else 2 if event_id < 128 else 4
+    size = FIXED_EVENT_SIZE_OVERRIDES.get(
+        event_id, 1 if event_id < 64 else 2 if event_id < 128 else 4
+    )
     payload = value.to_bytes(size, "little", signed=False)
     return Event(event_id, payload, encode_event(event_id, payload))
 
@@ -166,26 +184,56 @@ def parse_text(payload: bytes) -> str:
     return payload.decode("utf-8", errors="replace").rstrip("\0")
 
 
-def iter_events(data: bytes) -> Iterator[Event]:
-    offset = 0
+def _parse_events_strict(data: bytes, offset: int = 0) -> tuple[list[Event], FLPFormatError | None]:
+    events: list[Event] = []
     while offset < len(data):
         start = offset
         event_id = data[offset]
         offset += 1
-        if event_id < 64:
-            size = 1
-        elif event_id < 128:
-            size = 2
-        elif event_id < 192:
-            size = 4
+        if event_id < 192:
+            size = FIXED_EVENT_SIZE_OVERRIDES.get(
+                event_id, 1 if event_id < 64 else 2 if event_id < 128 else 4
+            )
         else:
-            size, offset = decode_varint(data, offset)
+            try:
+                size, offset = decode_varint(data, offset)
+            except FLPFormatError as error:
+                return events, error
         end = offset + size
         if end > len(data):
-            raise FLPFormatError(f"truncated payload for event {event_id} at {start}")
+            return events, FLPFormatError(
+                f"truncated payload for event {event_id} at {start}"
+            )
         payload = data[offset:end]
-        yield Event(event_id, payload, data[start:end], start)
+        events.append(Event(event_id, payload, data[start:end], start))
         offset = end
+    return events, None
+
+
+def iter_events(data: bytes) -> Iterator[Event]:
+    events, error = _parse_events_strict(data)
+    if error is None:
+        yield from events
+        return
+
+    # FL Studio 26.1.0.5530 on Windows has been observed writing one zero
+    # alignment byte before a normal variable-length event.  A legacy parser
+    # reads the zero plus the following event ID as a byte event and eventually
+    # loses framing.  The earliest recent boundary whose removal restores the
+    # complete stream is the point where framing was first lost; later zeroes
+    # can appear to work only because the already-misaligned prefix swallowed
+    # their event IDs.  The bounded fallback keeps malformed files rejected.
+    for index in range(max(0, len(events) - 64), len(events)):
+        candidate = events[index]
+        if candidate.id != EVENT_CHANNEL_ENABLED or candidate.raw[:1] != b"\0":
+            continue
+        suffix, suffix_error = _parse_events_strict(data, candidate.source_offset + 1)
+        if suffix_error is None:
+            yield from events[:index]
+            yield Event(EVENT_PADDING, b"", b"\0", candidate.source_offset)
+            yield from suffix
+            return
+    raise error
 
 
 @dataclass(slots=True)

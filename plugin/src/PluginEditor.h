@@ -29,6 +29,16 @@ public:
     void paintButton(juce::Graphics&, bool highlighted, bool down) override;
 };
 
+class StatusLabel final : public juce::Label
+{
+public:
+    void setText(const juce::String& newText, juce::NotificationType notification)
+    {
+        juce::Label::setText(newText, notification);
+        setTooltip(newText);
+    }
+};
+
 class ImportProgressOverlay final : public juce::Component
 {
 public:
@@ -118,6 +128,17 @@ private:
     void offerSetupRepair();
     void runSetupRepair();
     void showSetup(bool initial);
+#if JUCE_WINDOWS
+    void showExternalMidiSetup(bool initial, std::function<void()> continuation = {});
+    void activateSavedMidiConfiguration(bool notifyOnFailure,
+                                        std::function<void()> continuation = {});
+    void saveMidiConfiguration(soundcapsule::midi::OutputMode mode,
+                               const juce::String& identifier,
+                               const juce::String& name,
+                               bool setupComplete,
+                               std::function<void()> continuation = {});
+    juce::String currentMidiStatusText() const;
+#endif
     void runAfterProjectSaved(std::function<void()> action);
     void waitForFlSave(int previousSaveSequence, std::function<void()> action);
     void stopPreviewPlayback();
@@ -193,7 +214,7 @@ private:
     bool inboundFileDragActive = false;
 
     juce::Label title;
-    juce::Label status;
+    StatusLabel status;
     juce::Label connectionStatus;
     juce::TextButton connectionSetup{"Open Setup"};
     juce::TextButton updateAvailable;
@@ -221,6 +242,14 @@ private:
     WaveformChannels waveformChannels = WaveformChannels::mono;
     ImportMode defaultImportMode = ImportMode::currentPattern;
     bool volumeDisplayDb = false;
+#if JUCE_WINDOWS
+    soundcapsule::midi::OutputMode midiOutputMode =
+        soundcapsule::midi::OutputMode::notConfigured;
+    soundcapsule::midi::EndpointStatus midiEndpointStatus;
+    juce::String midiExternalIdentifier;
+    juce::String midiExternalName;
+    bool midiSetupComplete = false;
+#endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SoundCapsuleAudioProcessorEditor)
 };

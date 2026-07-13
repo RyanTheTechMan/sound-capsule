@@ -8,6 +8,9 @@ import platform
 
 
 APP_DIR_NAME = "SoundCapsule"
+MIDI_MODE_NOT_CONFIGURED = "not_configured"
+MIDI_MODE_EXTERNAL_PORT = "external_midi_port"
+LEGACY_MIDI_OUTPUT_NAME = "Sound Capsule Control"
 
 
 def default_data_dir() -> Path:
@@ -40,6 +43,10 @@ class Settings:
     import_destination: str = "current_pattern"
     volume_display: str = "percent"
     check_updates_on_startup: bool = True
+    midi_output_mode: str = MIDI_MODE_NOT_CONFIGURED
+    midi_external_device_identifier: str | None = None
+    midi_external_device_name: str | None = None
+    midi_setup_complete: bool = False
     server_host: str = "127.0.0.1"
     server_port: int = 51943
 
@@ -62,6 +69,17 @@ class Settings:
             )
         if self.volume_display not in ("percent", "db"):
             raise ValueError("volume_display must be 'percent' or 'db'")
+        if self.midi_output_mode not in (
+            MIDI_MODE_NOT_CONFIGURED,
+            MIDI_MODE_EXTERNAL_PORT,
+        ):
+            raise ValueError("invalid midi_output_mode")
+        if self.midi_external_device_identifier is not None:
+            self.midi_external_device_identifier = str(
+                self.midi_external_device_identifier
+            ).strip() or None
+        if self.midi_external_device_name is not None:
+            self.midi_external_device_name = str(self.midi_external_device_name).strip() or None
 
     @property
     def bridge_dir(self) -> Path:
@@ -103,4 +121,30 @@ class Settings:
             return settings
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload.pop("launch_with_fl", None)  # Removed: FL External Tools owns this preference.
+        if payload.get("midi_output_mode", MIDI_MODE_NOT_CONFIGURED) not in (
+            MIDI_MODE_NOT_CONFIGURED,
+            MIDI_MODE_EXTERNAL_PORT,
+        ):
+            has_saved_port = bool(
+                payload.get("midi_external_device_identifier")
+                or payload.get("midi_external_device_name")
+            )
+            payload["midi_output_mode"] = (
+                MIDI_MODE_EXTERNAL_PORT if has_saved_port else MIDI_MODE_NOT_CONFIGURED
+            )
+            payload["midi_setup_complete"] = has_saved_port
+        if "midi_output_mode" not in payload:
+            # Before MIDI mode persistence existed, Windows setup instructed users
+            # to create Sound Capsule Control manually. Preserve that intended
+            # external-port setup even when loopMIDI is not currently running.
+            legacy_name = os.environ.get("SOUNDCAPSULE_MIDI_OUTPUT", "").strip()
+            if platform.system() == "Windows" and (
+                legacy_name or bool(payload.get("setup_complete", False))
+            ):
+                payload["midi_output_mode"] = MIDI_MODE_EXTERNAL_PORT
+                payload["midi_external_device_identifier"] = None
+                payload["midi_external_device_name"] = (
+                    legacy_name or LEGACY_MIDI_OUTPUT_NAME
+                )
+                payload["midi_setup_complete"] = True
         return cls(**payload)

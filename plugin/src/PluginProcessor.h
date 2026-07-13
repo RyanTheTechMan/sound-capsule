@@ -2,6 +2,10 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#if JUCE_WINDOWS
+ #include "ControllerMidiEndpointManager.h"
+#endif
+
 #include <map>
 
 class SoundCapsuleAudioProcessor final : public juce::AudioProcessor
@@ -51,6 +55,12 @@ public:
     bool getPreviewLooping() const { return previewLooping.load(); }
     bool isRunningStandalone() const { return wrapperType == wrapperType_Standalone; }
     bool ensureHelperRunning();
+#if JUCE_WINDOWS
+    soundcapsule::midi::ControllerMidiEndpointManager* getControllerMidiEndpointManager()
+    {
+        return controllerMidiEndpoint.get();
+    }
+#endif
 
 private:
     static BusesProperties soundCapsuleBuses();
@@ -74,10 +84,16 @@ private:
     juce::CriticalSection previewCacheLock;
     std::map<juce::String, std::shared_ptr<CachedPreview>> previewCache;
 
+#if JUCE_WINDOWS
+    std::unique_ptr<soundcapsule::midi::ControllerMidiEndpointManager> controllerMidiEndpoint;
+#else
     std::unique_ptr<juce::MidiOutput> flControlMidi;
+#endif
     std::unique_ptr<juce::ChildProcess> helperProcess;
 
+#if ! JUCE_WINDOWS
     void initialiseFlControlMidi();
+#endif
     std::shared_ptr<CachedPreview> decodePreviewFile(const juce::File& file);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SoundCapsuleAudioProcessor)

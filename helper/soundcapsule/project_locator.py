@@ -57,11 +57,58 @@ def _mac_recent_projects() -> list[Path]:
     return [path for _, path in sorted(group, key=lambda item: item[0])]
 
 
+def _windows_browser_recent_projects(document_roots: list[Path] | None = None) -> list[Path]:
+    """Read the current FL Studio Browser recent-files list on Windows."""
+    if document_roots is None:
+        document_roots = [Path.home() / "Documents"]
+        for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+            value = os.environ.get(variable)
+            if value:
+                document_roots.append(Path(value) / "Documents")
+
+    local_app_data = Path(
+        os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+    )
+    staging_root = (local_app_data / "SoundCapsule" / "Staging").resolve()
+
+    result: list[Path] = []
+    seen_files: set[str] = set()
+    for documents in document_roots:
+        recent_file = (
+            documents
+            / "Image-Line"
+            / "FL Studio"
+            / "Settings"
+            / "Browser"
+            / "Recent files.scr"
+        )
+        try:
+            lines = recent_file.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            value = line.strip()
+            if not value.casefold().endswith(".flp"):
+                continue
+            path = Path(value).expanduser()
+            try:
+                if path.resolve().is_relative_to(staging_root):
+                    continue
+            except OSError:
+                pass
+            key = os.path.normcase(str(path))
+            if key not in seen_files:
+                seen_files.add(key)
+                result.append(path)
+    return result
+
+
 def _windows_recent_projects() -> list[Path]:
+    browser_recent = _windows_browser_recent_projects()
     try:
         import winreg
     except ImportError:
-        return []
+        return browser_recent
     groups: list[list[tuple[int, Path]]] = []
 
     def visit(key, depth: int = 0) -> None:
@@ -97,11 +144,19 @@ def _windows_recent_projects() -> list[Path]:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Image-Line") as root:
             visit(root)
     except OSError:
-        return []
+        return browser_recent
     if not groups:
-        return []
+        return browser_recent
     _, group = max(enumerate(groups), key=lambda item: (len(item[1]), item[0]))
-    return [path for _, path in sorted(group, key=lambda item: item[0])]
+    registry_recent = [path for _, path in sorted(group, key=lambda item: item[0])]
+    combined: list[Path] = []
+    seen: set[str] = set()
+    for path in browser_recent + registry_recent:
+        key = os.path.normcase(str(path.expanduser()))
+        if key not in seen:
+            seen.add(key)
+            combined.append(path)
+    return combined
 
 
 def recent_project_paths() -> list[Path]:
@@ -113,6 +168,8 @@ def recent_project_paths() -> list[Path]:
 
 
 def indexed_project_paths(title: str) -> list[Path]:
+    if platform.system() == "Windows":
+        return _windows_indexed_projects(title)
     if platform.system() != "Darwin":
         return []
     filename = title.strip()
@@ -134,6 +191,56 @@ def indexed_project_paths(title: str) -> list[Path]:
     if result.returncode != 0:
         return []
     return [Path(line) for line in result.stdout.splitlines() if line.strip()]
+
+
+def _windows_indexed_projects(
+    title: str, document_roots: list[Path] | None = None
+) -> list[Path]:
+    """Find an exact project filename in FL's standard Windows project roots."""
+    filename = title.strip()
+    if not filename:
+        return []
+    if not filename.casefold().endswith(".flp"):
+        filename += ".flp"
+    # A window caption contributes only a filename, but keep this provider safe
+    # when called directly with unexpected title metadata.
+    if Path(filename).name != filename:
+        return []
+    if document_roots is None:
+        document_roots = [Path.home() / "Documents"]
+        for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+            value = os.environ.get(variable)
+            if value:
+                document_roots.append(Path(value) / "Documents")
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    for documents in document_roots:
+        projects = documents / "Image-Line" / "FL Studio" / "Projects"
+        likely = (
+            projects / filename,
+            projects / Path(filename).stem / filename,
+        )
+        for path in likely:
+            key = os.path.normcase(str(path))
+            if key not in seen and path.is_file():
+                seen.add(key)
+                result.append(path)
+        if result:
+            continue
+        try:
+            for directory, _children, files in os.walk(projects):
+                for candidate in files:
+                    if candidate.casefold() != filename.casefold():
+                        continue
+                    path = Path(directory) / candidate
+                    key = os.path.normcase(str(path))
+                    if key not in seen:
+                        seen.add(key)
+                        result.append(path)
+        except OSError:
+            continue
+    return result
 
 
 class ProjectLocator:

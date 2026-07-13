@@ -20,6 +20,7 @@ from soundcapsule.flp import (
     EVENT_PATTERN_NAME,
     EVENT_PATTERN_NEW,
     EVENT_PATTERN_NOTES,
+    EVENT_PADDING,
     EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PLUGIN_NAME,
     FLPFile,
@@ -95,6 +96,50 @@ def write_silence(path: Path) -> None:
 
 
 class FLPRoundTripTests(unittest.TestCase):
+    def test_fl26_three_byte_event_172_does_not_hide_pattern_notes(self) -> None:
+        expected_note = note(4, position=48, length=48, key=65, flags=0x4000)
+        source = FLPFile(
+            FORMAT_PROJECT,
+            0,
+            96,
+            [
+                text_event(EVENT_FL_VERSION, "26.1.0.5530", unicode_text=False),
+                scalar_event(172, 0x010101),
+                text_event(192, "FL Studio 26.1.0.5530.5530"),
+                scalar_event(EVENT_PATTERN_NEW, 1),
+                data_event(EVENT_PATTERN_NOTES, expected_note.raw),
+            ],
+        )
+
+        encoded = source.to_bytes()
+        parsed = FLPFile.from_bytes(encoded)
+
+        self.assertEqual(parsed.to_bytes(), encoded)
+        self.assertEqual(parsed.pattern_notes()[1][0].to_dict(), expected_note.to_dict())
+
+    def test_fl26_windows_zero_padding_round_trip_is_byte_exact(self) -> None:
+        source = FLPFile(
+            FORMAT_PROJECT,
+            0,
+            96,
+            [
+                text_event(EVENT_FL_VERSION, "26.1.0.5530", unicode_text=False),
+                data_event(237, bytes(range(16))),
+                text_event(231, "Unsorted"),
+                scalar_event(146, 0xFFFFFFFF),
+            ],
+        )
+        encoded = source.to_bytes()
+        insert_at = 22 + len(source.events[0].raw)
+        padded = bytearray(encoded[:insert_at] + b"\0" + encoded[insert_at:])
+        padded[18:22] = (len(padded) - 22).to_bytes(4, "little")
+
+        parsed = FLPFile.from_bytes(bytes(padded))
+
+        self.assertEqual(bytes(padded), parsed.to_bytes())
+        self.assertEqual(sum(event.id == EVENT_PADDING for event in parsed.events), 1)
+        self.assertEqual(parsed.fl_version, "26.1.0.5530")
+
     def test_plugin_name_uses_internal_generator_not_renamed_channel(self) -> None:
         project = fixture_project()
         events = list(project.events)

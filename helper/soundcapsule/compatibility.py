@@ -22,6 +22,10 @@ PROFILES = (
         "26.1.0.5294",
         "FL Studio 26.1.0 macOS event layout",
     ),
+    CompatibilityProfile(
+        "26.1.0.5530",
+        "FL Studio 26.1.0 Windows event layout",
+    ),
 )
 
 

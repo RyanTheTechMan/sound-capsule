@@ -26,6 +26,15 @@ target_sources(SoundCapsule PRIVATE
     src/PluginProcessor.h
 )
 
+if(WIN32)
+    target_sources(SoundCapsule PRIVATE
+        src/ControllerMidiEndpoint.cpp
+        src/ControllerMidiEndpoint.h
+        src/ControllerMidiEndpointManager.cpp
+        src/ControllerMidiEndpointManager.h
+    )
+endif()
+
 target_compile_definitions(SoundCapsule PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0

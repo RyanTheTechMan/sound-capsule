@@ -61,12 +61,21 @@ the otherwise identical project with note records stably sorted by position
 rendered non-silent audio. This is the regression fixture for Piano Roll notes
 that disappeared during zooming or remained silent until individually clicked.
 
+FL Studio 26.1.0.5530 on Windows loaded and rendered a disposable isolated
+Pattern 4 FLEX channel from a byte-exact project containing its single zero
+event-stream padding byte. The generated 48 kHz stereo WAV was non-silent and
+passed the helper's RIFF/WAVE validation.
+
 The following still require explicit interactive host acceptance before a
 public release profile is claimed:
 
-1. Assign **Sound Capsule Control** to the installed controller script. Make a
-   clean and dirty save, plus a first save that opens FL's normal Save dialog.
-   Confirm the helper sees an incremented Save sequence and clean state.
+1. On Windows, validate **Sound Capsule MIDI** through loopMIDI; preserve
+   **Sound Capsule Control** for an upgraded legacy setup. Confirm the selected
+   port appears under FL Studio Input and can be assigned to the installed
+   controller script without Sound Capsule transmitting musical MIDI. Make a
+   clean and dirty save, plus a first save that opens FL's normal Save dialog,
+   and confirm the unchanged JSON bridge reports an incremented Save sequence
+   and clean state.
 2. Capture single, grouped, and individual selections containing FL Sampler,
    3xOsc, FLEX, Sytrus, wrapped VST2/VST3, CLAP, Serum, Kontakt, Unicode names,
    unusual wrapper flags, missing samples, and trial placeholders.

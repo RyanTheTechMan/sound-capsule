@@ -26,7 +26,12 @@ SoundCapsuleAudioProcessor::SoundCapsuleAudioProcessor()
     // endpoint in every VST instance causes CoreMIDI conflicts and is not
     // needed for the VST-only library/preview surface.
     if (isRunningStandalone())
+   #if JUCE_WINDOWS
+        controllerMidiEndpoint = std::make_unique<
+            soundcapsule::midi::ControllerMidiEndpointManager>();
+   #else
         initialiseFlControlMidi();
+   #endif
 }
 
 SoundCapsuleAudioProcessor::~SoundCapsuleAudioProcessor()
@@ -213,6 +218,7 @@ double SoundCapsuleAudioProcessor::getPreviewPositionProportion() const
     return juce::jlimit(0.0, 1.0, position / length);
 }
 
+#if ! JUCE_WINDOWS
 void SoundCapsuleAudioProcessor::initialiseFlControlMidi()
 {
     const auto preferred = juce::SystemStats::getEnvironmentVariable(
@@ -231,6 +237,7 @@ void SoundCapsuleAudioProcessor::initialiseFlControlMidi()
     flControlMidi = juce::MidiOutput::createNewDevice("Sound Capsule Control");
    #endif
 }
+#endif
 
 bool SoundCapsuleAudioProcessor::ensureHelperRunning()
 {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -10,7 +12,11 @@ from pathlib import Path
 from unittest import mock
 
 from soundcapsule import __version__
-from soundcapsule.bridge import BridgeQueue, BridgeSession
+from soundcapsule.bridge import (
+    BridgeQueue,
+    BridgeSession,
+    _project_title_from_window_caption,
+)
 from soundcapsule.capsule import Capsule
 from soundcapsule.config import Settings
 from soundcapsule.server import SoundCapsuleServer
@@ -18,6 +24,28 @@ from test_flp import fixture_project, write_silence
 
 
 class ServerTests(unittest.TestCase):
+    @staticmethod
+    def _bridge_session(**overrides) -> BridgeSession:
+        values = {
+            "timestamp": time.time(),
+            "project_title": "Song",
+            "midi_api_version": 42,
+            "selected_channels": [0],
+            "selected_channel_names": ["Lead"],
+            "current_pattern": 1,
+            "pattern_name": "Pattern 1",
+            "pattern_length_steps": 16,
+            "ppq": 96,
+            "changed": 0,
+            "save_sequence": 0,
+            "last_save_requested_at": 0.0,
+            "load_sequence": 0,
+            "last_load_status": -1,
+            "last_load_at": 0.0,
+        }
+        values.update(overrides)
+        return BridgeSession(**values)
+
     @staticmethod
     def _build_capsule(path: Path, name: str, preview: Path) -> Capsule:
         return Capsule.build(
@@ -54,8 +82,110 @@ class ServerTests(unittest.TestCase):
 
     def test_missing_bridge_has_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(RuntimeError, "enable Sound Capsule Control"):
+            with self.assertRaisesRegex(RuntimeError, "enable the configured Sound Capsule MIDI input"):
                 BridgeQueue(Path(temporary)).session()
+
+    def test_fl_window_caption_yields_exact_project_filename(self) -> None:
+        self.assertEqual(
+            _project_title_from_window_caption(
+                "temp-sound-2026.flp - FL Studio 2026"
+            ),
+            "temp-sound-2026",
+        )
+        self.assertEqual(
+            _project_title_from_window_caption(
+                "temp-sound-2026.flp * - FL Studio 2026"
+            ),
+            "temp-sound-2026",
+        )
+        self.assertEqual(_project_title_from_window_caption("FL Studio 2026"), "")
+
+    def test_windows_session_prefers_exact_host_window_project_over_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = BridgeQueue(Path(temporary))
+            session = self._bridge_session(
+                project_title="Previous project metadata",
+                host_pid=123,
+                host_executable=r"C:\Program Files\Image-Line\FL Studio 2026\FL64.exe",
+            )
+            with mock.patch.object(BridgeSession, "read", return_value=session), mock.patch(
+                "soundcapsule.bridge.sys.platform", "win32"
+            ), mock.patch(
+                "soundcapsule.bridge._windows_process_is_running", return_value=True
+            ), mock.patch(
+                "soundcapsule.bridge._windows_project_title",
+                return_value="temp-sound-2026",
+            ):
+                resolved = queue.session()
+
+            self.assertIs(resolved, session)
+            self.assertEqual(resolved.project_title, "temp-sound-2026")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process liveness is Windows-only")
+    def test_stale_windows_session_remains_connected_while_exact_fl_process_is_alive(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        process = kernel32.OpenProcess(0x1000, False, os.getpid())
+        self.assertTrue(process)
+        executable = ctypes.create_unicode_buffer(32768)
+        length = wintypes.DWORD(len(executable))
+        self.assertTrue(
+            kernel32.QueryFullProcessImageNameW(
+                process, 0, executable, ctypes.byref(length)
+            )
+        )
+        kernel32.CloseHandle(process)
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = BridgeQueue(Path(temporary))
+            session = self._bridge_session(
+                timestamp=time.time() - 60,
+                host_pid=os.getpid(),
+                host_executable=executable.value,
+                bridge_active=True,
+            )
+            with mock.patch.object(BridgeSession, "read", return_value=session):
+                self.assertIs(queue.session(), session)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process liveness is Windows-only")
+    def test_stale_windows_session_rejects_a_missing_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = BridgeQueue(Path(temporary))
+            session = self._bridge_session(
+                timestamp=time.time() - 60,
+                host_pid=0x7FFFFFFF,
+                host_executable=sys.executable,
+                bridge_active=True,
+            )
+            with mock.patch.object(BridgeSession, "read", return_value=session):
+                with self.assertRaisesRegex(RuntimeError, "stale"):
+                    queue.session()
+
+    def test_explicitly_inactive_bridge_is_disconnected_even_when_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = BridgeQueue(Path(temporary))
+            session = self._bridge_session(bridge_active=False)
+            with mock.patch.object(BridgeSession, "read", return_value=session):
+                with self.assertRaisesRegex(RuntimeError, "disabled"):
+                    queue.session()
+
+    def test_non_windows_stale_session_keeps_existing_timeout_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = BridgeQueue(Path(temporary))
+            session = self._bridge_session(
+                timestamp=time.time() - 60,
+                host_pid=os.getpid(),
+                host_executable=sys.executable,
+                bridge_active=True,
+            )
+            with mock.patch.object(BridgeSession, "read", return_value=session), mock.patch(
+                "soundcapsule.bridge.sys.platform", "darwin"
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stale"):
+                    queue.session()
 
     def test_json_line_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -367,6 +497,45 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(persisted["volume_display"], "db")
             self.assertFalse(runtime_update_check)
             self.assertFalse(persisted["check_updates_on_startup"])
+
+    def test_midi_configuration_is_persisted_without_completing_general_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            settings.save()
+            with SoundCapsuleServer(settings) as server:
+                initial = server.dispatch({"command": "setup_status", "args": {}})
+                configured = server.dispatch(
+                    {
+                        "command": "configure_midi",
+                        "args": {
+                            "mode": "external_midi_port",
+                            "external_device_identifier": "device-42",
+                            "external_device_name": "Offline Cable",
+                            "setup_complete": True,
+                        },
+                    }
+                )
+                persisted = server.dispatch({"command": "setup_status", "args": {}})
+
+            self.assertFalse(initial["midi_setup_complete"])
+            self.assertFalse(persisted["setup_complete"])
+            self.assertEqual(configured["midi_output_mode"], "external_midi_port")
+            self.assertEqual(persisted["midi_external_device_identifier"], "device-42")
+            self.assertEqual(persisted["midi_external_device_name"], "Offline Cable")
+            self.assertTrue(persisted["midi_setup_complete"])
+
+    def test_midi_configuration_rejects_unknown_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            settings.save()
+            with SoundCapsuleServer(settings) as server:
+                with self.assertRaisesRegex(ValueError, "Invalid MIDI output mode"):
+                    server.dispatch(
+                        {
+                            "command": "configure_midi",
+                            "args": {"mode": "surprise"},
+                        }
+                    )
 
     def test_library_location_switches_without_moving_existing_capsules(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

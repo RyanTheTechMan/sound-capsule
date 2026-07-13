@@ -185,6 +185,7 @@ class CapsuleService:
                     staged,
                     self.settings.staging_dir / f"{slugify(selected_name)}.wav",
                     fl_executable=self.settings.fl_executable,
+                    host_pid=session.host_pid if session is not None else None,
                 )
             destination = unique_capsule_path(self.settings.library_dir, selected_name)
             results.append(

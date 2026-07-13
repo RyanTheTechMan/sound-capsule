@@ -120,6 +120,28 @@ def configure(root: Path) -> None:
     settings_path = root / "settings.json"
     existing = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
     existing.pop("launch_with_fl", None)
+    legacy_midi_name = os.environ.get("SOUNDCAPSULE_MIDI_OUTPUT", "").strip()
+    if "midi_output_mode" not in existing and platform.system() == "Windows" and (
+        legacy_midi_name or bool(existing.get("setup_complete", False))
+    ):
+        existing.update({
+            "midi_output_mode": "external_midi_port",
+            "midi_external_device_identifier": None,
+            "midi_external_device_name": legacy_midi_name or "Sound Capsule Control",
+            "midi_setup_complete": True,
+        })
+    if existing.get("midi_output_mode", "not_configured") not in (
+        "not_configured", "external_midi_port"
+    ):
+        has_saved_port = bool(
+            existing.get("midi_external_device_identifier")
+            or existing.get("midi_external_device_name")
+        )
+        existing["midi_output_mode"] = (
+            "external_midi_port" if has_saved_port else "not_configured"
+        )
+        existing["midi_setup_complete"] = has_saved_port
+
     existing.update({
         "data_dir": str(root),
         "library_dir": existing.get("library_dir", str(root / "Library")),
@@ -136,6 +158,10 @@ def configure(root: Path) -> None:
         "import_destination": existing.get("import_destination", "current_pattern"),
         "volume_display": existing.get("volume_display", "percent"),
         "check_updates_on_startup": existing.get("check_updates_on_startup", True),
+        "midi_output_mode": existing.get("midi_output_mode", "not_configured"),
+        "midi_external_device_identifier": existing.get("midi_external_device_identifier"),
+        "midi_external_device_name": existing.get("midi_external_device_name"),
+        "midi_setup_complete": existing.get("midi_setup_complete", False),
         "server_host": "127.0.0.1",
         "server_port": 51943,
     })
