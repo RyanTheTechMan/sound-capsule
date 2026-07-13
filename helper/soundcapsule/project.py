@@ -194,12 +194,24 @@ class CapsuleService:
                 raise FLPUnsupportedError("select at least one Channel Rack channel")
 
             render_executable = self.settings.fl_executable
+            live_macos_render = (
+                preview_wav is None
+                and session is not None
+                and platform.system() == "Darwin"
+            )
             live_windows_render = (
                 preview_wav is None
                 and session is not None
                 and platform.system() == "Windows"
             )
-            if live_windows_render:
+            if live_macos_render:
+                render_executable = self._mac_host_application(session)
+                if render_executable is None:
+                    raise FLPUnsupportedError(
+                        "could not identify the connected FL Studio application; "
+                        "reload the updated Sound Capsule MIDI script"
+                    )
+            elif live_windows_render:
                 render_executable = self._windows_host_executable(session)
                 if render_executable is None:
                     raise FLPUnsupportedError(

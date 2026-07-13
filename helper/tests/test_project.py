@@ -30,6 +30,58 @@ from test_flp import fixture_project, write_silence
 
 
 class ProjectServiceTests(unittest.TestCase):
+    def test_macos_capture_uses_connected_fl_application(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            connected_app = root / "Applications" / "FL Studio 2025.app"
+            connected_executable = connected_app / "Contents" / "MacOS" / "OsxFL"
+            connected_executable.parent.mkdir(parents=True)
+            connected_executable.write_bytes(b"connected FL")
+            configured_app = root / "Applications" / "FL Studio 2026.app"
+            configured_executable = configured_app / "Contents" / "MacOS" / "OsxFL"
+            configured_executable.parent.mkdir(parents=True)
+            configured_executable.write_bytes(b"configured latest FL")
+            settings = Settings(
+                data_dir=root / "data", project_roots=[root],
+                fl_executable=configured_app,
+            )
+            service = CapsuleService(settings)
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+                ppq=96, changed=0, save_sequence=1,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                host_name="FL Studio 2025",
+                host_executable=str(connected_executable),
+            )
+
+            generated: list[Path] = []
+
+            def fake_render(project, output, *, fl_executable):
+                self.assertEqual(fl_executable, connected_app)
+                self.assertNotEqual(fl_executable, configured_app)
+                generated.extend((project, output))
+                write_silence(output)
+                return output
+
+            with mock.patch.object(
+                service.bridge, "session", return_value=session
+            ), mock.patch(
+                "soundcapsule.project.platform.system", return_value="Darwin"
+            ), mock.patch(
+                "soundcapsule.project.render_project", side_effect=fake_render
+            ):
+                capsules = service.capture("Lead")
+
+            self.assertEqual(len(capsules), 1)
+            self.assertTrue(generated)
+            self.assertTrue(all(not path.exists() for path in generated))
+            self.assertEqual(list(settings.staging_dir.iterdir()), [])
+
     def test_windows_capture_uses_connected_fl_executable_and_cleans_staging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
