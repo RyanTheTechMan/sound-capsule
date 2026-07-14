@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 
 
@@ -27,6 +28,8 @@ def _copy_build_licenses(bundle: Path, pyinstaller_module: Path) -> None:
             path for path in (
                 Path(sys.base_prefix) / "LICENSE.txt",
                 Path(sys.base_prefix) / "LICENSE",
+                Path(sysconfig.get_path("stdlib")) / "LICENSE.txt",
+                Path(sysconfig.get_path("stdlib")) / "LICENSE",
             )
             if path.is_file()
         ),
