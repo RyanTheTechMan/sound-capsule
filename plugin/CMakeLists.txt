@@ -1,6 +1,7 @@
 juce_add_plugin(SoundCapsule
     COMPANY_NAME "Sound Capsule"
     BUNDLE_ID "com.soundcapsule.fl"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/resources/app-icon.png"
     PLUGIN_MANUFACTURER_CODE SdCp
     PLUGIN_CODE FlCp
     FORMATS VST3 Standalone
