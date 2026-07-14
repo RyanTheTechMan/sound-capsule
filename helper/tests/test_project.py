@@ -257,6 +257,21 @@ class ProjectServiceTests(unittest.TestCase):
                     _windows_browser_recent_projects([documents]), [project]
                 )
 
+    def test_windows_browser_recent_projects_uses_custom_fl_user_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            user_folder = root / "FL Data On Another Drive"
+            recent = user_folder / "Settings" / "Browser" / "Recent files.scr"
+            recent.parent.mkdir(parents=True)
+            project = root / "Custom.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            recent.write_text(str(project), encoding="utf-8")
+
+            self.assertEqual(
+                _windows_browser_recent_projects(user_folders=[user_folder]),
+                [project],
+            )
+
     def test_reopen_targets_the_connected_macos_fl_application(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -404,6 +419,18 @@ class ProjectServiceTests(unittest.TestCase):
                 _windows_indexed_projects(
                     "temp-sound-2026", document_roots=[documents]
                 ),
+                [project],
+            )
+
+    def test_windows_project_search_uses_custom_fl_user_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            user_folder = Path(temporary) / "FL Data On Another Drive"
+            project = user_folder / "Projects" / "Custom" / "Custom.flp"
+            project.parent.mkdir(parents=True)
+            project.write_bytes(fixture_project().to_bytes())
+
+            self.assertEqual(
+                _windows_indexed_projects("Custom", user_folders=[user_folder]),
                 [project],
             )
 

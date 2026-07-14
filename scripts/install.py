@@ -9,6 +9,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,11 +35,81 @@ def app_destination() -> Path:
     return Path.home() / "Applications" / "Sound Capsule.app"
 
 
-def midi_destination() -> Path:
+def default_fl_user_folder() -> Path | None:
+    system = platform.system()
+    if system == "Windows":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, r"Software\Image-Line\Shared\Paths"
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "Shared data")
+            if isinstance(value, str) and value.strip():
+                shared = Path(os.path.expandvars(value)).expanduser()
+                candidate = (
+                    shared if shared.name.casefold() == "fl studio"
+                    else shared / "FL Studio"
+                )
+                if candidate.is_dir():
+                    return candidate
+        except (ImportError, OSError):
+            return None
+        return None
+    if system == "Darwin":
+        registry = Path.home() / "Library" / "Preferences" / "Image-Line" / "reg.xml"
+        try:
+            root = ET.parse(registry).getroot()
+        except (ET.ParseError, OSError):
+            return None
+        key = next(
+            (item for item in root.iter("Key") if item.get("Name") == "HKEY_CURRENT_USER"),
+            None,
+        )
+        for name in ("Software", "Image-Line", "Shared", "Paths"):
+            if key is None:
+                return None
+            key = next(
+                (item for item in key.findall("Key") if item.get("Name") == name),
+                None,
+            )
+        if key is None:
+            return None
+        value_node = next(
+            (item for item in key.findall("Value") if item.get("Name") == "Shared data"),
+            None,
+        )
+        value = value_node.text if value_node is not None else None
+        if isinstance(value, str) and value.strip():
+            shared = Path(os.path.expandvars(value.strip())).expanduser()
+            candidate = (
+                shared if shared.name.casefold() == "fl studio"
+                else shared / "FL Studio"
+            )
+            return candidate if candidate.is_dir() else None
+    return None
+
+
+def midi_destination(fl_user_folder: Path) -> Path:
     return (
-        Path.home() / "Documents" / "Image-Line" / "FL Studio" / "Settings" /
+        fl_user_folder / "Settings" /
         "Hardware" / "Sound Capsule" / "device_SoundCapsule.py"
     )
+
+
+def install_midi_bridge(root: Path) -> Path | None:
+    source = ROOT / "fl-studio" / "SoundCapsule" / "device_SoundCapsule.py"
+    template = root / "BridgeScript" / "device_SoundCapsule.py"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, template)
+
+    user_folder = default_fl_user_folder()
+    if user_folder is None or not user_folder.is_dir():
+        return None
+    target = midi_destination(user_folder)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(template, target)
+    return target
 
 
 def find_vst3(build: Path) -> Path:
@@ -121,6 +192,7 @@ def configure(root: Path) -> None:
     existing = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
     existing.pop("launch_with_fl", None)
     for key in (
+        "fl_user_folder",
         "midi_output_mode",
         "midi_external_device_identifier",
         "midi_external_device_name",
@@ -187,6 +259,7 @@ def main() -> int:
     if sys.version_info < (3, 10):
         parser.error("run the installer with `uv run --python 3.12 scripts/install.py`")
     configure(root)
+    script_target = install_midi_bridge(root)
     python = install_helper(root, args.uv_executable)
     cli_launcher = install_cli_launcher(root, python)
     installed_app = None
@@ -221,14 +294,15 @@ def main() -> int:
         if plugin_target.exists():
             shutil.rmtree(plugin_target)
         shutil.copytree(plugin_source, plugin_target)
-    script_target = midi_destination()
-    script_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "fl-studio" / "SoundCapsule" / "device_SoundCapsule.py", script_target)
     # Older development builds installed a login helper. The standalone app
     # now owns the helper lifetime, so nothing starts at system login.
     remove_legacy_autostart()
     print(f"VST3: {plugin_target if plugin_target else 'not installed (optional)'}")
-    print(f"MIDI bridge: {script_target}")
+    print(
+        f"MIDI bridge: {script_target}"
+        if script_target is not None
+        else "MIDI bridge: FL Studio user data folder was not found"
+    )
     print(f"Application: {installed_app if installed_app else 'not installed'}")
     print(f"CLI: {cli_launcher}")
     print(f"Library: {root / 'Library'}")

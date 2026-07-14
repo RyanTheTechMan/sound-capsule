@@ -11,6 +11,8 @@ import types
 import unittest
 from unittest import mock
 
+from soundcapsule.bridge import BridgeQueue
+
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -120,6 +122,22 @@ class ControllerScriptTests(unittest.TestCase):
             self.assertEqual(controller._last_command_id, "current-session")
             self.assertEqual(controller._save_sequence, 1)
             self.assertEqual(saves, [(100, 1)])
+
+    def test_published_session_is_readable_by_helper_bridge_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, _saves = self.load_script(root)
+
+            controller.OnInit()
+
+            session = BridgeQueue(root / "SoundCapsule" / "Bridge").session(
+                maximum_age=10
+            )
+            self.assertEqual(session.project_title, "Song")
+            self.assertEqual(session.selected_channels, [0])
+            self.assertEqual(session.selected_channel_names, ["Lead"])
+            self.assertEqual(session.host_name, "FL Studio 2026")
+            self.assertEqual(session.midi_api_version, 42)
 
     def test_expired_and_malformed_commands_are_harmless(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

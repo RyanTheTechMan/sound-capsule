@@ -65,9 +65,17 @@ def _windows_document_roots() -> list[Path]:
     return result
 
 
-def _windows_browser_recent_projects(document_roots: list[Path] | None = None) -> list[Path]:
+def _windows_browser_recent_projects(
+    document_roots: list[Path] | None = None,
+    *,
+    user_folders: list[Path] | None = None,
+) -> list[Path]:
     """Read the current FL Studio Browser recent-files list on Windows."""
-    document_roots = document_roots or _windows_document_roots()
+    if user_folders is None:
+        document_roots = document_roots or _windows_document_roots()
+        user_folders = [
+            documents / "Image-Line" / "FL Studio" for documents in document_roots
+        ]
 
     local_app_data = Path(
         os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
@@ -76,11 +84,9 @@ def _windows_browser_recent_projects(document_roots: list[Path] | None = None) -
 
     result: list[Path] = []
     seen_files: set[str] = set()
-    for documents in document_roots:
+    for user_folder in user_folders:
         recent_file = (
-            documents
-            / "Image-Line"
-            / "FL Studio"
+            user_folder
             / "Settings"
             / "Browser"
             / "Recent files.scr"
@@ -106,8 +112,10 @@ def _windows_browser_recent_projects(document_roots: list[Path] | None = None) -
     return result
 
 
-def _windows_recent_projects() -> list[Path]:
-    browser_recent = _windows_browser_recent_projects()
+def _windows_recent_projects(fl_user_folder: Path | None = None) -> list[Path]:
+    browser_recent = _windows_browser_recent_projects(
+        user_folders=[fl_user_folder] if fl_user_folder is not None else None
+    )
     try:
         import winreg
     except ImportError:
@@ -162,17 +170,19 @@ def _windows_recent_projects() -> list[Path]:
     return combined
 
 
-def recent_project_paths() -> list[Path]:
+def recent_project_paths(fl_user_folder: Path | None = None) -> list[Path]:
     if platform.system() == "Darwin":
         return _mac_recent_projects()
     if platform.system() == "Windows":
-        return _windows_recent_projects()
+        return _windows_recent_projects(fl_user_folder)
     return []
 
 
-def indexed_project_paths(title: str) -> list[Path]:
+def indexed_project_paths(title: str, fl_user_folder: Path | None = None) -> list[Path]:
     if platform.system() == "Windows":
-        return _windows_indexed_projects(title)
+        return _windows_indexed_projects(
+            title, user_folders=[fl_user_folder] if fl_user_folder is not None else None
+        )
     if platform.system() != "Darwin":
         return []
     filename = title.strip()
@@ -197,7 +207,10 @@ def indexed_project_paths(title: str) -> list[Path]:
 
 
 def _windows_indexed_projects(
-    title: str, document_roots: list[Path] | None = None
+    title: str,
+    document_roots: list[Path] | None = None,
+    *,
+    user_folders: list[Path] | None = None,
 ) -> list[Path]:
     """Find an exact project filename in FL's standard Windows project roots."""
     filename = title.strip()
@@ -209,12 +222,16 @@ def _windows_indexed_projects(
     # when called directly with unexpected title metadata.
     if Path(filename).name != filename:
         return []
-    document_roots = document_roots or _windows_document_roots()
+    if user_folders is None:
+        document_roots = document_roots or _windows_document_roots()
+        user_folders = [
+            documents / "Image-Line" / "FL Studio" for documents in document_roots
+        ]
 
     result: list[Path] = []
     seen: set[str] = set()
-    for documents in document_roots:
-        projects = documents / "Image-Line" / "FL Studio" / "Projects"
+    for user_folder in user_folders:
+        projects = user_folder / "Projects"
         likely = (
             projects / filename,
             projects / Path(filename).stem / filename,

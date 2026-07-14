@@ -93,8 +93,24 @@ try {
         )) {
             Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
         }
-        $bridge = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "Image-Line\FL Studio\Settings\Hardware\Sound Capsule\device_SoundCapsule.py"
-        Remove-Item -LiteralPath $bridge -Force -ErrorAction SilentlyContinue
+        try {
+            $sharedData = Get-ItemPropertyValue `
+                -LiteralPath "HKCU:\Software\Image-Line\Shared\Paths" `
+                -Name "Shared data" `
+                -ErrorAction Stop
+            $sharedData = [Environment]::ExpandEnvironmentVariables($sharedData).Trim()
+            $flUserFolder = if ((Split-Path -Leaf $sharedData) -ieq "FL Studio") {
+                $sharedData
+            }
+            else {
+                Join-Path $sharedData "FL Studio"
+            }
+            $bridge = Join-Path $flUserFolder "Settings\Hardware\Sound Capsule\device_SoundCapsule.py"
+            Remove-Item -LiteralPath $bridge -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Warning "Could not read FL Studio's user data folder from the registry: $($_.Exception.Message)"
+        }
         Write-Host "Sound Capsule per-user runtime integrations removed; settings and Library were preserved"
         exit 0
     }

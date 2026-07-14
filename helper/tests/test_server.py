@@ -668,6 +668,53 @@ class ServerTests(unittest.TestCase):
                 Settings.load(root / "data").library_dir, new_library.resolve()
             )
 
+    def test_registry_fl_user_folder_installs_bridge_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            custom = root / "Custom FL Studio Data"
+            custom.mkdir()
+            settings = Settings(data_dir=data, server_port=0)
+            settings.ensure()
+            settings.bridge_script_template.parent.mkdir(parents=True)
+            settings.bridge_script_template.write_text("# bridge template\n", encoding="utf-8")
+            settings.save()
+
+            with mock.patch(
+                "soundcapsule.config.registered_fl_user_folder", return_value=custom
+            ), SoundCapsuleServer(settings) as server:
+                result = server.dispatch({"command": "configure_setup", "args": {}})
+
+            target = (
+                custom / "Settings" / "Hardware" / "Sound Capsule"
+                / "device_SoundCapsule.py"
+            )
+            self.assertNotIn("fl_user_folder", result)
+            self.assertNotIn("midi_bridge_path", result)
+            self.assertNotIn(
+                "fl_user_folder",
+                json.loads((data / "settings.json").read_text(encoding="utf-8")),
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "# bridge template\n")
+
+    def test_missing_registry_fl_user_folder_has_actionable_setup_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            settings.bridge_script_template.parent.mkdir(parents=True)
+            settings.bridge_script_template.write_text("# bridge\n", encoding="utf-8")
+            settings.save()
+
+            with mock.patch(
+                "soundcapsule.config.registered_fl_user_folder", return_value=None
+            ), SoundCapsuleServer(settings) as server:
+                with self.assertRaisesRegex(RuntimeError, "Image-Line's registry data"):
+                    server.dispatch({
+                        "command": "configure_setup",
+                        "args": {},
+                    })
+
     def test_library_location_merges_and_reports_relative_path_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

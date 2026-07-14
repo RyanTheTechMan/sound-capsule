@@ -36,6 +36,13 @@ that it is required and offers to open the official installation page. Sound Cap
 never downloads or installs uv automatically. After installing uv, launch Sound Capsule
 and choose **Retry Setup**.
 
+Sound Capsule automatically follows FL Studio's **User data folder**, including when
+it has been moved from Documents. On Windows it reads Image-Line's `Shared data`
+registry value; on macOS it reads the same value from
+`~/Library/Preferences/Image-Line/reg.xml`. It installs the MIDI bridge there and uses
+that folder's Browser history and Projects directory. Sound Capsule does not persist a
+second setting or create a guessed FL Studio data folder when registry data is missing.
+
 For a manual installation, download the macOS or Windows ZIP, extract it, open a
 terminal in the extracted folder, and run:
 

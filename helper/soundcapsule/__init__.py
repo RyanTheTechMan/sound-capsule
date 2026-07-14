@@ -11,4 +11,4 @@ __all__ = [
     "FLPUnsupportedError",
 ]
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"

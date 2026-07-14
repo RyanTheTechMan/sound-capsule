@@ -168,20 +168,23 @@ private:
     juce::ToggleButton showSingleChannel;
 };
 
-class LibraryLocationComponent final : public juce::Component
+class FolderLocationComponent final : public juce::Component
 {
 public:
-    explicit LibraryLocationComponent(const juce::String& currentLocation)
-        : choose("Choose...")
+    FolderLocationComponent(const juce::String& currentLocation,
+                            const juce::String& headingText,
+                            const juce::String& chooserTitle,
+                            const juce::String& chooserTooltip)
+        : choose("Choose..."), title(chooserTitle)
     {
         setSize(360, 62);
-        heading.setText("Capsule save location:", juce::dontSendNotification);
+        heading.setText(headingText, juce::dontSendNotification);
         heading.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         location.setText(currentLocation, false);
         location.setReadOnly(true);
         location.setCaretVisible(false);
         location.setTooltip(currentLocation);
-        choose.setTooltip("Choose where capsule files are saved");
+        choose.setTooltip(chooserTooltip);
         choose.onClick = [this] { chooseFolder(); };
         addAndMakeVisible(heading);
         addAndMakeVisible(location);
@@ -207,8 +210,8 @@ private:
         if (!initial.isDirectory())
             initial = initial.getParentDirectory();
         chooser = std::make_unique<juce::FileChooser>(
-            "Choose capsule save location", initial, juce::String(), true);
-        juce::Component::SafePointer<LibraryLocationComponent> safe(this);
+            title, initial, juce::String(), true);
+        juce::Component::SafePointer<FolderLocationComponent> safe(this);
         chooser->launchAsync(
             juce::FileBrowserComponent::openMode
                 | juce::FileBrowserComponent::canSelectDirectories,
@@ -227,6 +230,7 @@ private:
     juce::Label heading;
     juce::TextEditor location;
     juce::TextButton choose;
+    juce::String title;
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
@@ -285,12 +289,15 @@ class SettingsAlertWindow final : public juce::AlertWindow
 {
 public:
     SettingsAlertWindow(const juce::String& title, bool checkOnStartup,
-                        const juce::String& libraryDirectory, bool startAtFirstAudio,
-                        bool normalizeWaveform, bool showSingleChannel)
+                        const juce::String& libraryDirectory,
+                        bool startAtFirstAudio, bool normalizeWaveform,
+                        bool showSingleChannel)
         : juce::AlertWindow(title, {}, juce::MessageBoxIconType::QuestionIcon),
           previewSettings(startAtFirstAudio, normalizeWaveform, showSingleChannel),
           updateSettings(checkOnStartup),
-          libraryLocation(libraryDirectory),
+          libraryLocation(libraryDirectory, "Capsule save location:",
+                          "Choose capsule save location",
+                          "Choose where capsule files are saved"),
           flSetup("FL Setup")
     {
         addCustomComponent(&libraryLocation);
@@ -305,9 +312,8 @@ public:
 
     ~SettingsAlertWindow() override
     {
-        removeCustomComponent(2);
-        removeCustomComponent(1);
-        removeCustomComponent(0);
+        for (int index = 2; index >= 0; --index)
+            removeCustomComponent(index);
     }
 
     bool shouldCheckOnStartup() const { return updateSettings.shouldCheckOnStartup(); }
@@ -325,7 +331,7 @@ public:
 private:
     PreviewSettingsComponent previewSettings;
     UpdateSettingsComponent updateSettings;
-    LibraryLocationComponent libraryLocation;
+    FolderLocationComponent libraryLocation;
     juce::TextButton flSetup;
 };
 

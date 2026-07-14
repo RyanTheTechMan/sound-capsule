@@ -17,7 +17,7 @@ from .capsule import Capsule, slugify, unique_capsule_path
 from .config import Settings
 from .flp import ChannelSection, FLPFile, FLPUnsupportedError, NoteRecord
 from .library import CapsuleLibrary
-from .project_locator import ProjectLocator
+from .project_locator import ProjectLocator, indexed_project_paths, recent_project_paths
 from .renderer import close_windows_fl_studio, render_project
 
 
@@ -135,8 +135,12 @@ class CapsuleService:
         if changed_after <= 0 or time.time() - changed_after > 5 * 60:
             changed_after = None
         return ProjectLocator(
-            self.settings.project_roots,
+            self.settings.fl_project_roots,
             cache_path=self.settings.data_dir / "project-paths.json",
+            recent_provider=lambda: recent_project_paths(self.settings.fl_user_folder),
+            indexed_provider=lambda title: indexed_project_paths(
+                title, self.settings.fl_user_folder
+            ),
         ).find_current(
             session.project_title,
             changed_after=changed_after,

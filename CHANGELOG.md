@@ -6,10 +6,11 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
-## [0.3.2] - 2026-07-13
+## [0.3.3] - 2026-07-13
 
 ### Added
 
+- Sound Capsule now follows FL Studio's current user-data folder automatically.
 - Capsules are now stored and shared as playable `.flcapsule.wav` files. Their
   normal WAV audio contains a verified `SCAP` payload with the MIDI, channel
   states, manifest, and embedded sample assets.

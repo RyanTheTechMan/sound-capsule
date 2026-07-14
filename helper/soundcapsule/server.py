@@ -297,6 +297,46 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             "not_moved_count": len(conflicts) + len(cleanup_failures),
         }
 
+    def _install_midi_bridge(self, current: Settings, user_folder: Path) -> Path:
+        if not user_folder.is_dir():
+            raise ValueError(
+                "The FL Studio user folder must already exist. Choose the folder shown "
+                "in FL Studio under Options > File settings > User data folder."
+            )
+        target = (
+            user_folder / "Settings" / "Hardware" / "Sound Capsule"
+            / "device_SoundCapsule.py"
+        )
+        development_source = (
+            Path(__file__).resolve().parents[2] / "fl-studio" / "SoundCapsule"
+            / "device_SoundCapsule.py"
+        )
+        sources = (
+            current.bridge_script_template,
+            development_source,
+            current.midi_bridge_path,
+        )
+        source = next(
+            (
+                candidate for candidate in sources
+                if candidate is not None and candidate.is_file()
+            ),
+            None,
+        )
+        if source is None:
+            raise FileNotFoundError(
+                "The Sound Capsule MIDI bridge template is missing. Run Retry Setup "
+                "or reinstall Sound Capsule."
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".tmp")
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return target
+
     def dispatch(self, request: dict) -> dict:
         if not isinstance(request, dict):
             raise ValueError("request must be a JSON object")
@@ -386,6 +426,22 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 check_updates_on_startup = bool(
                     args.get("check_updates_on_startup", current.check_updates_on_startup)
                 )
+                # The installed template means this is a packaged runtime.
+                # Refresh the controller at FL Studio's registry-owned path so
+                # Retry Setup also follows a later FL user-data-folder change.
+                if current.bridge_script_template.is_file():
+                    fl_user_folder = current.fl_user_folder
+                    if fl_user_folder is None:
+                        raise RuntimeError(
+                            "FL Studio's user data folder was not found in Image-Line's "
+                            "registry data. Open FL Studio once, then run Retry Setup."
+                        )
+                    self._install_midi_bridge(current, fl_user_folder)
+                    with self.session_project_lock:
+                        self.session_project_token = None
+                        self.session_project_path = None
+                        self.session_project_fl_version = ""
+                        self.session_project_resolution = None
                 if not 1 <= undo_window_minutes <= 1440:
                     raise ValueError("Undo Import duration must be between 1 and 1440 minutes")
                 if waveform_channels not in ("mono", "stereo"):

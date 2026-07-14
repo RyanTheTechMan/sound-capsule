@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import xml.etree.ElementTree as ET
 
 
 APP_DIR_NAME = "SoundCapsule"
@@ -22,7 +23,60 @@ def default_data_dir() -> Path:
 
 
 def default_project_roots() -> list[Path]:
-    return [Path.home() / "Documents" / "Image-Line" / "FL Studio" / "Projects"]
+    # Optional CLI overrides only. FL Studio's own Projects root is added
+    # dynamically from registry data by Settings.fl_project_roots.
+    return []
+
+
+def registered_fl_user_folder() -> Path | None:
+    system = platform.system()
+    if system == "Windows":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, r"Software\Image-Line\Shared\Paths"
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "Shared data")
+        except (ImportError, OSError):
+            return None
+    elif system == "Darwin":
+        registry = Path.home() / "Library" / "Preferences" / "Image-Line" / "reg.xml"
+        try:
+            root = ET.parse(registry).getroot()
+        except (ET.ParseError, OSError):
+            return None
+        key = next(
+            (item for item in root.iter("Key") if item.get("Name") == "HKEY_CURRENT_USER"),
+            None,
+        )
+        for name in ("Software", "Image-Line", "Shared", "Paths"):
+            if key is None:
+                return None
+            key = next(
+                (item for item in key.findall("Key") if item.get("Name") == name),
+                None,
+            )
+        if key is None:
+            return None
+        value_node = next(
+            (item for item in key.findall("Value") if item.get("Name") == "Shared data"),
+            None,
+        )
+        value = value_node.text if value_node is not None else None
+    else:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    shared = Path(os.path.expandvars(value.strip())).expanduser()
+    candidate = shared if shared.name.casefold() == "fl studio" else shared / "FL Studio"
+    return candidate if candidate.is_dir() else None
+
+
+def default_fl_user_folder() -> Path | None:
+    # FL Studio owns this setting. Do not guess a Documents path because that
+    # can silently install the bridge into an unused data tree.
+    return registered_fl_user_folder()
 
 
 @dataclass(slots=True)
@@ -79,6 +133,31 @@ class Settings:
         return self.data_dir / "Staging"
 
     @property
+    def fl_user_folder(self) -> Path | None:
+        """Return FL Studio's current user-data folder without persisting a copy."""
+        return default_fl_user_folder()
+
+    @property
+    def midi_bridge_path(self) -> Path | None:
+        user_folder = self.fl_user_folder
+        if user_folder is None:
+            return None
+        return (
+            user_folder / "Settings" / "Hardware" / "Sound Capsule"
+            / "device_SoundCapsule.py"
+        )
+
+    @property
+    def bridge_script_template(self) -> Path:
+        return self.data_dir / "BridgeScript" / "device_SoundCapsule.py"
+
+    @property
+    def fl_project_roots(self) -> list[Path]:
+        user_folder = self.fl_user_folder
+        roots = [*([user_folder / "Projects"] if user_folder else []), *self.project_roots]
+        return list(dict.fromkeys(roots))
+
+    @property
     def config_path(self) -> Path:
         return self.data_dir / "settings.json"
 
@@ -106,6 +185,7 @@ class Settings:
             return settings
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload.pop("launch_with_fl", None)  # Removed: FL External Tools owns this preference.
+        payload.pop("fl_user_folder", None)  # FL Studio's registry is the source of truth.
         for key in (
             "midi_output_mode",
             "midi_external_device_identifier",
