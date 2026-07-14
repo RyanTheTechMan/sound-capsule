@@ -15,13 +15,42 @@ New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 Start-Transcript -Path $LogFile -Append -ErrorAction SilentlyContinue | Out-Null
 
 function Find-Uv {
-    $command = Get-Command uv.exe -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-    $candidates = @(
-        (Join-Path $HOME ".local\bin\uv.exe"),
-        (Join-Path $HOME ".cargo\bin\uv.exe")
-    )
-    foreach ($candidate in $candidates) {
+    $command = Get-Command uv.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
+        return $command.Source
+    }
+
+    # GUI apps and DAWs can retain a pre-install PATH, and some hosts launch
+    # PowerShell without HOME. Resolve Windows' profile folders independently
+    # so Retry Setup can still find both the official and winget installations.
+    $profileRoots = @(
+        $env:USERPROFILE,
+        $HOME,
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    $localAppDataRoots = @(
+        $env:LOCALAPPDATA,
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    $candidates = @()
+    foreach ($profileRoot in $profileRoots) {
+        $candidates += [IO.Path]::Combine($profileRoot, ".local", "bin", "uv.exe")
+        $candidates += [IO.Path]::Combine($profileRoot, ".cargo", "bin", "uv.exe")
+    }
+    foreach ($localAppDataRoot in $localAppDataRoots) {
+        $candidates += [IO.Path]::Combine(
+            $localAppDataRoot, "Microsoft", "WinGet", "Links", "uv.exe"
+        )
+        $packagesRoot = [IO.Path]::Combine($localAppDataRoot, "Microsoft", "WinGet", "Packages")
+        if (Test-Path -LiteralPath $packagesRoot -PathType Container) {
+            $wingetPackages = Get-ChildItem -LiteralPath $packagesRoot -Directory -Filter "astral-sh.uv_*" -ErrorAction SilentlyContinue
+            foreach ($wingetPackage in $wingetPackages) {
+                $candidates += [IO.Path]::Combine($wingetPackage.FullName, "uv.exe")
+            }
+        }
+    }
+    foreach ($candidate in $candidates | Select-Object -Unique) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
     return $null

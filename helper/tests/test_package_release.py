@@ -25,6 +25,15 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertEqual(source.count("-WindowStyle Hidden"), 2)
         self.assertIn('-File "[SETUPFOLDER]bootstrap-install.ps1"', source)
 
+    def test_windows_uv_lookup_survives_missing_home_and_stale_path(self) -> None:
+        source = (ROOT / "packaging/windows/bootstrap-install.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[Environment+SpecialFolder]::UserProfile", source)
+        self.assertIn("[Environment+SpecialFolder]::LocalApplicationData", source)
+        self.assertIn('"astral-sh.uv_*"', source)
+        self.assertNotIn('Join-Path $HOME ".local', source)
+
     def test_find_one_can_select_vst3_bundle_over_inner_windows_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary)
