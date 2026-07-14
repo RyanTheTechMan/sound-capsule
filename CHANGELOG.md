@@ -6,6 +6,8 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-13
+
 ### Added
 
 - Capsules are now stored and shared as playable `.flcapsule.wav` files. Their
@@ -21,6 +23,9 @@ version's section is also used as its GitHub release notes.
 
 ### Fixed
 
+- Windows setup now resolves its payload and finds `uv` when launched by a GUI
+  app or DAW with an empty `HOME`, an unset parameter-time `$PSScriptRoot`, or a
+  PATH captured before `uv` was installed, including Astral and winget installs.
 - Appended MIDI notes are now written in chronological event order. This keeps
   newly imported notes visible while zooming the Piano Roll and makes them play
   immediately without clicking each note to force FL Studio to rebuild it.
