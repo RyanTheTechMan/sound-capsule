@@ -56,6 +56,42 @@ def _copy_build_licenses(bundle: Path, pyinstaller_module: Path) -> None:
     shutil.copy2(pyinstaller_license, licenses / "PyInstaller.txt")
 
 
+def _sign_macos_frameworks(bundle: Path, identity: str) -> None:
+    """Sign reconstructed framework bundles after PyInstaller collects them."""
+    frameworks = sorted(
+        bundle.rglob("*.framework"),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for framework in frameworks:
+        subprocess.run(
+            [
+                "/usr/bin/codesign",
+                "--force",
+                "--deep",
+                "--all-architectures",
+                "--sign",
+                identity,
+                "--timestamp",
+                "--options",
+                "runtime",
+                str(framework),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "/usr/bin/codesign",
+                "--verify",
+                "--deep",
+                "--strict",
+                "--verbose=2",
+                str(framework),
+            ],
+            check=True,
+        )
+
+
 def build_frozen_helper(
     output: Path,
     *,
@@ -101,6 +137,11 @@ def build_frozen_helper(
     if not executable.is_file():
         raise FileNotFoundError(f"PyInstaller did not create {executable}")
     _copy_build_licenses(bundle, Path(PyInstaller.__file__).resolve())
+    if platform.system() == "Darwin" and codesign_identity:
+        # PyInstaller signs collected Mach-O files, but a console-mode onedir
+        # build reconstructs Python.framework without signing its resource
+        # envelope. Sign each framework as a bundle before notarization.
+        _sign_macos_frameworks(bundle, codesign_identity)
     return bundle
 
 

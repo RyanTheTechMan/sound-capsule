@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.build_frozen_helper import _copy_build_licenses
+from scripts.build_frozen_helper import _copy_build_licenses, _sign_macos_frameworks
 
 
 class BuildFrozenHelperTests(unittest.TestCase):
@@ -95,6 +95,49 @@ class BuildFrozenHelperTests(unittest.TestCase):
                     _copy_build_licenses(
                         root / "bundle", self._pyinstaller_module(root)
                     )
+
+    def test_signs_reconstructed_macos_framework_as_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "Sound Capsule Helper"
+            framework = bundle / "_internal" / "Python.framework"
+            framework.mkdir(parents=True)
+
+            with mock.patch("scripts.build_frozen_helper.subprocess.run") as run:
+                _sign_macos_frameworks(bundle, "DEVELOPER-ID")
+
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(
+                run.call_args_list[0],
+                mock.call(
+                    [
+                        "/usr/bin/codesign",
+                        "--force",
+                        "--deep",
+                        "--all-architectures",
+                        "--sign",
+                        "DEVELOPER-ID",
+                        "--timestamp",
+                        "--options",
+                        "runtime",
+                        str(framework),
+                    ],
+                    check=True,
+                ),
+            )
+            self.assertEqual(
+                run.call_args_list[1],
+                mock.call(
+                    [
+                        "/usr/bin/codesign",
+                        "--verify",
+                        "--deep",
+                        "--strict",
+                        "--verbose=2",
+                        str(framework),
+                    ],
+                    check=True,
+                ),
+            )
 
 
 if __name__ == "__main__":

@@ -29,6 +29,33 @@ class PackageReleaseTests(unittest.TestCase):
                 bundle,
             )
 
+    def test_find_one_prefers_canonical_juce_artifact_among_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary)
+            canonical = (
+                build
+                / "plugin"
+                / "SoundCapsule_artefacts"
+                / "Release"
+                / "VST3"
+                / "Sound Capsule.vst3"
+            )
+            duplicate = (
+                build
+                / "plugin"
+                / "SoundCapsule_artefacts"
+                / "RelWithDebInfo"
+                / "VST3"
+                / "Sound Capsule.vst3"
+            )
+            canonical.mkdir(parents=True)
+            duplicate.mkdir(parents=True)
+
+            self.assertEqual(
+                find_one(build, "Sound Capsule.vst3", "VST3", directory=True),
+                canonical,
+            )
+
     def test_setup_payload_contains_installer_and_runtime_without_tests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

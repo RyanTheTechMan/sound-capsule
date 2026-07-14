@@ -33,6 +33,17 @@ def find_one(
         if (required_part is None or required_part in path.parts)
         and (directory is None or path.is_dir() == directory)
     ]
+    if required_part is not None:
+        canonical = (
+            build
+            / "plugin"
+            / "SoundCapsule_artefacts"
+            / "Release"
+            / required_part
+            / name
+        )
+        if canonical in matches:
+            return canonical
     if len(matches) != 1:
         raise FileNotFoundError(
             f"expected one {name!r} under {build}, found {len(matches)}"

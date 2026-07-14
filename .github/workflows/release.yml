@@ -212,6 +212,8 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$VST3_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign --verify --strict --verbose=2 "$HELPER_PATH/Sound Capsule Helper"
+          codesign --verify --deep --strict --verbose=2 \
+            "$HELPER_PATH/_internal/Python.framework"
           lipo -archs "$HELPER_PATH/Sound Capsule Helper" | grep -q 'x86_64 arm64\|arm64 x86_64'
 
       - name: Notarize and staple macOS app and VST3
@@ -235,6 +237,8 @@ jobs:
           ditto "$APP_PATH" "$NOTARY_STAGING/Sound Capsule.app"
           ditto "$VST3_PATH" "$NOTARY_STAGING/Sound Capsule.vst3"
           ditto "$HELPER_PATH" "$NOTARY_STAGING/Sound Capsule Helper"
+          codesign --verify --deep --strict --verbose=2 \
+            "$NOTARY_STAGING/Sound Capsule Helper/_internal/Python.framework"
           ditto -c -k --keepParent "$NOTARY_STAGING" "$NOTARY_ZIP"
 
           set +e
@@ -272,6 +276,8 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$VST3_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign --verify --strict --verbose=2 "$HELPER_PATH/Sound Capsule Helper"
+          codesign --verify --deep --strict --verbose=2 \
+            "$HELPER_PATH/_internal/Python.framework"
 
       - name: Package release
         shell: bash
