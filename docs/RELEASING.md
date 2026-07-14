@@ -78,7 +78,6 @@ will produce an unknown-publisher warning until Authenticode signing is added.
 5. Test the PKG on macOS 13+ and the MSI on Windows 10/11 when possible, then
    publish the draft.
 
-Native uninstall removes the application, packaged setup payload, shortcuts, and
-selected VST3. Windows also removes the current user's generated helper environment
-and FL bridge. Settings and capsule libraries are retained for reinstall, and uv is
-never removed because it may be used by other projects.
+Native uninstall removes the application, self-contained helper payload, shortcuts,
+selected VST3, and generated FL bridge. Settings and capsule libraries are retained
+for reinstall. Native releases never install or remove a user Python or uv runtime.

@@ -6,6 +6,22 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-13
+
+### Changed
+
+- Native Windows and macOS releases now bundle a self-contained helper built in
+  GitHub Actions. End users no longer need to install Python or uv, and native
+  setup no longer creates a venv or copies the Python source tree.
+- The app now runs the packaged helper directly for `setup`, `serve`, and
+  `uninstall`. First launch refreshes the FL Studio controller at Image-Line's
+  registered user-data folder, so skipped installer post-actions self-repair.
+
+### Fixed
+
+- Windows setup no longer opens a transient PowerShell window or fails while uv
+  traverses a junction-backed managed-Python alias.
+
 ## [0.3.3] - 2026-07-13
 
 ### Added

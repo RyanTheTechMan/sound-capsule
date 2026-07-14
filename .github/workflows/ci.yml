@@ -19,6 +19,16 @@ jobs:
       - name: Test helper
         shell: bash
         run: PYTHONPATH=helper python -m unittest discover -s helper/tests -v
+      - name: Build self-contained helper
+        shell: bash
+        run: |
+          python -m pip install PyInstaller==6.21.0
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            python scripts/build_frozen_helper.py \
+              --output build/frozen-helper --target-architecture universal2
+          else
+            python scripts/build_frozen_helper.py --output build/frozen-helper
+          fi
       - name: Configure VST3
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSOUNDCAPSULE_UNIVERSAL_MACOS=OFF -DSOUNDCAPSULE_BUILD_PLUGIN=ON
       - name: Build VST3
@@ -31,11 +41,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Validate Windows setup script
+      - name: Validate Windows installer source
         shell: powershell
-        run: >-
-          [void][scriptblock]::Create(
-          (Get-Content -Raw packaging/windows/bootstrap-install.ps1))
+        run: '[void][xml](Get-Content -Raw packaging/windows/Package.wxs)'
       - name: Stage installer test artifacts
         shell: powershell
         run: |
@@ -48,6 +56,11 @@ jobs:
           if (-not (Test-Path $appFile) -or -not (Test-Path $vstFile)) {
             throw "Could not stage installer test artifacts"
           }
+      - name: Build self-contained helper
+        shell: bash
+        run: |
+          python -m pip install PyInstaller==6.21.0
+          python scripts/build_frozen_helper.py --output build/frozen-helper
       - name: Build Windows MSI
         shell: bash
         run: |

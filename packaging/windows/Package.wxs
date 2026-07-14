@@ -46,7 +46,7 @@
     </Component>
 
     <Feature Id="Core" Title="Sound Capsule application and FL Studio bridge"
-             Description="Required app and FL bridge. uv must already be installed; if it is missing, setup opens the official installation instructions and Sound Capsule can retry later."
+             Description="Required app, self-contained helper, and FL Studio bridge. No Python or uv installation is required."
              Level="1" AllowAbsent="no">
       <ComponentRef Id="Application"/>
       <ComponentGroupRef Id="SetupFiles"/>
@@ -66,10 +66,10 @@
 
     <CustomAction Id="ProvisionCurrentUser" Directory="INSTALLFOLDER" Execute="immediate"
                   Impersonate="yes" Return="ignore"
-                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -InstalledApp "[#SoundCapsuleExe]"'/>
+                  ExeCommand='"[SETUPFOLDER]Helper\Sound Capsule Helper.exe" setup --bridge-script "[SETUPFOLDER]fl-studio\SoundCapsule\device_SoundCapsule.py" --app-path "[#SoundCapsuleExe]"'/>
     <CustomAction Id="CleanupCurrentUser" Directory="INSTALLFOLDER" Execute="immediate"
                   Impersonate="yes" Return="ignore"
-                  ExeCommand='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "[SETUPFOLDER]bootstrap-install.ps1" -Uninstall'/>
+                  ExeCommand='"[SETUPFOLDER]Helper\Sound Capsule Helper.exe" uninstall'/>
     <InstallExecuteSequence>
       <Custom Action="CleanupCurrentUser" Before="RemoveFiles"
               Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>

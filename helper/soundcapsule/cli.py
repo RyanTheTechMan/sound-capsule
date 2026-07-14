@@ -6,9 +6,10 @@ from pathlib import Path
 import sys
 
 from .capsule import Capsule, is_capsule_filename
-from .config import Settings
+from .config import Settings, default_data_dir
 from .flp import FLPFile
 from .project import CapsuleService
+from .provision import install_runtime, uninstall_runtime
 from .server import serve
 
 
@@ -17,6 +18,10 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--home", type=Path, help="override Sound Capsule data directory")
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("serve")
+    setup = commands.add_parser("setup")
+    setup.add_argument("--bridge-script", type=Path, required=True)
+    setup.add_argument("--app-path", type=Path)
+    commands.add_parser("uninstall")
     commands.add_parser("list")
     inspect = commands.add_parser("inspect")
     inspect.add_argument("path", type=Path)
@@ -53,6 +58,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "serve":
             serve(settings)
+            return 0
+        if args.command == "setup":
+            install_runtime(
+                args.bridge_script,
+                app_path=args.app_path,
+                data_dir=args.home,
+            )
+            ((args.home or default_data_dir()) / "setup-failed.txt").unlink(
+                missing_ok=True
+            )
+            return 0
+        if args.command == "uninstall":
+            uninstall_runtime(data_dir=args.home)
             return 0
         if args.command == "configure":
             if args.project_root:
@@ -107,12 +125,21 @@ def main(argv: list[str] | None = None) -> int:
             })
         return 0
     except Exception as error:
-        print(f"soundcapsule: {error}", file=sys.stderr)
+        if args.command == "setup":
+            failure = (args.home or default_data_dir()) / "setup-failed.txt"
+            try:
+                failure.parent.mkdir(parents=True, exist_ok=True)
+                failure.write_text(str(error), encoding="utf-8")
+            except OSError:
+                pass
+        if sys.stderr is not None:
+            print(f"soundcapsule: {error}", file=sys.stderr)
         return 1
 
 
 def _print(payload: dict) -> None:
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    if sys.stdout is not None:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

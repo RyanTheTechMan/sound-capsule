@@ -13,7 +13,7 @@
     <line choice="vst3"/>
   </choices-outline>
   <choice id="core" title="Sound Capsule application and FL Studio bridge"
-          description="Installs Sound Capsule in Applications and configures the current user's helper and FL Studio bridge. uv is required; if it is missing, setup opens the official installation instructions."
+          description="Installs Sound Capsule, its self-contained helper, and the FL Studio bridge. No Python or uv installation is required."
           visible="true" start_selected="true" start_enabled="false">
     <pkg-ref id="com.soundcapsule.fl.pkg.app"/>
     <pkg-ref id="com.soundcapsule.fl.pkg.setup"/>

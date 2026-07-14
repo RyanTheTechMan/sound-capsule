@@ -7,7 +7,12 @@ import shutil
 import subprocess
 import tempfile
 
-from package_release import copy_setup_payload, find_one, project_version
+from package_release import (
+    copy_setup_payload,
+    find_one,
+    frozen_helper_bundle,
+    project_version,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +23,7 @@ def package_windows_installer(build: Path, output: Path, version: str) -> Path:
         raise ValueError(f"requested version {version} does not match project version {project_version()}")
     app = find_one(build, "Sound Capsule.exe", "Standalone", directory=False)
     vst3 = find_one(build, "Sound Capsule.vst3", "VST3", directory=True)
+    helper = frozen_helper_bundle(build, "windows")
     output.mkdir(parents=True, exist_ok=True)
     destination = output / f"Sound-Capsule-v{version}-Windows-x64.msi"
 
@@ -25,7 +31,7 @@ def package_windows_installer(build: Path, output: Path, version: str) -> Path:
         temporary_path = Path(temporary)
         setup = temporary_path / "Setup"
         wix_output = temporary_path / "wix-output"
-        copy_setup_payload(setup, "windows")
+        copy_setup_payload(setup, "windows", helper)
         subprocess.run(
             [
                 "dotnet", "build", str(ROOT / "packaging" / "windows" / "SoundCapsule.wixproj"),

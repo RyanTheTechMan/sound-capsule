@@ -1,9 +1,5 @@
 Sound Capsule installs the standalone application in /Applications and configures
 the FL Studio MIDI bridge for the current user.
 
-Sound Capsule requires uv for its local Python helper. If uv is not already
-installed, setup will stop and offer to open the official uv installation page.
-Sound Capsule never downloads or installs uv automatically.
-
-If setup cannot finish, Sound Capsule remains installed and will offer
-Retry Setup and a link to the manual uv instructions on first launch.
+The local helper is self-contained. No Python or uv installation is required.
+If setup cannot finish during installation, first launch retries it automatically.

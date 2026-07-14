@@ -8,7 +8,13 @@ import shutil
 import subprocess
 import tempfile
 
-from package_release import copy_artifact, copy_setup_payload, find_one, project_version
+from package_release import (
+    copy_artifact,
+    copy_setup_payload,
+    find_one,
+    frozen_helper_bundle,
+    project_version,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +37,7 @@ def package_macos_installer(
         raise ValueError(f"requested version {version} does not match project version {project_version()}")
     app = find_one(build, "Sound Capsule.app", "Standalone")
     vst3 = find_one(build, "Sound Capsule.vst3", "VST3", directory=True)
+    helper = frozen_helper_bundle(build, "macos")
     output.mkdir(parents=True, exist_ok=True)
     destination = output / f"Sound-Capsule-v{version}-macOS.pkg"
 
@@ -42,8 +49,7 @@ def package_macos_installer(
         app_root = temporary_path / "app-root"
         copy_artifact(app, app_root / "Applications" / app.name)
         setup_root = temporary_path / "setup-root" / "Library" / "Application Support" / "SoundCapsule" / "Setup"
-        copy_setup_payload(setup_root, "macos")
-        (setup_root / "bootstrap-install.sh").chmod(0o755)
+        copy_setup_payload(setup_root, "macos", helper)
         vst_root = temporary_path / "vst-root" / "Library" / "Audio" / "Plug-Ins" / "VST3"
         copy_artifact(vst3, vst_root / vst3.name)
         scripts = temporary_path / "pkg-scripts"
@@ -51,7 +57,15 @@ def package_macos_installer(
         postinstall = scripts / "postinstall"
         postinstall.write_text(
             "#!/bin/sh\n"
-            "\"/Library/Application Support/SoundCapsule/Setup/bootstrap-install.sh\" || true\n"
+            "helper='/Library/Application Support/SoundCapsule/Setup/Helper/Sound Capsule Helper'\n"
+            "bridge='/Library/Application Support/SoundCapsule/Setup/fl-studio/SoundCapsule/device_SoundCapsule.py'\n"
+            "app='/Applications/Sound Capsule.app'\n"
+            "console_user=$(stat -f '%Su' /dev/console 2>/dev/null || true)\n"
+            "if [ -n \"$console_user\" ] && [ \"$console_user\" != root ] && [ \"$console_user\" != loginwindow ]; then\n"
+            "  console_uid=$(id -u \"$console_user\")\n"
+            "  console_home=$(dscl . -read \"/Users/$console_user\" NFSHomeDirectory 2>/dev/null | sed 's/^[^ ]* //')\n"
+            "  launchctl asuser \"$console_uid\" sudo -H -u \"$console_user\" env HOME=\"$console_home\" \"$helper\" setup --bridge-script \"$bridge\" --app-path \"$app\" || true\n"
+            "fi\n"
             "exit 0\n",
             encoding="utf-8",
         )

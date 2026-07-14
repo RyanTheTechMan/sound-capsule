@@ -5,6 +5,54 @@
 
 #include <cmath>
 
+namespace
+{
+juce::File soundCapsuleApplication()
+{
+    auto current = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+   #if JUCE_MAC
+    for (auto candidate = current; candidate != juce::File();)
+    {
+        if (candidate.hasFileExtension("app"))
+            return candidate;
+        const auto parent = candidate.getParentDirectory();
+        if (parent == candidate)
+            break;
+        candidate = parent;
+    }
+   #endif
+    return current;
+}
+
+juce::File installedSetupRoot()
+{
+    const auto application = soundCapsuleApplication();
+    const auto adjacent = application.getParentDirectory().getChildFile("Setup");
+    if (adjacent.isDirectory())
+        return adjacent;
+   #if JUCE_MAC
+    return juce::File("/Library/Application Support/SoundCapsule/Setup");
+   #elif JUCE_WINDOWS
+    return juce::File(
+        juce::SystemStats::getEnvironmentVariable("ProgramFiles", "C:\\Program Files"))
+        .getChildFile("Sound Capsule").getChildFile("Setup");
+   #else
+    return {};
+   #endif
+}
+
+juce::File frozenHelperExecutable()
+{
+    return installedSetupRoot().getChildFile("Helper").getChildFile(
+       #if JUCE_WINDOWS
+        "Sound Capsule Helper.exe"
+       #else
+        "Sound Capsule Helper"
+       #endif
+    );
+}
+}
+
 juce::AudioProcessor::BusesProperties SoundCapsuleAudioProcessor::soundCapsuleBuses()
 {
     auto buses = juce::AudioProcessor::BusesProperties()
@@ -248,6 +296,36 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning()
     if (helperProcess != nullptr && helperProcess->isRunning())
         return true;
 
+    const auto frozenHelper = frozenHelperExecutable();
+    if (frozenHelper.existsAsFile())
+    {
+        const auto bridge = installedSetupRoot()
+            .getChildFile("fl-studio").getChildFile("SoundCapsule")
+            .getChildFile("device_SoundCapsule.py");
+        juce::ChildProcess setupProcess;
+        const juce::StringArray setupArguments{
+            frozenHelper.getFullPathName(), "setup",
+            "--bridge-script", bridge.getFullPathName(),
+            "--app-path", soundCapsuleApplication().getFullPathName()
+        };
+        if (!bridge.existsAsFile()
+            || !setupProcess.start(setupArguments, 0)
+            || !setupProcess.waitForProcessToFinish(60 * 1000)
+            || setupProcess.getExitCode() != 0)
+            return false;
+
+        helperProcess = std::make_unique<juce::ChildProcess>();
+        if (!helperProcess->start(
+                {frozenHelper.getFullPathName(), "serve"}, 0))
+        {
+            helperProcess.reset();
+            return false;
+        }
+        return true;
+    }
+
+    // Development/source-tree fallback. Native releases always use the
+    // self-contained helper above and require no user-installed Python.
     juce::File python;
     const auto configuredHome = juce::SystemStats::getEnvironmentVariable("SOUNDCAPSULE_HOME", "");
     if (configuredHome.isNotEmpty())

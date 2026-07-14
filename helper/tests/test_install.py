@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -7,6 +8,7 @@ from unittest import mock
 from scripts.install import (
     configure,
     default_fl_user_folder,
+    install_helper,
     install_midi_bridge,
     midi_destination,
     record_app_path,
@@ -117,6 +119,19 @@ class InstallTests(unittest.TestCase):
                 self.assertIsNone(install_midi_bridge(root))
             self.assertFalse(missing.exists())
             self.assertTrue((root / "BridgeScript" / "device_SoundCapsule.py").is_file())
+
+    def test_helper_environment_uses_the_running_python_without_uv_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SoundCapsule"
+
+            python = install_helper(root)
+
+            self.assertTrue(python.is_file())
+            version = subprocess.check_output(
+                [str(python), "-c", "import soundcapsule; print(soundcapsule.__version__)"],
+                text=True,
+            ).strip()
+            self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
 
 if __name__ == "__main__":

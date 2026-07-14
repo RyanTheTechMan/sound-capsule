@@ -59,32 +59,31 @@ def copy_artifact(source: Path, destination: Path) -> None:
         copy_file_data(source, destination)
 
 
-def copy_setup_payload(destination: Path, platform_name: str) -> None:
-    """Stage the files used by native installers and first-launch repair."""
-    destination.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        ROOT / "helper",
-        destination / "helper",
-        copy_function=copy_file_data,
-        ignore=shutil.ignore_patterns(
-            "build", "dist", "tests", ".venv", "venv", "*.egg-info",
-            "__pycache__", "*.pyc", ".pytest_cache"
-        ),
+def frozen_helper_bundle(build: Path, platform_name: str) -> Path:
+    bundle = build / "frozen-helper" / "Sound Capsule Helper"
+    executable = bundle / (
+        "Sound Capsule Helper.exe" if platform_name == "windows"
+        else "Sound Capsule Helper"
     )
+    if not executable.is_file():
+        raise FileNotFoundError(f"build the frozen helper first: missing {executable}")
+    return bundle
+
+
+def copy_setup_payload(
+    destination: Path,
+    platform_name: str,
+    helper_bundle: Path,
+) -> None:
+    """Stage the self-contained helper and FL controller payload."""
+    destination.mkdir(parents=True, exist_ok=True)
+    copy_artifact(helper_bundle, destination / "Helper")
     shutil.copytree(
         ROOT / "fl-studio",
         destination / "fl-studio",
         copy_function=copy_file_data,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
-    (destination / "scripts").mkdir()
-    copy_file_data(ROOT / "scripts" / "install.py", destination / "scripts" / "install.py")
-    bootstrap = (
-        ROOT / "packaging" / "windows" / "bootstrap-install.ps1"
-        if platform_name == "windows"
-        else ROOT / "packaging" / "macos" / "bootstrap-install.sh"
-    )
-    copy_file_data(bootstrap, destination / bootstrap.name)
 
 
 def package_release(build: Path, output: Path, version: str, platform_name: str) -> Path:
@@ -100,6 +99,7 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
     # A Windows VST3 bundle contains an inner binary with the same .vst3 name.
     # Package the bundle directory, not that implementation binary.
     vst3 = find_one(build, "Sound Capsule.vst3", "VST3", directory=True)
+    helper = frozen_helper_bundle(build, platform_name)
     output.mkdir(parents=True, exist_ok=True)
 
     package_name = f"Sound-Capsule-v{version}-{label}"
@@ -110,7 +110,7 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
         copy_artifact(app, package / app.name)
         copy_artifact(vst3, package / vst3.name)
 
-        copy_setup_payload(package, platform_name)
+        copy_setup_payload(package / "Setup", platform_name, helper)
         shutil.copytree(ROOT / "docs", package / "docs")
         for filename in ("README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
             shutil.copy2(ROOT / filename, package / filename)
@@ -118,11 +118,10 @@ def package_release(build: Path, output: Path, version: str, platform_name: str)
         (package / "INSTALL.txt").write_text(
             "Sound Capsule installation\n"
             "==========================\n\n"
-            "1. Install uv from https://docs.astral.sh/uv/getting-started/installation/.\n"
-            "2. Open a terminal in this extracted folder.\n"
-            "3. Run: uv run --python 3.12 scripts/install.py --build .\n\n"
-            "Add --with-vst to install the optional VST3 as well. The standalone app,\n"
-            "FL Studio MIDI bridge, and local helper are installed for the current user.\n"
+            "Open the Sound Capsule application. First launch configures the included\n"
+            "self-contained helper and FL Studio MIDI bridge automatically. No Python\n"
+            "or uv installation is required. Copy the optional VST3 to your system's\n"
+            "VST3 directory if you want the in-FL library browser.\n\n"
             "See README.md for FL Studio setup and complete usage instructions.\n",
             encoding="utf-8",
         )

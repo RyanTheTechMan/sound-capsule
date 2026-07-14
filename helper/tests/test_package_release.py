@@ -9,33 +9,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PackageReleaseTests(unittest.TestCase):
-    def test_native_bootstraps_never_download_or_install_uv(self) -> None:
-        instructions = "https://docs.astral.sh/uv/getting-started/installation/"
-        for relative in (
-            "packaging/macos/bootstrap-install.sh",
-            "packaging/windows/bootstrap-install.ps1",
-        ):
-            source = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn(instructions, source)
-            self.assertNotIn("astral.sh/uv/install.", source)
-
-    def test_windows_custom_actions_do_not_quote_a_trailing_setup_directory(self) -> None:
+    def test_windows_custom_actions_run_frozen_helper_without_powershell(self) -> None:
         source = (ROOT / "packaging/windows/Package.wxs").read_text(encoding="utf-8")
-        self.assertNotIn('-SetupRoot "[SETUPFOLDER]"', source)
-        self.assertEqual(source.count("-WindowStyle Hidden"), 2)
-        self.assertIn('-File "[SETUPFOLDER]bootstrap-install.ps1"', source)
-
-    def test_windows_uv_lookup_survives_missing_home_and_stale_path(self) -> None:
-        source = (ROOT / "packaging/windows/bootstrap-install.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("[Environment+SpecialFolder]::UserProfile", source)
-        self.assertIn("[Environment+SpecialFolder]::LocalApplicationData", source)
-        self.assertIn('"astral-sh.uv_*"', source)
-        self.assertNotIn('Join-Path $HOME ".local', source)
-        self.assertNotIn("[string]$SetupRoot = $PSScriptRoot", source)
-        self.assertIn("$SetupRoot = $PSScriptRoot", source)
-        self.assertIn("$MyInvocation.MyCommand.Path", source)
+        self.assertNotIn("powershell", source.casefold())
+        self.assertIn('Helper\\Sound Capsule Helper.exe" setup', source)
+        self.assertIn('Helper\\Sound Capsule Helper.exe" uninstall', source)
+        self.assertIn("No Python or uv installation is required", source)
 
     def test_find_one_can_select_vst3_bundle_over_inner_windows_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -52,16 +31,22 @@ class PackageReleaseTests(unittest.TestCase):
 
     def test_setup_payload_contains_installer_and_runtime_without_tests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "Setup"
-            copy_setup_payload(destination, "windows")
+            root = Path(temporary)
+            destination = root / "Setup"
+            helper = root / "frozen-helper" / "Sound Capsule Helper"
+            helper.mkdir(parents=True)
+            (helper / "Sound Capsule Helper.exe").write_bytes(b"helper")
+            (helper / "_internal").mkdir()
+            (helper / "_internal" / "python312.dll").write_bytes(b"python")
+            copy_setup_payload(destination, "windows", helper)
 
-            self.assertTrue((destination / "scripts" / "install.py").is_file())
-            self.assertTrue((destination / "bootstrap-install.ps1").is_file())
-            self.assertTrue((destination / "helper" / "soundcapsule" / "server.py").is_file())
+            self.assertTrue((destination / "Helper" / "Sound Capsule Helper.exe").is_file())
+            self.assertTrue((destination / "Helper" / "_internal" / "python312.dll").is_file())
             self.assertTrue(
                 (destination / "fl-studio" / "SoundCapsule" / "device_SoundCapsule.py").is_file()
             )
-            self.assertFalse((destination / "helper" / "tests").exists())
+            self.assertFalse((destination / "Helper" / "soundcapsule").exists())
+            self.assertFalse((destination / "scripts").exists())
 
 
 if __name__ == "__main__":

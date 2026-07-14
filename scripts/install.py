@@ -129,7 +129,7 @@ def find_app(build: Path) -> Path:
     return matches[0]
 
 
-def install_helper(root: Path, uv_executable: Path | None = None) -> Path:
+def install_helper(root: Path) -> Path:
     helper_root = root / "Helper"
     if helper_root.exists():
         shutil.rmtree(helper_root)
@@ -140,16 +140,19 @@ def install_helper(root: Path, uv_executable: Path | None = None) -> Path:
             "__pycache__", "*.pyc", ".pytest_cache",
         ),
     )
-    uv = str(uv_executable) if uv_executable is not None else shutil.which("uv")
-    if uv is None or not Path(uv).is_file():
-        raise FileNotFoundError(
-            "uv was not found; install it from "
-            "https://docs.astral.sh/uv/getting-started/installation/ "
-            "and rerun with `uv run scripts/install.py`"
-        )
     environment = root / "venv"
+    # Source/development installs reuse their running interpreter. Native
+    # releases ship a frozen helper and never call this path on user machines.
+    # The helper has no third-party dependencies, so pip is omitted.
     subprocess.run(
-        [uv, "venv", "--python", "3.12", "--clear", str(environment)],
+        [
+            sys.executable,
+            "-m",
+            "venv",
+            "--clear",
+            "--without-pip",
+            str(environment),
+        ],
         check=True,
     )
     python = environment / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
@@ -238,10 +241,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Install Sound Capsule for the current user")
     parser.add_argument("--build", type=Path, default=ROOT / "build")
     parser.add_argument(
-        "--uv-executable", type=Path,
-        help="use this uv executable (for native installers before PATH has refreshed)",
-    )
-    parser.add_argument(
         "--installed-app", type=Path,
         help="record an app already installed by a native package instead of copying one",
     )
@@ -252,15 +251,13 @@ def main() -> int:
         parser.error("Sound Capsule currently supports macOS and Windows")
     if args.installed_app is not None and args.no_app:
         parser.error("--installed-app and --no-app cannot be used together")
-    if args.uv_executable is not None and not args.uv_executable.is_file():
-        parser.error(f"uv executable does not exist: {args.uv_executable}")
 
     root = data_dir()
     if sys.version_info < (3, 10):
         parser.error("run the installer with `uv run --python 3.12 scripts/install.py`")
     configure(root)
     script_target = install_midi_bridge(root)
-    python = install_helper(root, args.uv_executable)
+    python = install_helper(root)
     cli_launcher = install_cli_launcher(root, python)
     installed_app = None
     if args.installed_app is not None:

@@ -13,3 +13,8 @@ code.
 
 The VST3 SDK reached through JUCE carries Steinberg's applicable VST3/GPL
 licensing terms. See the fetched JUCE distribution for the complete notices.
+
+Native releases include a Python 3.12 runtime and PyInstaller bootloader inside
+the self-contained Sound Capsule Helper. End users do not need Python or
+PyInstaller installed. Their license texts are included in the helper bundle's
+`Licenses` directory.

@@ -31,10 +31,10 @@ Download the native installer from the
   currently unsigned, so Windows may show an unknown-publisher warning.
 
 The installers configure the FL Studio bridge automatically. The optional VST3
-can be selected from the installer component list. If uv is missing, setup explains
-that it is required and offers to open the official installation page. Sound Capsule
-never downloads or installs uv automatically. After installing uv, launch Sound Capsule
-and choose **Retry Setup**.
+can be selected from the installer component list. Native releases include a
+self-contained helper, so end users do not need to install Python or uv. First launch
+also verifies the helper and FL Studio bridge, repairing setup automatically if an
+installer post-action was skipped.
 
 Sound Capsule automatically follows FL Studio's **User data folder**, including when
 it has been moved from Documents. On Windows it reads Image-Line's `Shared data`
@@ -43,19 +43,10 @@ registry value; on macOS it reads the same value from
 that folder's Browser history and Projects directory. Sound Capsule does not persist a
 second setting or create a guessed FL Studio data folder when registry data is missing.
 
-For a manual installation, download the macOS or Windows ZIP, extract it, open a
-terminal in the extracted folder, and run:
-
-```sh
-uv run --python 3.12 scripts/install.py --build .
-```
-
-[uv](https://docs.astral.sh/uv/) is required; it can provide Python 3.12 when
-needed. To install the optional VST3 too, add `--with-vst`:
-
-```sh
-uv run --python 3.12 scripts/install.py --build . --with-vst
-```
+For a manual installation, download and extract the macOS or Windows ZIP, then
+open the Sound Capsule application. Its included helper and FL Studio bridge are
+configured on first launch. Copy the optional VST3 bundle into the platform's VST3
+directory if you also want the in-FL library browser.
 
 ## First-time setup
 

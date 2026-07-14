@@ -2524,17 +2524,14 @@ void SoundCapsuleAudioProcessorEditor::offerSetupRepair()
         juce::MessageBoxOptions::makeOptionsOkCancel(
             juce::MessageBoxIconType::WarningIcon,
             "Finish Sound Capsule setup",
-            "The local helper is not ready. uv must be installed before Sound Capsule can finish "
-            "setup. Sound Capsule will never download or install uv automatically.",
-            "Retry Setup", "uv Instructions", this),
+            "The self-contained local helper is not ready. Retry Setup will refresh the "
+            "FL Studio bridge and start it again. No Python or uv installation is required.",
+            "Retry Setup", "Close", this),
         [safe](int result) {
             if (safe == nullptr)
                 return;
             if (result == 1)
                 safe->runSetupRepair();
-            else if (result == 0)
-                juce::URL("https://docs.astral.sh/uv/getting-started/installation/")
-                    .launchInDefaultBrowser();
         });
 }
 
@@ -2545,42 +2542,26 @@ void SoundCapsuleAudioProcessorEditor::runSetupRepair()
     status.setText("Finishing Sound Capsule setup...", juce::dontSendNotification);
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     requestPool.addJob([safe] {
-        juce::String error;
-        juce::StringArray arguments;
+        juce::File failureFile;
        #if JUCE_MAC
-        const auto script = juce::File("/Library/Application Support/SoundCapsule/Setup/bootstrap-install.sh");
-        arguments = {script.getFullPathName()};
+        const auto home = juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+        failureFile = home.getChildFile(
+            "Library/Application Support/SoundCapsule/setup-failed.txt");
        #elif JUCE_WINDOWS
-        const auto script = juce::File(
-            juce::SystemStats::getEnvironmentVariable("ProgramFiles", "C:\\Program Files"))
-            .getChildFile("Sound Capsule").getChildFile("Setup").getChildFile("bootstrap-install.ps1");
-        arguments = {
-            juce::File(juce::SystemStats::getEnvironmentVariable("SystemRoot", "C:\\Windows"))
-                .getChildFile("System32").getChildFile("WindowsPowerShell")
-                .getChildFile("v1.0").getChildFile("powershell.exe").getFullPathName(),
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.getFullPathName()
-        };
+        const auto dataRoot = juce::File(
+            juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", ""))
+            .getChildFile("SoundCapsule");
+        failureFile = dataRoot.getChildFile("setup-failed.txt");
        #endif
-        if (!script.existsAsFile())
-            error = "The native setup payload is missing. Reinstall Sound Capsule or install uv manually.";
-        else
-        {
-            juce::ChildProcess process;
-            if (!process.start(arguments))
-                error = "Sound Capsule could not start its setup helper.";
-            else if (!process.waitForProcessToFinish(10 * 60 * 1000))
-            {
-                process.kill();
-                error = "Sound Capsule setup timed out.";
-            }
-            else if (process.getExitCode() != 0)
-                error = "Setup failed. Install uv from the official instructions, then choose Retry Setup.";
-        }
-        juce::MessageManager::callAsync([safe, error] {
+        const auto ready = safe != nullptr && safe->audioProcessor.ensureHelperRunning();
+        const auto error = !ready && failureFile.existsAsFile()
+                             ? failureFile.loadFileAsString().trim()
+                             : juce::String();
+        juce::MessageManager::callAsync([safe, ready, error] {
             if (safe == nullptr)
                 return;
             safe->setupRepairInFlight.store(false);
-            if (error.isEmpty() && safe->audioProcessor.ensureHelperRunning())
+            if (ready)
             {
                 safe->status.setText("Sound Capsule setup complete", juce::dontSendNotification);
                 safe->refreshLibrary();
@@ -2588,17 +2569,12 @@ void SoundCapsuleAudioProcessorEditor::runSetupRepair()
                 return;
             }
             safe->status.setText("Sound Capsule setup needs attention", juce::dontSendNotification);
-            juce::AlertWindow::showAsync(
-                juce::MessageBoxOptions::makeOptionsOkCancel(
-                    juce::MessageBoxIconType::WarningIcon,
-                    "Setup could not finish",
-                    error.isNotEmpty() ? error : "The local helper still could not be started.",
-                    "Open uv Instructions", "Close", safe.getComponent()),
-                [](int result) {
-                    if (result == 1)
-                        juce::URL("https://docs.astral.sh/uv/getting-started/installation/")
-                            .launchInDefaultBrowser();
-                });
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon,
+                "Setup could not finish",
+                error.isNotEmpty() ? error
+                                   : "The self-contained helper could not be started. Reinstall Sound Capsule.",
+                "OK", safe.getComponent());
         });
     });
 }
