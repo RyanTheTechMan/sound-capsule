@@ -11,6 +11,8 @@ import sqlite3
 import tempfile
 import threading
 
+from send2trash import send2trash
+
 from .capsule import (
     CAPSULE_EXTENSION,
     Capsule,
@@ -506,13 +508,24 @@ class CapsuleLibrary:
             self._rewrite_manifest(capsule, tags=normalized)
             self.reindex()
 
-    def delete(self, capsule_id: str) -> None:
+    def move_to_trash(self, capsule_id: str) -> None:
         with self._lock:
             capsule = self.find(capsule_id)
+            paths = [capsule.path]
             if capsule.container_format == "legacy":
-                capsule.path.with_suffix(".wav").unlink(missing_ok=True)
-            capsule.path.unlink()
-            self.reindex()
+                paths.append(capsule.path.with_suffix(".wav"))
+            existing = [str(path) for path in paths if path.exists()]
+            try:
+                if existing:
+                    send2trash(existing)
+            finally:
+                # Keep the index accurate even if a provider moves only part of a
+                # multi-file legacy capsule before reporting an error.
+                self.reindex()
+
+    def delete(self, capsule_id: str) -> None:
+        """Backward-compatible API that now performs a recoverable deletion."""
+        self.move_to_trash(capsule_id)
 
     def _rewrite_manifest(self, capsule: Capsule, **changes) -> None:
         capsule.verify()

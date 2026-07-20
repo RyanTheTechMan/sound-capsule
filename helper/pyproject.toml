@@ -9,7 +9,9 @@ description = "Event-preserving FL Studio sound capsule helper"
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"
 authors = [{ name = "Sound Capsule contributors" }]
-dependencies = []
+dependencies = [
+    "Send2Trash>=1.8,<3",
+]
 
 [project.scripts]
 soundcapsule = "soundcapsule.cli:main"

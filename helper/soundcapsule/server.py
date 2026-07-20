@@ -564,9 +564,9 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             with self.operation_lock:
                 self.service.library.set_tags(args["id"], list(args.get("tags", [])))
             return {}
-        if command == "delete":
+        if command in {"trash", "delete"}:
             with self.operation_lock:
-                self.service.library.delete(args["id"])
+                self.service.library.move_to_trash(args["id"])
             return {}
         if command == "add_capsules":
             raw_paths = args.get("paths", [])

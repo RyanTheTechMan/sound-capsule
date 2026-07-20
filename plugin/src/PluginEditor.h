@@ -156,8 +156,7 @@ private:
     void promptRename(const juce::String& id, const juce::String& currentName,
                       const juce::StringArray& channelNames);
     void promptTags(const juce::String& id, const juce::String& currentTags);
-    void confirmDelete(const juce::String& id, const juce::String& name,
-                       const juce::String& path);
+    void confirmDelete(const juce::String& id, const juce::String& name);
     void updateRowHover(juce::Point<int> listPosition);
     void updateSortDirectionButton();
     void updateVolumeDisplay();

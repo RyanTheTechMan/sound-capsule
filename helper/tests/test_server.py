@@ -101,6 +101,38 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(payload["count"], 0)
             self.assertFalse(listed["capsules"])
 
+    def test_trash_command_uses_recoverable_platform_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(
+                settings.library_dir / "Disposable.flcapsule", "Disposable", preview
+            )
+
+            def fake_trash(paths: list[str]) -> None:
+                for path in paths:
+                    Path(path).unlink()
+
+            with mock.patch("soundcapsule.library.send2trash", side_effect=fake_trash) as trash:
+                with SoundCapsuleServer(settings) as server:
+                    payload = server.dispatch(
+                        {"command": "trash", "args": {"id": capsule.manifest.id}}
+                    )
+                    listed = server.dispatch({"command": "list", "args": {}})
+
+            self.assertEqual(payload, {})
+            trash.assert_called_once()
+            trashed_paths = trash.call_args.args[0]
+            self.assertEqual(
+                [Path(path).resolve() for path in trashed_paths],
+                [capsule.path.resolve()],
+            )
+            self.assertFalse(capsule.path.exists())
+            self.assertFalse(listed["capsules"])
+
     def test_list_reports_non_destructive_library_migration_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
