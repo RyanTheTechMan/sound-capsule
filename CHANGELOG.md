@@ -16,6 +16,8 @@ version's section is also used as its GitHub release notes.
   timeline, including their saved Playlist placement and control-point values.
 - Right-clicking the MIDI toolbar icon or a MIDI preview toggles automation
   curves, with the MIDI icon showing the persisted curve-visibility state.
+- Preview rows can be set to Small, Medium, or Large in Settings, resizing both
+  waveform and MIDI displays while keeping Medium as the existing default.
 
 ### Changed
 

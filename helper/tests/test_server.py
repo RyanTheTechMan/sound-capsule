@@ -681,6 +681,7 @@ class ServerTests(unittest.TestCase):
                         "args": {
                             "undo_window_minutes": 25,
                             "waveform_channels": "stereo",
+                            "preview_height": "large",
                             "import_destination": "new_pattern",
                             "volume_display": "db",
                             "start_preview_at_first_audio": False,
@@ -693,6 +694,7 @@ class ServerTests(unittest.TestCase):
                 )
                 runtime_minutes = server.service.settings.undo_window_minutes
                 runtime_waveform = server.service.settings.waveform_channels
+                runtime_preview_height = server.service.settings.preview_height
                 runtime_destination = server.service.settings.import_destination
                 runtime_volume_display = server.service.settings.volume_display
                 runtime_start_at_audio = server.service.settings.start_preview_at_first_audio
@@ -714,6 +716,9 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(runtime_minutes, 25)
             self.assertEqual(runtime_waveform, "stereo")
             self.assertEqual(persisted["waveform_channels"], "stereo")
+            self.assertEqual(initial["preview_height"], "medium")
+            self.assertEqual(runtime_preview_height, "large")
+            self.assertEqual(persisted["preview_height"], "large")
             self.assertEqual(runtime_destination, "new_pattern")
             self.assertEqual(persisted["import_destination"], "new_pattern")
             self.assertEqual(runtime_volume_display, "db")

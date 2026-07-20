@@ -2141,6 +2141,16 @@ void SoundCapsuleAudioProcessorEditor::toggleWaveformChannels()
         });
 }
 
+void SoundCapsuleAudioProcessorEditor::applyPreviewHeight(const juce::String& height)
+{
+    previewHeight = height == "small" || height == "large" ? height : "medium";
+    const auto rowHeight = previewHeight == "small" ? 54
+                         : (previewHeight == "large" ? 84 : 64);
+    list.setRowHeight(rowHeight);
+    list.updateContent();
+    list.repaint();
+}
+
 void SoundCapsuleAudioProcessorEditor::toggleAutomationCurves()
 {
     showAutomationCurves = !showAutomationCurves;
@@ -2632,6 +2642,8 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
         if (safe == nullptr) return;
         safe->waveformChannels = response.getProperty("waveform_channels", "mono").toString() == "stereo"
                                ? WaveformChannels::stereo : WaveformChannels::mono;
+        safe->applyPreviewHeight(
+            response.getProperty("preview_height", "medium").toString());
         const auto destination = response.getProperty(
             "import_destination", "current_pattern").toString();
         safe->defaultImportMode = destination == "new_pattern"
@@ -3218,6 +3230,8 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
             response.getProperty("undo_window_minutes", 10));
         const auto currentWaveformChannels =
             response.getProperty("waveform_channels", "mono").toString();
+        const auto currentPreviewHeight =
+            response.getProperty("preview_height", "medium").toString();
         const auto currentImportDestination =
             response.getProperty("import_destination", "current_pattern").toString();
         const auto currentVolumeDisplay =
@@ -3247,6 +3261,16 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
         if (auto* waveformMode = dialog->getComboBoxComponent("waveform_channels"))
             waveformMode->setSelectedId(currentWaveformChannels == "stereo" ? 2 : 1,
                                         juce::dontSendNotification);
+        juce::StringArray previewHeights;
+        previewHeights.add("Small");
+        previewHeights.add("Medium");
+        previewHeights.add("Large");
+        dialog->addComboBox("preview_height", previewHeights, "Preview height:");
+        if (auto* previewHeightMode = dialog->getComboBoxComponent("preview_height"))
+            previewHeightMode->setSelectedId(
+                currentPreviewHeight == "small" ? 1
+                    : (currentPreviewHeight == "large" ? 3 : 2),
+                juce::dontSendNotification);
         juce::StringArray importDestinations;
         importDestinations.add("Current pattern");
         importDestinations.add("New pattern");
@@ -3283,6 +3307,8 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                     const auto showInstructions = result == 2;
                     const auto* undoEditor = dialog->getTextEditor("undo_minutes");
                     const auto* waveformMode = dialog->getComboBoxComponent("waveform_channels");
+                    const auto* previewHeightMode =
+                        dialog->getComboBoxComponent("preview_height");
                     const auto* importMode = dialog->getComboBoxComponent("import_destination");
                     const auto* volumeDisplay = dialog->getComboBoxComponent("volume_display");
                     const auto undoMinutes = undoEditor != nullptr
@@ -3290,6 +3316,13 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                     const auto waveformSetting = waveformMode != nullptr
                                                && waveformMode->getSelectedId() == 2
                                                ? juce::String("stereo") : juce::String("mono");
+                    const auto previewHeightSetting = previewHeightMode != nullptr
+                                                           && previewHeightMode->getSelectedId() == 1
+                                                       ? juce::String("small")
+                                                       : (previewHeightMode != nullptr
+                                                              && previewHeightMode->getSelectedId() == 3
+                                                          ? juce::String("large")
+                                                          : juce::String("medium"));
                     const auto importSetting = importMode != nullptr
                                                     && importMode->getSelectedId() == 2
                                                 ? juce::String("new_pattern")
@@ -3317,7 +3350,8 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                     }
                     auto saveSettings =
                         [safe, appPath, showInstructions, undoMinutes, waveformSetting,
-                         importSetting, volumeDisplaySetting, checkUpdatesOnStartup,
+                         previewHeightSetting, importSetting, volumeDisplaySetting,
+                         checkUpdatesOnStartup,
                          startAtFirstAudio, normalizeWaveform, showSingleChannel]
                         (juce::var libraryResult) {
                         if (safe == nullptr) return;
@@ -3325,6 +3359,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                             "configure_setup",
                             object({{"undo_window_minutes", undoMinutes},
                                     {"waveform_channels", waveformSetting},
+                                    {"preview_height", previewHeightSetting},
                                     {"import_destination", importSetting},
                                     {"volume_display", volumeDisplaySetting},
                                     {"check_updates_on_startup", checkUpdatesOnStartup},
@@ -3332,6 +3367,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                     {"normalize_waveform_display", normalizeWaveform},
                                     {"show_single_channel_name_in_rename", showSingleChannel}}),
                             [safe, appPath, showInstructions, waveformSetting,
+                             previewHeightSetting,
                              importSetting, volumeDisplaySetting, startAtFirstAudio,
                              normalizeWaveform, showSingleChannel, libraryResult](juce::var) {
                             if (safe == nullptr) return;
@@ -3340,6 +3376,7 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
                                                    : WaveformChannels::mono;
                             safe->waveformToggle.setWaveformStereo(
                                 safe->waveformChannels == WaveformChannels::stereo);
+                            safe->applyPreviewHeight(previewHeightSetting);
                             safe->defaultImportMode = importSetting == "new_pattern"
                                                     ? ImportMode::newPattern
                                                     : (importSetting == "override_selection"

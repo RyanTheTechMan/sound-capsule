@@ -395,6 +395,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "setup_version": current.setup_version,
                 "undo_window_minutes": current.undo_window_minutes,
                 "waveform_channels": current.waveform_channels,
+                "preview_height": current.preview_height,
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
                 "start_preview_at_first_audio": current.start_preview_at_first_audio,
@@ -415,6 +416,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 current = Settings.load(self.settings.data_dir)
                 undo_window_minutes = int(args.get("undo_window_minutes", current.undo_window_minutes))
                 waveform_channels = str(args.get("waveform_channels", current.waveform_channels))
+                preview_height = str(args.get("preview_height", current.preview_height))
                 import_destination = str(
                     args.get("import_destination", current.import_destination)
                 )
@@ -457,6 +459,8 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                     raise ValueError("Undo Import duration must be between 1 and 1440 minutes")
                 if waveform_channels not in ("mono", "stereo"):
                     raise ValueError("Waveform display must be mono or stereo")
+                if preview_height not in ("small", "medium", "large"):
+                    raise ValueError("Preview height must be Small, Medium, or Large")
                 if import_destination not in (
                     "current_pattern", "new_pattern", "override_selection"
                 ):
@@ -467,6 +471,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 current.setup_version = 2
                 current.undo_window_minutes = undo_window_minutes
                 current.waveform_channels = waveform_channels
+                current.preview_height = preview_height
                 current.import_destination = import_destination
                 current.volume_display = volume_display
                 current.start_preview_at_first_audio = start_preview_at_first_audio
@@ -483,6 +488,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.settings.setup_version = current.setup_version
                 self.settings.undo_window_minutes = current.undo_window_minutes
                 self.settings.waveform_channels = current.waveform_channels
+                self.settings.preview_height = current.preview_height
                 self.settings.import_destination = current.import_destination
                 self.settings.volume_display = current.volume_display
                 self.settings.start_preview_at_first_audio = current.start_preview_at_first_audio
@@ -496,6 +502,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "setup_version": current.setup_version,
                 "undo_window_minutes": current.undo_window_minutes,
                 "waveform_channels": current.waveform_channels,
+                "preview_height": current.preview_height,
                 "import_destination": current.import_destination,
                 "volume_display": current.volume_display,
                 "start_preview_at_first_audio": current.start_preview_at_first_audio,

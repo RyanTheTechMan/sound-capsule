@@ -91,6 +91,7 @@ class Settings:
     setup_version: int = 0
     undo_window_minutes: int = 10
     waveform_channels: str = "mono"
+    preview_height: str = "medium"
     import_destination: str = "current_pattern"
     volume_display: str = "percent"
     start_preview_at_first_audio: bool = True
@@ -112,6 +113,8 @@ class Settings:
             raise ValueError("undo_window_minutes must be between 1 and 1440")
         if self.waveform_channels not in ("mono", "stereo"):
             raise ValueError("waveform_channels must be 'mono' or 'stereo'")
+        if self.preview_height not in ("small", "medium", "large"):
+            raise ValueError("preview_height must be 'small', 'medium', or 'large'")
         if self.import_destination not in (
             "current_pattern", "new_pattern", "override_selection"
         ):

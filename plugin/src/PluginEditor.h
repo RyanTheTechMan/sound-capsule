@@ -176,6 +176,7 @@ private:
     void updateRowHover(juce::Point<int> listPosition);
     void updateSortDirectionButton();
     void updateVolumeDisplay();
+    void applyPreviewHeight(const juce::String& height);
     void toggleWaveformChannels();
     void toggleAutomationCurves();
     void toggleTagSearch(const juce::String& tag);
@@ -222,6 +223,7 @@ private:
     juce::String availableInstallerUrl;
     juce::String availableChecksumUrl;
     juce::String availableReleaseUrl;
+    juce::String previewHeight{"medium"};
     std::atomic<bool> operationProgressPollInFlight{false};
     std::atomic<bool> operationCancelRequested{false};
     std::atomic<bool> updateCheckInFlight{false};
