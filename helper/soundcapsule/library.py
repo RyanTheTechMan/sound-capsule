@@ -55,6 +55,7 @@ class CapsuleLibrary:
             "converted": [],
             "failed": [],
         }
+        self.last_health_summary: list[dict[str, str]] = []
         self.library_dir.mkdir(parents=True, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.session() as database:
@@ -106,6 +107,10 @@ class CapsuleLibrary:
     def reindex(self) -> int:
         with self._lock:
             self.last_migration_summary = self._migrate_legacy_capsules()
+            self.last_health_summary = []
+            migration_failures = {
+                failure["source"] for failure in self.last_migration_summary["failed"]
+            }
             seen: set[str] = set()
             count = 0
             with self.session() as database:
@@ -126,7 +131,11 @@ class CapsuleLibrary:
                         capsule.verify()
                         manifest = capsule.manifest
                         self._remove_legacy_preview(capsule)
-                    except Exception:
+                    except Exception as error:
+                        if str(path) not in migration_failures:
+                            self.last_health_summary.append(
+                                {"source": str(path), "error": str(error)}
+                            )
                         continue
                     seen.add(resolved)
                     plugin_names = []

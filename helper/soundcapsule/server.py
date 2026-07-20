@@ -534,6 +534,8 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                     offset=args.get("offset", 0),
                 ),
                 "migration_summary": self.service.library_migration_summary,
+                "health_summary": self.service.library.last_health_summary,
+                "library_dir": str(self.service.library.library_dir),
             }
         if command == "refresh_library":
             with self.operation_lock:

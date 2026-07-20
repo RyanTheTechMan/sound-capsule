@@ -192,6 +192,7 @@ private:
     uint32_t operationOverlayHideAt = 0;
     uint64_t listGeneration = 0;
     bool migrationNoticeShown = false;
+    juce::String libraryHealthSignature;
     uint64_t previewGeneration = 0;
     juce::String suggestedCapsuleName;
     juce::String playingCapsuleId;

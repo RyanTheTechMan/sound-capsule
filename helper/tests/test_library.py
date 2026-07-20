@@ -62,6 +62,22 @@ class LibraryTests(unittest.TestCase):
             self.assertFalse(list(library_dir.glob("*.flcapsule.wav")))
             self.assertEqual(len(library.last_migration_summary["failed"]), 1)
 
+    def test_reindex_reports_unreadable_playable_capsules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library_dir = root / "library"
+            library_dir.mkdir()
+            broken = library_dir / "Broken.flcapsule.wav"
+            broken.write_bytes(b"not a capsule")
+            library = CapsuleLibrary(library_dir, root / "index.sqlite3")
+
+            self.assertEqual(library.reindex(), 0)
+
+            self.assertEqual(broken.read_bytes(), b"not a capsule")
+            self.assertEqual(len(library.last_health_summary), 1)
+            self.assertEqual(library.last_health_summary[0]["source"], str(broken))
+            self.assertTrue(library.last_health_summary[0]["error"])
+
     def test_legacy_cleanup_failure_rolls_back_the_playable_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

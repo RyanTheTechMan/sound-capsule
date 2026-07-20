@@ -2165,6 +2165,51 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
         libraryEmptyState.toFront(false);
         preloadVisibleRows();
         auto statusText = juce::String(rows.size()) + " capsules";
+        const auto healthValue = response.getProperty("health_summary", juce::var());
+        const auto* health = healthValue.getArray();
+        const auto healthCount = health != nullptr ? health->size() : 0;
+        if (healthCount > 0)
+            statusText << "; " << healthCount
+                       << (healthCount == 1 ? " file needs attention" : " files need attention");
+        juce::String healthSignature;
+        juce::String healthDetails;
+        if (health != nullptr)
+        {
+            auto shown = 0;
+            for (const auto& issue : *health)
+            {
+                const auto source = issue.getProperty("source", "").toString();
+                const auto error = issue.getProperty("error", "").toString();
+                healthSignature << source << "\n" << error << "\n";
+                if (shown < 12)
+                {
+                    healthDetails << juce::File(source).getFileName()
+                                  << ": " << error << "\n";
+                    ++shown;
+                }
+            }
+            if (healthCount > shown)
+                healthDetails << "...and " << healthCount - shown << " more";
+        }
+        if (healthCount > 0 && healthSignature != libraryHealthSignature)
+        {
+            libraryHealthSignature = healthSignature;
+            const auto libraryDirectory = response.getProperty("library_dir", "").toString();
+            juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+            juce::AlertWindow::showAsync(
+                juce::MessageBoxOptions::makeOptionsOkCancel(
+                    juce::MessageBoxIconType::WarningIcon,
+                    "Library needs attention",
+                    "Sound Capsule left these files unchanged because they could not be read:\n\n"
+                        + healthDetails.trimEnd(),
+                    "Show Library", "Dismiss", this),
+                [safe, libraryDirectory](int result) {
+                    if (safe != nullptr && result == 1 && libraryDirectory.isNotEmpty())
+                        juce::File(libraryDirectory).revealToUser();
+                });
+        }
+        else if (healthCount == 0)
+            libraryHealthSignature.clear();
         if (!migrationNoticeShown)
         {
             migrationNoticeShown = true;
