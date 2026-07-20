@@ -14,11 +14,13 @@ public:
     void mouseDown(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
     void setWaveformStereo(bool stereo) { stereoWaveform = stereo; repaint(); }
+    void setMidiAutomationVisible(bool visible);
     std::function<void()> onRightClick;
 
 private:
     Icon icon;
     bool stereoWaveform = false;
+    bool midiAutomationVisible = true;
     bool rightClickInProgress = false;
 };
 
@@ -175,6 +177,7 @@ private:
     void updateSortDirectionButton();
     void updateVolumeDisplay();
     void toggleWaveformChannels();
+    void toggleAutomationCurves();
     void toggleTagSearch(const juce::String& tag);
     std::vector<std::pair<juce::Rectangle<int>, juce::String>>
         tagHitAreas(const CapsuleRow&, int rowWidth) const;
@@ -236,6 +239,7 @@ private:
     bool startPreviewAtFirstAudio = true;
     bool pendingPreviewStartsAtAudio = false;
     bool normalizeWaveformDisplay = false;
+    bool showAutomationCurves = true;
     bool showSingleChannelNameInRename = false;
     std::function<void()> retryOperation;
 

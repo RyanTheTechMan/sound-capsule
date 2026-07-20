@@ -688,6 +688,18 @@ IconToggleButton::IconToggleButton(Icon iconToUse)
     setTooltip(icon == Icon::waveform ? "Show waveform"
                : (icon == Icon::midi ? "Show MIDI"
                   : (icon == Icon::loop ? "Loop previews" : "Show favorites only")));
+    if (icon == Icon::midi)
+        setMidiAutomationVisible(true);
+}
+
+void IconToggleButton::setMidiAutomationVisible(bool visible)
+{
+    midiAutomationVisible = visible;
+    if (icon == Icon::midi)
+        setTooltip(visible
+            ? "Show MIDI. Automation curves on (right-click to hide)"
+            : "Show MIDI. Automation curves off (right-click to show)");
+    repaint();
 }
 
 void IconToggleButton::paintButton(juce::Graphics& graphics, bool highlighted, bool down)
@@ -735,6 +747,25 @@ void IconToggleButton::paintButton(juce::Graphics& graphics, bool highlighted, b
                                       width, height, 1.0f);
         graphics.fillRoundedRectangle(iconArea.getRight() - width, iconArea.getY(),
                                       width, height, 1.0f);
+        const auto badge = juce::Rectangle<float>(
+            iconArea.getRight() - 8.5f, iconArea.getBottom() - 8.0f, 8.5f, 8.0f);
+        juce::Path automationCurve;
+        automationCurve.startNewSubPath(badge.getX(), badge.getBottom() - 1.0f);
+        automationCurve.lineTo(badge.getRight(), badge.getY() + 1.0f);
+        graphics.setColour(midiAutomationVisible
+            ? accent : juce::Colours::grey.withAlpha(0.62f));
+        graphics.strokePath(automationCurve, juce::PathStrokeType(1.25f));
+        if (midiAutomationVisible)
+        {
+            graphics.fillEllipse(badge.getX() - 0.8f, badge.getBottom() - 1.8f, 2.0f, 2.0f);
+            graphics.fillEllipse(badge.getRight() - 1.2f, badge.getY(), 2.0f, 2.0f);
+        }
+        else
+        {
+            graphics.setColour(juce::Colours::lightgrey.withAlpha(0.74f));
+            graphics.drawLine(badge.getX() + 0.5f, badge.getY(),
+                              badge.getRight(), badge.getBottom() - 0.5f, 1.2f);
+        }
     }
     else if (icon == Icon::loop)
     {
@@ -1079,6 +1110,7 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
             midiToggle.setToggleState(true, juce::dontSendNotification);
         list.repaint();
     };
+    midiToggle.onRightClick = [this] { toggleAutomationCurves(); };
     loopToggle.onClick = [this] {
         audioProcessor.setPreviewLooping(loopToggle.getToggleState());
         completedPreviewId.clear();
@@ -1576,6 +1608,8 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         graphics.setColour(juce::Colours::grey.withAlpha(0.25f));
         graphics.drawRect(area, 1);
         auto renderAutomations = [&](bool played) {
+            if (!showAutomationCurves)
+                return;
             for (const auto& automation : row.automations)
             {
                 if (automation.points.empty())
@@ -1761,11 +1795,20 @@ void SoundCapsuleAudioProcessorEditor::listBoxItemClicked(int rowNumber, const j
         const auto previewX = 46;
         const auto previewWidth = actionsX - previewX - 8;
         auto clickedWaveform = waveformToggle.getToggleState() && !midiToggle.getToggleState();
+        auto clickedMidi = midiToggle.getToggleState() && !waveformToggle.getToggleState();
         if (waveformToggle.getToggleState() && midiToggle.getToggleState())
+        {
             clickedWaveform = event.x < previewX + (previewWidth - 6) / 2;
+            clickedMidi = event.x >= previewX + (previewWidth - 6) / 2 + 6;
+        }
         if (clickedWaveform)
         {
             toggleWaveformChannels();
+            return;
+        }
+        if (clickedMidi)
+        {
+            toggleAutomationCurves();
             return;
         }
     }
@@ -2095,6 +2138,25 @@ void SoundCapsuleAudioProcessorEditor::toggleWaveformChannels()
             if (safe != nullptr)
                 safe->status.setText("Waveform: " + juce::String(mode),
                                      juce::dontSendNotification);
+        });
+}
+
+void SoundCapsuleAudioProcessorEditor::toggleAutomationCurves()
+{
+    showAutomationCurves = !showAutomationCurves;
+    midiToggle.setMidiAutomationVisible(showAutomationCurves);
+    list.repaint();
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    sendCommand(
+        "configure_setup", object({{"show_automation_curves", showAutomationCurves}}),
+        [safe](juce::var response) {
+            if (safe == nullptr)
+                return;
+            const auto visible = static_cast<bool>(
+                response.getProperty("show_automation_curves", true));
+            safe->status.setText(
+                visible ? "Automation curves shown" : "Automation curves hidden",
+                juce::dontSendNotification);
         });
 }
 
@@ -2583,10 +2645,13 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
             response.getProperty("start_preview_at_first_audio", true));
         safe->normalizeWaveformDisplay = static_cast<bool>(
             response.getProperty("normalize_waveform_display", false));
+        safe->showAutomationCurves = static_cast<bool>(
+            response.getProperty("show_automation_curves", true));
         safe->showSingleChannelNameInRename = static_cast<bool>(
             response.getProperty("show_single_channel_name_in_rename", false));
         safe->updateVolumeDisplay();
         safe->waveformToggle.setWaveformStereo(safe->waveformChannels == WaveformChannels::stereo);
+        safe->midiToggle.setMidiAutomationVisible(safe->showAutomationCurves);
         safe->list.repaint();
         const auto generalSetupComplete = static_cast<bool>(
             response.getProperty("setup_complete", false));

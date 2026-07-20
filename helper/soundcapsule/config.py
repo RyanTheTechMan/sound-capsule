@@ -95,6 +95,7 @@ class Settings:
     volume_display: str = "percent"
     start_preview_at_first_audio: bool = True
     normalize_waveform_display: bool = False
+    show_automation_curves: bool = True
     show_single_channel_name_in_rename: bool = False
     check_updates_on_startup: bool = True
     server_host: str = "127.0.0.1"

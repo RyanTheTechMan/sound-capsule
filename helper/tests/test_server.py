@@ -685,6 +685,7 @@ class ServerTests(unittest.TestCase):
                             "volume_display": "db",
                             "start_preview_at_first_audio": False,
                             "normalize_waveform_display": True,
+                            "show_automation_curves": False,
                             "show_single_channel_name_in_rename": True,
                             "check_updates_on_startup": False,
                         },
@@ -696,6 +697,7 @@ class ServerTests(unittest.TestCase):
                 runtime_volume_display = server.service.settings.volume_display
                 runtime_start_at_audio = server.service.settings.start_preview_at_first_audio
                 runtime_normalize = server.service.settings.normalize_waveform_display
+                runtime_automation_curves = server.service.settings.show_automation_curves
                 runtime_show_single = server.service.settings.show_single_channel_name_in_rename
                 runtime_update_check = server.service.settings.check_updates_on_startup
                 persisted = server.dispatch({"command": "setup_status", "args": {}})
@@ -704,6 +706,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(initial["check_updates_on_startup"])
             self.assertTrue(initial["start_preview_at_first_audio"])
             self.assertFalse(initial["normalize_waveform_display"])
+            self.assertTrue(initial["show_automation_curves"])
             self.assertFalse(initial["show_single_channel_name_in_rename"])
             self.assertTrue(persisted["setup_complete"])
             self.assertEqual(persisted["setup_version"], 2)
@@ -719,6 +722,8 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(persisted["start_preview_at_first_audio"])
             self.assertTrue(runtime_normalize)
             self.assertTrue(persisted["normalize_waveform_display"])
+            self.assertFalse(runtime_automation_curves)
+            self.assertFalse(persisted["show_automation_curves"])
             self.assertTrue(runtime_show_single)
             self.assertTrue(persisted["show_single_channel_name_in_rename"])
             self.assertFalse(runtime_update_check)

@@ -399,6 +399,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "volume_display": current.volume_display,
                 "start_preview_at_first_audio": current.start_preview_at_first_audio,
                 "normalize_waveform_display": current.normalize_waveform_display,
+                "show_automation_curves": current.show_automation_curves,
                 "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
                 "check_updates_on_startup": current.check_updates_on_startup,
                 "library_dir": str(current.library_dir),
@@ -425,6 +426,9 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 ))
                 normalize_waveform_display = bool(args.get(
                     "normalize_waveform_display", current.normalize_waveform_display
+                ))
+                show_automation_curves = bool(args.get(
+                    "show_automation_curves", current.show_automation_curves
                 ))
                 show_single_channel_name_in_rename = bool(args.get(
                     "show_single_channel_name_in_rename",
@@ -467,6 +471,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 current.volume_display = volume_display
                 current.start_preview_at_first_audio = start_preview_at_first_audio
                 current.normalize_waveform_display = normalize_waveform_display
+                current.show_automation_curves = show_automation_curves
                 current.show_single_channel_name_in_rename = show_single_channel_name_in_rename
                 current.check_updates_on_startup = check_updates_on_startup
                 current.auto_open_with_fl = False  # Retired process-watcher preference.
@@ -482,6 +487,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.settings.volume_display = current.volume_display
                 self.settings.start_preview_at_first_audio = current.start_preview_at_first_audio
                 self.settings.normalize_waveform_display = current.normalize_waveform_display
+                self.settings.show_automation_curves = current.show_automation_curves
                 self.settings.show_single_channel_name_in_rename = current.show_single_channel_name_in_rename
                 self.settings.check_updates_on_startup = current.check_updates_on_startup
                 self.settings.auto_open_with_fl = current.auto_open_with_fl
@@ -494,6 +500,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "volume_display": current.volume_display,
                 "start_preview_at_first_audio": current.start_preview_at_first_audio,
                 "normalize_waveform_display": current.normalize_waveform_display,
+                "show_automation_curves": current.show_automation_curves,
                 "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
                 "check_updates_on_startup": current.check_updates_on_startup,
             }
