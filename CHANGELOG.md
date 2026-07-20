@@ -18,6 +18,13 @@ version's section is also used as its GitHub release notes.
 - Capsule schema 3 stores Automation Clip target bindings and Playlist
   instances while preserving imports of schema 1 and 2 capsules.
 
+### Fixed
+
+- Projects first saved from an untitled FL session now replace FL's blank or
+  placeholder title with the discovered `.flp` name. That association survives
+  switching to another project and back without overriding a different current
+  project that happens to have an identical Channel Rack.
+
 ## [0.3.4] - 2026-07-13
 
 ### Changed

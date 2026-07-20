@@ -168,6 +168,16 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(_project_title_from_window_caption("FL Studio 2026"), "")
 
+    def test_session_treats_fl_unsaved_project_label_as_missing_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = BridgeQueue(Path(temporary))
+            session = self._bridge_session(project_title="Unsaved Project")
+            with mock.patch.object(BridgeSession, "read", return_value=session):
+                resolved = queue.session()
+
+            self.assertIs(resolved, session)
+            self.assertEqual(resolved.project_title, "")
+
     def test_windows_session_prefers_exact_host_window_project_over_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             queue = BridgeQueue(Path(temporary))

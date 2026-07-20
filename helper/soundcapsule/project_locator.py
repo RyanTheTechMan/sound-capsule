@@ -313,7 +313,16 @@ class ProjectLocator:
                 if valid_cached and (
                     candidate_validator is None or candidate_validator(valid_cached[0])
                 ):
-                    return valid_cached[0]
+                    matching_recent = [
+                        path for path in recent
+                        if candidate_validator is None or candidate_validator(path)
+                    ]
+                    # A rack-signature association survives switching away and
+                    # back, but never overrides a different current MRU entry
+                    # with the same rack. If FL's MRU has not settled yet, the
+                    # validated cached path is still the safest identity.
+                    if not matching_recent or matching_recent[0] == valid_cached[0]:
+                        return valid_cached[0]
         if candidate_validator is not None:
             recent = [path for path in recent if candidate_validator(path)]
         if not title.strip():

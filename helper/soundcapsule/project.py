@@ -108,7 +108,6 @@ class CapsuleService:
     @staticmethod
     def _session_project_cache_key(session: BridgeSession) -> str:
         signature = {
-            "load_sequence": session.load_sequence,
             "ppq": session.ppq,
             "channel_count": session.channel_count,
             "channel_names": [name.strip().casefold() for name in session.channel_names],

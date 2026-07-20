@@ -552,9 +552,10 @@ class ProjectServiceTests(unittest.TestCase):
             started = time.time()
             os.utime(old, (started - 60, started - 60))
             os.utime(saved, (started + 1, started + 1))
+            recent = [old, saved]
             locator = ProjectLocator(
                 [], cache_path=cache,
-                recent_provider=lambda: [old, saved], indexed_provider=lambda _: [],
+                recent_provider=lambda: recent, indexed_provider=lambda _: [],
             )
 
             self.assertEqual(
@@ -564,12 +565,56 @@ class ProjectServiceTests(unittest.TestCase):
                 ),
                 saved.resolve(),
             )
+            # FL moves the project being reopened to the head of its MRU. The
+            # durable rack association should survive a new load sequence.
+            recent[:] = [saved, old]
             self.assertEqual(
                 locator.find_current(
                     "", candidate_validator=lambda _: True, cache_key="rack-signature"
                 ),
                 saved.resolve(),
             )
+
+    def test_rack_cache_does_not_override_a_different_current_recent_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "paths.json"
+            previous = root / "previous.flp"
+            current = root / "current.flp"
+            previous.write_bytes(fixture_project().to_bytes())
+            current.write_bytes(fixture_project().to_bytes())
+            locator = ProjectLocator(
+                [], cache_path=cache,
+                recent_provider=lambda: [previous], indexed_provider=lambda _: [],
+            )
+            self.assertEqual(
+                locator.find_current(
+                    "", candidate_validator=lambda _: True,
+                    cache_key="rack-signature",
+                ),
+                previous.resolve(),
+            )
+            locator.recent_provider = lambda: [current, previous]
+
+            with self.assertRaisesRegex(FLPUnsupportedError, "save the current project"):
+                locator.find_current(
+                    "", candidate_validator=lambda _: True,
+                    cache_key="rack-signature",
+                )
+
+    def test_rack_cache_key_survives_switching_away_and_back(self) -> None:
+        session = BridgeSession(
+            timestamp=0, project_title="", midi_api_version=42,
+            selected_channels=[0], selected_channel_names=["Serum Lead"],
+            current_pattern=3, pattern_name="Verse", pattern_length_steps=16,
+            ppq=96, changed=0, save_sequence=1, last_save_requested_at=0.0,
+            load_sequence=1, last_load_status=100, last_load_at=0.0,
+            channel_count=2, channel_names=["Serum Lead", "Kick"],
+        )
+        before = CapsuleService._session_project_cache_key(session)
+        session.load_sequence = 7
+
+        self.assertEqual(CapsuleService._session_project_cache_key(session), before)
 
     def test_project_locator_uses_the_flp_modified_by_the_save(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

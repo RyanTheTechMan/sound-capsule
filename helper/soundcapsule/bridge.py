@@ -133,6 +133,19 @@ def _project_title_from_window_caption(caption: str) -> str:
     return filename[:-4].strip()
 
 
+def _normalized_project_title(title: str) -> str:
+    """Treat FL's untitled-project labels as missing project identity."""
+    value = title.strip()
+    if value.casefold() in {
+        "unsaved project",
+        "unnamed project",
+        "untitled",
+        "untitled project",
+    }:
+        return ""
+    return value
+
+
 def _windows_project_title(process_id: int) -> str:
     """Read the project filename from the top-level window owned by one FL process."""
     if sys.platform != "win32" or process_id <= 0:
@@ -192,6 +205,7 @@ class BridgeQueue:
 
     def session(self, *, maximum_age: float = 10.0) -> BridgeSession:
         session = BridgeSession.read(self.session_path)
+        session.project_title = _normalized_project_title(session.project_title)
         windows_host_alive = sys.platform == "win32" and _windows_process_is_running(
             session.host_pid, session.host_executable
         )
