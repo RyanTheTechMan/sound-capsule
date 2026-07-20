@@ -1449,6 +1449,14 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         graphics.setColour(juce::Colours::grey.withAlpha(0.35f));
         graphics.drawHorizontalLine(area.getCentreY(), static_cast<float>(area.getX()),
                                     static_cast<float>(area.getRight()));
+        if (row.thumbnail == nullptr || !row.thumbnail->isFullyLoaded())
+        {
+            graphics.setColour(juce::Colours::lightgrey.withAlpha(0.46f));
+            graphics.setFont(juce::FontOptions(10.0f));
+            graphics.drawFittedText("Loading waveform...", area.reduced(5, 0),
+                                    juce::Justification::centred, 1);
+            return;
+        }
         if (row.thumbnail != nullptr && row.thumbnail->getTotalLength() > 0.0)
         {
             const auto verticalZoom = soundcapsule::preview::waveformVerticalZoom(
