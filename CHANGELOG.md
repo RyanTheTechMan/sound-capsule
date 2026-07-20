@@ -12,6 +12,8 @@ version's section is also used as its GitHub release notes.
   their selected generator targets, previewed in Song mode, and imported into
   the current Playlist arrangement at the playhead. Individual saves bundle
   each selected automation clip only with its selected target channel.
+- Automation curves are drawn over the MIDI preview on the same musical
+  timeline, including their saved Playlist placement and control-point values.
 
 ### Changed
 

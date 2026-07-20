@@ -1575,6 +1575,47 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         const auto midiScale = 1.0f / row.midiTimelineEnd;
         graphics.setColour(juce::Colours::grey.withAlpha(0.25f));
         graphics.drawRect(area, 1);
+        auto renderAutomations = [&](bool played) {
+            for (const auto& automation : row.automations)
+            {
+                if (automation.points.empty())
+                    continue;
+                juce::Path path;
+                for (size_t index = 0; index < automation.points.size(); ++index)
+                {
+                    const auto& point = automation.points[index];
+                    const auto x = static_cast<float>(area.getX())
+                                 + point.position * midiScale
+                                       * static_cast<float>(area.getWidth());
+                    const auto y = static_cast<float>(area.getBottom() - 2)
+                                 - juce::jlimit(0.0f, 1.0f, point.value)
+                                       * static_cast<float>(juce::jmax(1, area.getHeight() - 4));
+                    if (index == 0)
+                        path.startNewSubPath(x, y);
+                    else
+                        path.lineTo(x, y);
+                }
+                const auto colour = notePlayingColour(automation.channel)
+                                        .withAlpha(played ? 0.98f : 0.72f);
+                graphics.setColour(juce::Colours::black.withAlpha(played ? 0.42f : 0.28f));
+                graphics.strokePath(path, juce::PathStrokeType(3.4f));
+                graphics.setColour(colour);
+                graphics.strokePath(path, juce::PathStrokeType(1.45f));
+                for (const auto& point : automation.points)
+                {
+                    const auto x = static_cast<float>(area.getX())
+                                 + point.position * midiScale
+                                       * static_cast<float>(area.getWidth());
+                    const auto y = static_cast<float>(area.getBottom() - 2)
+                                 - juce::jlimit(0.0f, 1.0f, point.value)
+                                       * static_cast<float>(juce::jmax(1, area.getHeight() - 4));
+                    graphics.setColour(juce::Colours::black.withAlpha(0.48f));
+                    graphics.fillEllipse(x - 2.4f, y - 2.4f, 4.8f, 4.8f);
+                    graphics.setColour(colour);
+                    graphics.fillEllipse(x - 1.45f, y - 1.45f, 2.9f, 2.9f);
+                }
+            }
+        };
         auto render = [&](bool played) {
             for (const auto& note : row.notes)
             {
@@ -1664,6 +1705,16 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
                     y - thickness * 0.5f - 2.0f,
                     edgeDepth, thickness + 4.0f, 1.2f);
             }
+        }
+        renderAutomations(false);
+        if (isPlaying || isCompleted)
+        {
+            const auto midiProgress = juce::jlimit(
+                0.0, 1.0, previewProgress / static_cast<double>(row.midiPlaybackEnd));
+            juce::Graphics::ScopedSaveState state(graphics);
+            graphics.reduceClipRegion(
+                area.withWidth(juce::roundToInt(midiProgress * area.getWidth())));
+            renderAutomations(true);
         }
     };
 
@@ -2120,6 +2171,8 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
                 auto channelValues = juce::JSON::parse(
                     value.getProperty("channel_names", "[]").toString());
                 auto noteValues = juce::JSON::parse(value.getProperty("note_preview", "[]").toString());
+                auto automationValues = juce::JSON::parse(
+                    value.getProperty("automation_preview", "[]").toString());
                 juce::StringArray pluginNames, tagNames;
                 if (auto* array = plugins.getArray()) for (const auto& item : *array) pluginNames.add(item.toString());
                 if (auto* array = tagValues.getArray()) for (const auto& item : *array) tagNames.add(item.toString());
@@ -2134,14 +2187,40 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
                                                  static_cast<float>((*note)[2]),
                                                  note->size() >= 4
                                                      ? static_cast<int>((*note)[3]) : 0});
-                if (!row.notes.empty())
+                if (auto* curves = automationValues.getArray())
                 {
-                    row.midiTimelineEnd = 0.0f;
-                    for (const auto& note : row.notes)
-                        row.midiTimelineEnd = juce::jmax(
-                            row.midiTimelineEnd, note.start + note.length);
-                    row.midiTimelineEnd = juce::jlimit(0.000001f, 1.0f, row.midiTimelineEnd);
+                    for (const auto& item : *curves)
+                    {
+                        auto* curve = item.getArray();
+                        if (curve == nullptr || curve->size() < 2)
+                            continue;
+                        AutomationPreview automation;
+                        automation.channel = static_cast<int>((*curve)[0]);
+                        if (auto* points = (*curve)[1].getArray())
+                            for (const auto& pointValue : *points)
+                                if (auto* point = pointValue.getArray();
+                                    point != nullptr && point->size() >= 2)
+                                    automation.points.push_back({
+                                        static_cast<float>((*point)[0]),
+                                        static_cast<float>((*point)[1]),
+                                        point->size() >= 3
+                                            ? static_cast<float>((*point)[2]) : 0.0f,
+                                    });
+                        if (!automation.points.empty())
+                            row.automations.push_back(std::move(automation));
+                    }
                 }
+                row.midiTimelineEnd = 0.0f;
+                for (const auto& note : row.notes)
+                    row.midiTimelineEnd = juce::jmax(
+                        row.midiTimelineEnd, note.start + note.length);
+                for (const auto& automation : row.automations)
+                    for (const auto& point : automation.points)
+                        row.midiTimelineEnd = juce::jmax(
+                            row.midiTimelineEnd, point.position);
+                row.midiTimelineEnd = juce::jlimit(
+                    0.000001f, 1.0f,
+                    row.midiTimelineEnd > 0.0f ? row.midiTimelineEnd : 1.0f);
                 row.midiPlaybackEnd = juce::jlimit(
                     0.000001f, 1.0f,
                     static_cast<float>(value.getProperty("midi_playback_end", 1.0)));

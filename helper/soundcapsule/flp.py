@@ -13,6 +13,7 @@ changes remain intentionally out of scope.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import struct
 from typing import Iterator, Sequence
@@ -43,6 +44,7 @@ EVENT_PLUGIN_NAME = 203
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
 EVENT_AUTOMATION_BINDINGS = 216
+EVENT_AUTOMATION_POINTS = 234
 EVENT_PLAYLIST = 233
 EVENT_ARRANGEMENT_NEW = 99
 EVENT_CURRENT_ARRANGEMENT = 100
@@ -83,6 +85,8 @@ RACK_GLOBAL_EVENT_IDS = frozenset({11, 13, 133})
 NOTE_STRUCT = struct.Struct("<IHHIHHBBBBBBBB")
 NOTE_SIZE = NOTE_STRUCT.size
 AUTOMATION_BINDING_STRUCT = struct.Struct("<III")
+AUTOMATION_POINT_STRUCT = struct.Struct("<ddf4s")
+AUTOMATION_POINT_HEADER_SIZE = 21
 PLAYLIST_ITEM_SIZES = (88, 60, 32)
 
 SUPPORTED_PROJECT_MAJOR = 25
@@ -323,6 +327,35 @@ class AutomationBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class AutomationPoint:
+    position: float
+    value: float
+    tension: float
+
+    @classmethod
+    def parse_many(cls, payload: bytes) -> list["AutomationPoint"]:
+        if len(payload) < AUTOMATION_POINT_HEADER_SIZE:
+            raise FLPFormatError("automation point payload is truncated")
+        count = struct.unpack_from("<I", payload, 17)[0]
+        required = AUTOMATION_POINT_HEADER_SIZE + count * AUTOMATION_POINT_STRUCT.size
+        if required > len(payload):
+            raise FLPFormatError("automation point payload is truncated")
+        if count > 1_000_000:
+            raise FLPFormatError("automation point payload is unreasonably large")
+        position = 0.0
+        result: list[AutomationPoint] = []
+        for offset in range(
+            AUTOMATION_POINT_HEADER_SIZE, required, AUTOMATION_POINT_STRUCT.size
+        ):
+            delta, value, tension, _ = AUTOMATION_POINT_STRUCT.unpack_from(payload, offset)
+            if not all(math.isfinite(item) for item in (delta, value, tension)):
+                raise FLPFormatError("automation point payload contains non-finite values")
+            position += delta
+            result.append(cls(position, value, tension))
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class PlaylistItem:
     raw: bytes
 
@@ -481,6 +514,10 @@ class ChannelSection:
             if event.id == EVENT_CHANNEL_SAMPLE_PATH:
                 return parse_text(event.payload)
         return None
+
+    def automation_points(self) -> list[AutomationPoint]:
+        event = next((event for event in self.events if event.id == EVENT_AUTOMATION_POINTS), None)
+        return AutomationPoint.parse_many(event.payload) if event is not None else []
 
     def remap(self, iid: int, *, route_to_master: bool = False) -> "ChannelSection":
         remapped: list[Event] = []

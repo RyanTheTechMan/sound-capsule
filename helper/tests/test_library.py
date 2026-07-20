@@ -14,6 +14,7 @@ from soundcapsule.capsule import Capsule
 from soundcapsule.library import CapsuleLibrary
 from test_flp import (
     fixture_project,
+    fixture_project_with_automation,
     make_legacy_capsule,
     write_float_silence,
     write_silence,
@@ -289,6 +290,36 @@ class LibraryTests(unittest.TestCase):
             self.assertAlmostEqual(notes[0][0], 24 / note_end, places=6)
             self.assertAlmostEqual(notes[0][1], 96 / note_end, places=6)
             self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
+
+    def test_automation_preview_overlays_the_shared_midi_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview, duration_seconds=4.0)
+            project = fixture_project_with_automation()
+            capsule = Capsule.build(
+                root / "library" / "Automated.flcapsule",
+                name="Automated",
+                project=project,
+                channel_ids=[2, 9],
+                pattern_id=3,
+                pattern_length_steps=16,
+                preview_wav=preview,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+            library.reindex()
+
+            row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
+            notes = json.loads(row["note_preview"])
+            automation = json.loads(row["automation_preview"])
+
+            self.assertEqual(automation, [[1, [[0.0, 0.25, 0.0], [1.0, 0.75, 0.5]]]])
+            self.assertAlmostEqual(notes[0][0], 24 / 384, places=6)
+            self.assertAlmostEqual(notes[0][1], 96 / 384, places=6)
+            timeline_seconds = 384 * 60.0 / (project.ppq * project.tempo_bpm)
+            self.assertAlmostEqual(
+                row["midi_playback_end"], timeline_seconds / 4.0, places=6
+            )
 
     def test_v2_midi_preview_uses_float_render_duration_on_mac(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -14,6 +14,7 @@ from soundcapsule.flp import (
     AUTOMATION_BINDING_STRUCT,
     EVENT_ARRANGEMENT_NEW,
     EVENT_AUTOMATION_BINDINGS,
+    EVENT_AUTOMATION_POINTS,
     EVENT_CHANNEL_NEW,
     EVENT_CHANNEL_ENABLED,
     EVENT_CHANNEL_ROUTED_TO,
@@ -108,6 +109,20 @@ def playlist_item(
     return bytes(raw)
 
 
+def automation_points(*points: tuple[float, float, float]) -> bytes:
+    payload = bytearray(21)
+    payload[:4] = b"\x01\x00\x00\x00"
+    struct.pack_into("<I", payload, 17, len(points))
+    previous = 0.0
+    for position, value, tension in points:
+        payload.extend(
+            struct.pack("<ddf4s", position - previous, value, tension, b"\0" * 4)
+        )
+        previous = position
+    payload.extend(b"\0" * 112)
+    return bytes(payload)
+
+
 def fixture_project_with_automation(
     *, ppq: int = 96, playlist_item_size: int = 60
 ) -> FLPFile:
@@ -121,6 +136,10 @@ def fixture_project_with_automation(
         scalar_event(EVENT_CHANNEL_TYPE, 5),
         text_event(EVENT_PLUGIN_INTERNAL_NAME, "Automation Clip"),
         text_event(EVENT_PLUGIN_NAME, "Serum macro sweep"),
+        data_event(
+            EVENT_AUTOMATION_POINTS,
+            automation_points((0.0, 0.25, 0.0), (4.0, 0.75, 0.5)),
+        ),
         data_event(218, b"opaque-automation-state"),
     ]
     first_channel = next(
@@ -498,6 +517,19 @@ class FLPRoundTripTests(unittest.TestCase):
 
 
 class AutomationClipFLPTests(unittest.TestCase):
+    def test_reads_automation_points_and_accumulates_delta_positions(self) -> None:
+        section = next(
+            section
+            for section in fixture_project_with_automation().channel_sections()
+            if section.iid == 9
+        )
+
+        points = section.automation_points()
+
+        self.assertEqual([point.position for point in points], [0.0, 4.0])
+        self.assertEqual([point.value for point in points], [0.25, 0.75])
+        self.assertEqual([point.tension for point in points], [0.0, 0.5])
+
     def test_reads_channel_target_and_current_playlist_instances(self) -> None:
         project = fixture_project_with_automation()
 

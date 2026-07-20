@@ -21,7 +21,7 @@ from .capsule import (
     unique_legacy_capsule_path,
 )
 
-INDEX_VERSION = 10
+INDEX_VERSION = 11
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS capsules (
     channel_count INTEGER NOT NULL,
     channel_names TEXT NOT NULL DEFAULT '[]',
     note_preview TEXT NOT NULL DEFAULT '[]',
+    automation_preview TEXT NOT NULL DEFAULT '[]',
     midi_playback_end REAL NOT NULL DEFAULT 1.0,
     use_count INTEGER NOT NULL DEFAULT 0,
     modified_ns INTEGER NOT NULL
@@ -65,6 +66,11 @@ class CapsuleLibrary:
             columns = {row[1] for row in database.execute("PRAGMA table_info(capsules)")}
             if "note_preview" not in columns:
                 database.execute("ALTER TABLE capsules ADD COLUMN note_preview TEXT NOT NULL DEFAULT '[]'")
+                database.execute("UPDATE capsules SET modified_ns = -1")
+            if "automation_preview" not in columns:
+                database.execute(
+                    "ALTER TABLE capsules ADD COLUMN automation_preview TEXT NOT NULL DEFAULT '[]'"
+                )
                 database.execute("UPDATE capsules SET modified_ns = -1")
             if "channel_names" not in columns:
                 database.execute("ALTER TABLE capsules ADD COLUMN channel_names TEXT NOT NULL DEFAULT '[]'")
@@ -146,13 +152,15 @@ class CapsuleLibrary:
                         plugin_names.append(
                             state_sections[0].plugin_name if state_sections else channel.plugin_name
                         )
-                    note_preview, midi_playback_end = self._note_preview(capsule, manifest)
+                    note_preview, automation_preview, midi_playback_end = self._preview_data(
+                        capsule, manifest
+                    )
                     database.execute(
                         """INSERT INTO capsules
                         (id, path, name, created_at, source_fl_version, plugin_names,
                          tags, favorite, channel_count, channel_names, note_preview,
-                         midi_playback_end, modified_ns)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         automation_preview, midi_playback_end, modified_ns)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET path=excluded.path, name=excluded.name,
                         created_at=excluded.created_at,
                         source_fl_version=excluded.source_fl_version,
@@ -161,6 +169,7 @@ class CapsuleLibrary:
                         channel_count=excluded.channel_count,
                         channel_names=excluded.channel_names,
                         note_preview=excluded.note_preview,
+                        automation_preview=excluded.automation_preview,
                         midi_playback_end=excluded.midi_playback_end,
                         modified_ns=excluded.modified_ns""",
                         (
@@ -170,6 +179,7 @@ class CapsuleLibrary:
                             json.dumps(manifest.tags), int(manifest.favorite), len(manifest.channels),
                             json.dumps([channel.name for channel in manifest.channels]),
                             json.dumps(note_preview),
+                            json.dumps(automation_preview),
                             midi_playback_end,
                             modified_ns,
                         ),
@@ -293,17 +303,15 @@ class CapsuleLibrary:
             return
 
     @staticmethod
-    def _note_preview(
+    def _preview_data(
         capsule: Capsule,
         manifest,
-    ) -> tuple[list[list[float | int]], float]:
+    ) -> tuple[list[list[float | int]], list[list], float]:
         indexed_notes = [
             (channel_index, note)
             for channel_index, channel in enumerate(manifest.channels)
             for note in capsule.read_notes(channel)
         ]
-        if not indexed_notes:
-            return [], 1.0
         indexed_notes.sort(
             key=lambda item: (item[1].position, item[1].key, item[1].length, item[0])
         )
@@ -311,12 +319,60 @@ class CapsuleLibrary:
             stride = math.ceil(len(indexed_notes) / 2048)
             indexed_notes = indexed_notes[::stride]
         notes = [note for _, note in indexed_notes]
-        note_end = max(note.position + max(1, note.length) for note in notes)
+        note_end = max(
+            (note.position + max(1, note.length) for note in notes), default=0
+        )
+        raw_automation: list[tuple[int, list[tuple[float, float, float]]]] = []
+        automation_end = 0.0
+        if manifest.automations:
+            all_items = [
+                item
+                for automation in manifest.automations
+                for item in capsule.read_automation_playlist(automation)
+            ]
+            anchor = min((item.position for item in all_items), default=0)
+            channel_indexes = {
+                channel.source_iid: index
+                for index, channel in enumerate(manifest.channels)
+            }
+            channels = {
+                channel.source_iid: channel for channel in manifest.channels
+            }
+            for automation in manifest.automations:
+                state = capsule.read_channel_state(channels[automation.source_iid])
+                sections = state.channel_sections()
+                points = sections[0].automation_points() if sections else []
+                if not points:
+                    continue
+                source_end = max(points[-1].position * manifest.source_ppq, 1.0)
+                if len(points) > 256:
+                    stride = math.ceil((len(points) - 1) / 255)
+                    sampled = points[::stride]
+                    if sampled[-1] is not points[-1]:
+                        sampled.append(points[-1])
+                    points = sampled
+                for item in capsule.read_automation_playlist(automation):
+                    item_start = float(item.position - anchor)
+                    scale = item.length / source_end
+                    curve = [
+                        (
+                            item_start + point.position * manifest.source_ppq * scale,
+                            max(0.0, min(1.0, point.value)),
+                            point.tension,
+                        )
+                        for point in points
+                    ]
+                    raw_automation.append(
+                        (channel_indexes[automation.source_iid], curve)
+                    )
+                    automation_end = max(automation_end, item_start + item.length)
+        if not indexed_notes and not raw_automation:
+            return [], [], 1.0
         exact_timing = manifest.schema_version >= 2 and manifest.source_tempo_bpm is not None
         if exact_timing:
-            end = max(1, note_end)
+            end = max(1.0, note_end, automation_end)
             preview_duration = capsule.preview_duration_seconds()
-            midi_duration = note_end * 60.0 / (
+            midi_duration = end * 60.0 / (
                 manifest.source_ppq * manifest.source_tempo_bpm
             )
             playback_end = (
@@ -330,10 +386,10 @@ class CapsuleLibrary:
             pattern_end = round(
                 manifest.source_pattern_length_steps * manifest.source_ppq / 4
             ) if manifest.source_pattern_length_steps else 0
-            end = max(1, note_end, pattern_end)
-            playback_end = note_end / end
-        low = min(note.key for note in notes)
-        high = max(note.key for note in notes)
+            end = max(1.0, note_end, pattern_end, automation_end)
+            playback_end = max(note_end, automation_end) / end
+        low = min((note.key for note in notes), default=0)
+        high = max((note.key for note in notes), default=0)
         pitch_span = max(1, high - low)
         preview = [
             [
@@ -344,7 +400,17 @@ class CapsuleLibrary:
             ]
             for channel_index, note in indexed_notes
         ]
-        return preview, playback_end
+        automation_preview = [
+            [
+                channel_index,
+                [
+                    [round(position / end, 6), round(value, 6), round(tension, 6)]
+                    for position, value, tension in curve
+                ],
+            ]
+            for channel_index, curve in raw_automation
+        ]
+        return preview, automation_preview, playback_end
 
     def find(self, capsule_id: str) -> Capsule:
         with self._lock, self.session() as database:

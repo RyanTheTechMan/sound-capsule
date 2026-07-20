@@ -85,6 +85,19 @@ private:
         int channel = 0;
     };
 
+    struct AutomationPointPreview
+    {
+        float position = 0.0f;
+        float value = 0.0f;
+        float tension = 0.0f;
+    };
+
+    struct AutomationPreview
+    {
+        int channel = 0;
+        std::vector<AutomationPointPreview> points;
+    };
+
     struct CapsuleRow
     {
         juce::String id;
@@ -99,6 +112,7 @@ private:
         int useCount = 0;
         juce::String capsulePath;
         std::vector<NotePreview> notes;
+        std::vector<AutomationPreview> automations;
         float midiTimelineEnd = 1.0f;
         float midiPlaybackEnd = 1.0f;
         std::unique_ptr<juce::AudioThumbnail> thumbnail;
