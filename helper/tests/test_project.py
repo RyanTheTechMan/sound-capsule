@@ -27,6 +27,7 @@ from soundcapsule.flp import (
 )
 from soundcapsule.project import CapsuleService, ProjectLocator
 from soundcapsule.project_locator import (
+    recently_modified_project_paths,
     _windows_browser_recent_projects,
     _windows_indexed_projects,
 )
@@ -405,6 +406,45 @@ class ProjectServiceTests(unittest.TestCase):
                 [], recent_provider=lambda: [current], indexed_provider=lambda _: []
             )
             self.assertEqual(locator.find_current(""), current.resolve())
+
+    def test_blank_title_uses_recently_modified_spotlight_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            current = Path(temporary) / "temp4.flp"
+            current.write_bytes(fixture_project().to_bytes())
+            locator = ProjectLocator(
+                [], recent_provider=lambda: [], indexed_provider=lambda _: [],
+                modified_provider=lambda _changed_after: [current],
+            )
+
+            self.assertEqual(
+                locator.find_current(
+                    "", candidate_validator=lambda path: path == current.resolve(),
+                    cache_key="rack-signature",
+                ),
+                current.resolve(),
+            )
+
+    def test_macos_modified_project_search_excludes_fl_backup_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = root / "temp4" / "temp4.flp"
+            backup = root / "temp4" / "Backup" / "temp4 (overwritten on today).flp"
+            current.parent.mkdir()
+            backup.parent.mkdir()
+            current.write_bytes(fixture_project().to_bytes())
+            backup.write_bytes(fixture_project().to_bytes())
+            output = f"{backup}\n{current}\n"
+            completed = mock.Mock(returncode=0, stdout=output)
+
+            with mock.patch(
+                "soundcapsule.project_locator.platform.system", return_value="Darwin"
+            ), mock.patch(
+                "soundcapsule.project_locator.subprocess.run", return_value=completed
+            ) as run:
+                projects = recently_modified_project_paths()
+
+            self.assertEqual(projects, [current])
+            self.assertEqual(run.call_args.args[0][0], "mdfind")
 
     def test_project_locator_does_not_scan_roots_after_recent_project_resolves(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

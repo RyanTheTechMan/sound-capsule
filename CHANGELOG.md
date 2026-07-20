@@ -24,6 +24,9 @@ version's section is also used as its GitHub release notes.
   placeholder title with the discovered `.flp` name. That association survives
   switching to another project and back without overriding a different current
   project that happens to have an identical Channel Rack.
+- On macOS, newly saved projects in custom or cloud-backed locations can be
+  identified before FL Studio flushes them to its on-disk recent-project lists;
+  FL-generated Backup and autosave copies are excluded from consideration.
 
 ## [0.3.4] - 2026-07-13
 

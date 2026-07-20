@@ -206,6 +206,56 @@ def indexed_project_paths(title: str, fl_user_folder: Path | None = None) -> lis
     return [Path(line) for line in result.stdout.splitlines() if line.strip()]
 
 
+def recently_modified_project_paths(changed_after: float | None = None) -> list[Path]:
+    """Find recent main FLPs when FL's in-memory MRU has not reached disk yet."""
+    if platform.system() != "Darwin":
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "mdfind",
+                'kMDItemFSName == "*.flp"c '
+                '&& kMDItemFSContentChangeDate >= $time.today(-2)',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    minimum_mtime = (
+        changed_after - 2.0
+        if changed_after is not None
+        else time.time() - 2 * 24 * 60 * 60
+    )
+    candidates: list[tuple[int, Path]] = []
+    for line in result.stdout.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        path = Path(value)
+        lowered_parts = {part.casefold() for part in path.parts}
+        lowered_name = path.name.casefold()
+        if (
+            "backup" in lowered_parts
+            or "autosaved on" in lowered_name
+            or "overwritten on" in lowered_name
+        ):
+            continue
+        try:
+            modified = path.stat().st_mtime_ns
+            if modified / 1_000_000_000 < minimum_mtime:
+                continue
+        except OSError:
+            continue
+        candidates.append((modified, path))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in candidates]
+
+
 def _windows_indexed_projects(
     title: str,
     document_roots: list[Path] | None = None,
@@ -266,11 +316,13 @@ class ProjectLocator:
         cache_path: Path | None = None,
         recent_provider=recent_project_paths,
         indexed_provider=indexed_project_paths,
+        modified_provider=recently_modified_project_paths,
     ):
         self.roots = roots or []
         self.cache_path = cache_path
         self.recent_provider = recent_provider
         self.indexed_provider = indexed_provider
+        self.modified_provider = modified_provider
 
     def find_current(
         self,
@@ -292,7 +344,9 @@ class ProjectLocator:
         if changed_after is not None:
             changed = [
                 path
-                for path in self._valid_unique(recent + rooted())
+                for path in self._valid_unique(
+                    recent + self.modified_provider(changed_after) + rooted()
+                )
                 if (not title.strip() or _matching_title(path, title))
                 and path.stat().st_mtime >= changed_after - 2.0
             ]
@@ -335,6 +389,21 @@ class ProjectLocator:
                 raise FLPUnsupportedError(
                     "multiple saved FLPs match the live Channel Rack and FL did not publish a "
                     f"project title; save the current project to disambiguate it: {names}"
+                )
+            modified = self._valid_unique(self.modified_provider(None))
+            if candidate_validator is not None:
+                modified = [
+                    path for path in modified if candidate_validator(path)
+                ]
+            if len(modified) == 1:
+                if cache_key:
+                    self._remember_key(cache_key, modified[0])
+                return modified[0]
+            if len(modified) > 1:
+                names = ", ".join(str(path) for path in modified[:4])
+                raise FLPUnsupportedError(
+                    "multiple recently saved FLPs match the live Channel Rack and FL did not "
+                    f"publish a project title; save the current project to disambiguate it: {names}"
                 )
             rooted_candidates = rooted()
             if candidate_validator is not None:
