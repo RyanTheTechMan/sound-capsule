@@ -1010,6 +1010,13 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     list.setRowHeight(64);
     list.setColour(juce::ListBox::backgroundColourId, panel);
     list.addMouseListener(this, true);
+    libraryEmptyState.setColour(juce::Label::textColourId,
+                                juce::Colours::lightgrey.withAlpha(0.78f));
+    libraryEmptyState.setFont(juce::FontOptions(14.0f));
+    libraryEmptyState.setJustificationType(juce::Justification::centred);
+    libraryEmptyState.setInterceptsMouseClicks(false, false);
+    libraryEmptyState.setVisible(false);
+    addAndMakeVisible(libraryEmptyState);
 
     search.onTextChange = [this] { searchDueAt = juce::Time::getMillisecondCounter() + 250; };
     capsuleName.onTextChange = [this] {
@@ -1276,6 +1283,8 @@ void SoundCapsuleAudioProcessorEditor::resized()
         bounds.removeFromBottom(4);
     }
     list.setBounds(bounds);
+    libraryEmptyState.setBounds(bounds.reduced(72, 48));
+    libraryEmptyState.toFront(false);
     operationProgress.setBounds(getLocalBounds());
     operationProgress.toFront(false);
 }
@@ -2024,6 +2033,23 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
         rows = std::move(updated);
         list.updateContent();
         list.repaint();
+        if (rows.empty())
+        {
+            if (search.getText().trim().isNotEmpty())
+                libraryEmptyState.setText(
+                    "No capsules match this search.\nTry different terms or clear the search field.",
+                    juce::dontSendNotification);
+            else if (favoritesOnly.getToggleState())
+                libraryEmptyState.setText(
+                    "No favorite capsules yet.\nStar a capsule to keep it in this view.",
+                    juce::dontSendNotification);
+            else
+                libraryEmptyState.setText(
+                    "Your capsule library is empty.\nSelect a channel in FL Studio and save your first capsule, or drop a shared capsule here.",
+                    juce::dontSendNotification);
+        }
+        libraryEmptyState.setVisible(rows.empty());
+        libraryEmptyState.toFront(false);
         preloadVisibleRows();
         auto statusText = juce::String(rows.size()) + " capsules";
         if (!migrationNoticeShown)
@@ -2177,7 +2203,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->patternStatus.setColour(juce::Label::textColourId, juce::Colours::white);
         const auto saveVisibilityChanged = safe->saveGroup.isVisible() != (selectedCount > 0)
                                         || safe->saveIndividual.isVisible() != (selectedCount > 1)
-                                        || safe->selectionSummary.isVisible() != (selectedCount > 0);
+                                        || !safe->selectionSummary.isVisible();
         safe->saveGroup.setButtonText(selectedCount > 1 ? "Save selected" : "Save capsule");
         safe->saveGroup.setVisible(selectedCount > 0);
         safe->saveIndividual.setVisible(selectedCount > 1);
@@ -2190,7 +2216,14 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
             safe->selectionSummary.setText(selectionText, juce::dontSendNotification);
             safe->selectionSummary.setTooltip(selectedNames.joinIntoString(", "));
         }
-        safe->selectionSummary.setVisible(selectedCount > 0);
+        else
+        {
+            safe->selectionSummary.setText(
+                "Select one or more FL Studio Channel Rack channels to save a capsule.",
+                juce::dontSendNotification);
+            safe->selectionSummary.setTooltip({});
+        }
+        safe->selectionSummary.setVisible(true);
         const auto undoAvailable = static_cast<bool>(
             response.getProperty("undo_available", false));
         const auto undoRemaining = static_cast<int>(
