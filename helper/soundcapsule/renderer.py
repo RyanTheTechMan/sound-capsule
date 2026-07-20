@@ -4,6 +4,8 @@ from pathlib import Path
 import platform
 import subprocess
 import struct
+import time
+from typing import Callable
 
 
 class RenderError(RuntimeError):
@@ -139,6 +141,7 @@ def render_project(
     *,
     fl_executable: Path | None,
     timeout: float = 180.0,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> Path:
     """Render a staged single-project FLP through FL Studio's native CLI."""
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -161,13 +164,43 @@ def render_project(
         ]
 
     try:
-        result = subprocess.run(
-            command,
-            shell=False,
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-        )
+        if cancel_requested is None:
+            result = subprocess.run(
+                command,
+                shell=False,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            process = subprocess.Popen(
+                command,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + timeout
+            while process.poll() is None:
+                if cancel_requested():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5.0)
+                    raise RenderError("Operation cancelled")
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.wait(timeout=5.0)
+                    raise RenderError(
+                        f"FL Studio render timed out after {timeout:g} seconds"
+                    )
+                time.sleep(0.1)
+            stdout, stderr = process.communicate()
+            result = subprocess.CompletedProcess(
+                command, process.returncode, stdout, stderr
+            )
     except subprocess.TimeoutExpired as error:
         raise RenderError(
             f"FL Studio render timed out after {timeout:g} seconds"

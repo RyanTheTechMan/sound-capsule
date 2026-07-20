@@ -835,9 +835,14 @@ OperationProgressOverlay::OperationProgressOverlay()
     stepLabel.setJustificationType(juce::Justification::centred);
     progressBar.setColour(juce::ProgressBar::foregroundColourId, accent);
     progressBar.setColour(juce::ProgressBar::backgroundColourId, juce::Colour(0xff303641));
+    cancelButton.onClick = [this] { if (onCancel) onCancel(); };
+    retryButton.onClick = [this] { if (onRetry) onRetry(); };
     addAndMakeVisible(heading);
     addAndMakeVisible(stepLabel);
     addAndMakeVisible(progressBar);
+    addAndMakeVisible(cancelButton);
+    addAndMakeVisible(retryButton);
+    retryButton.setVisible(false);
 }
 
 void OperationProgressOverlay::begin(const juce::String& titleText,
@@ -847,9 +852,20 @@ void OperationProgressOverlay::begin(const juce::String& titleText,
     heading.setText(titleText, juce::dontSendNotification);
     heading.setColour(juce::Label::textColourId, juce::Colours::white);
     stepLabel.setText(initialStep, juce::dontSendNotification);
+    cancelButton.setEnabled(true);
+    cancelButton.setVisible(true);
+    retryButton.setVisible(false);
     setVisible(true);
     toFront(false);
     repaint();
+}
+
+void OperationProgressOverlay::setCancellable(bool cancellable)
+{
+    cancelButton.setEnabled(cancellable);
+    cancelButton.setTooltip(cancellable
+                                ? "Cancel before Sound Capsule changes the project or saves a capsule"
+                                : "This operation has reached its final write step and can no longer be cancelled safely");
 }
 
 void OperationProgressOverlay::update(double progress, const juce::String& step)
@@ -867,14 +883,17 @@ void OperationProgressOverlay::finish(bool succeeded, const juce::String& titleT
     heading.setColour(juce::Label::textColourId,
                       succeeded ? accent : juce::Colour(0xffff6b6b));
     stepLabel.setText(detail, juce::dontSendNotification);
+    cancelButton.setVisible(false);
+    retryButton.setVisible(!succeeded);
     progressBar.repaint();
+    resized();
 }
 
 void OperationProgressOverlay::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colours::black.withAlpha(0.70f));
     auto card = getLocalBounds().withSizeKeepingCentre(
-        juce::jmin(480, getWidth() - 40), 178).toFloat();
+        juce::jmin(480, getWidth() - 40), 218).toFloat();
     graphics.setColour(panel);
     graphics.fillRoundedRectangle(card, 12.0f);
     graphics.setColour(juce::Colours::white.withAlpha(0.10f));
@@ -884,12 +903,17 @@ void OperationProgressOverlay::paint(juce::Graphics& graphics)
 void OperationProgressOverlay::resized()
 {
     auto card = getLocalBounds().withSizeKeepingCentre(
-        juce::jmin(480, getWidth() - 40), 178).reduced(28, 22);
+        juce::jmin(480, getWidth() - 40), 218).reduced(28, 22);
     heading.setBounds(card.removeFromTop(34));
     card.removeFromTop(12);
     stepLabel.setBounds(card.removeFromTop(34));
     card.removeFromTop(12);
     progressBar.setBounds(card.removeFromTop(18));
+    card.removeFromTop(14);
+    auto actions = card.removeFromTop(30);
+    retryButton.setBounds(actions.removeFromRight(92));
+    actions.removeFromRight(8);
+    cancelButton.setBounds(actions.removeFromRight(92));
 }
 
 SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleAudioProcessor& p)
@@ -1107,6 +1131,22 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
             downloadAndInstallUpdate();
         else if (availableReleaseUrl.isNotEmpty())
             juce::URL(availableReleaseUrl).launchInDefaultBrowser();
+    };
+    operationProgress.onCancel = [this] {
+        if (operationId.isEmpty())
+            return;
+        operationCancelRequested.store(true);
+        operationProgress.setCancellable(false);
+        operationProgress.update(0.0, "Cancelling safely...");
+        sendCommand("cancel_operation", object({{"operation_id", operationId}}),
+                    {}, 5000, true);
+    };
+    operationProgress.onRetry = [this] {
+        const auto retry = retryOperation;
+        operationProgress.setVisible(false);
+        operationOverlayHideAt = 0;
+        if (retry)
+            retry();
     };
 
     // Playback progress is an animation, so update it at display-like cadence.
@@ -2328,6 +2368,8 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
 void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
 {
     stopPreviewPlayback();
+    operationCancelRequested.store(false);
+    retryOperation = [this, individually] { captureSelected(individually); };
     const auto name = capsuleName.getText().trim().isNotEmpty()
                         ? capsuleName.getText().trim()
                         : (suggestedCapsuleName.isNotEmpty() ? suggestedCapsuleName : "Sound Capsule");
@@ -2348,8 +2390,10 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
         if (safe == nullptr || safe->operationId != captureOperationId)
             return;
         safe->operationPollingEnabled = false;
-        safe->operationProgress.finish(false, "Capture failed", error);
-        safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 3000;
+        const auto cancelled = error.containsIgnoreCase("cancel");
+        safe->operationProgress.finish(
+            false, cancelled ? "Capture cancelled" : "Capture failed", error);
+        safe->operationOverlayHideAt = 0;
         safe->operationId.clear();
         safe->operationProgressPollInFlight.store(false);
     };
@@ -2369,6 +2413,7 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
                     juce::Time::getMillisecondCounter() + 1100;
                 safe->operationId.clear();
                 safe->operationProgressPollInFlight.store(false);
+                safe->retryOperation = {};
                 safe->status.setText("Saved to library", juce::dontSendNotification);
                 safe->refreshLibrary();
             },
@@ -3258,6 +3303,7 @@ void SoundCapsuleAudioProcessorEditor::waitForFlSave(
         bool saved = false;
         const auto deadline = juce::Time::getMillisecondCounterHiRes() + 30000.0;
         while (safe != nullptr && !safe->shuttingDown.load()
+               && !safe->operationCancelRequested.load()
                && juce::Time::getMillisecondCounterHiRes() < deadline)
         {
             try
@@ -3279,7 +3325,9 @@ void SoundCapsuleAudioProcessorEditor::waitForFlSave(
             juce::Thread::sleep(200);
         }
         if (!saved && error.isEmpty())
-            error = "FL Studio did not finish saving within 30 seconds";
+            error = safe != nullptr && safe->operationCancelRequested.load()
+                  ? "Operation cancelled"
+                  : "FL Studio did not finish saving within 30 seconds";
         juce::MessageManager::callAsync(
             [safe, saved, error, continuationAfterSave = std::move(completedAction),
              failureAfterSave = std::move(completedFailure)]() mutable {
@@ -3437,6 +3485,8 @@ void SoundCapsuleAudioProcessorEditor::importCapsule(const juce::String& id,
 void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& id,
                                                              ImportMode mode)
 {
+    operationCancelRequested.store(false);
+    retryOperation = [this, id, mode] { importCapsule(id, mode); };
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     runAfterProjectSaved([safe, id, mode] {
         if (safe == nullptr) return;
@@ -3471,6 +3521,7 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
                 safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 1100;
                 safe->operationId.clear();
                 safe->operationProgressPollInFlight.store(false);
+                safe->retryOperation = {};
                 safe->status.setText(
                     confirmed
                         ? (mode == ImportMode::overrideSelection
@@ -3485,8 +3536,10 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
             [safe, importOperationId](const juce::String& error) {
                 if (safe == nullptr || safe->operationId != importOperationId) return;
                 safe->operationPollingEnabled = false;
-                safe->operationProgress.finish(false, "Import failed", error);
-                safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 3000;
+                const auto cancelled = error.containsIgnoreCase("cancel");
+                safe->operationProgress.finish(
+                    false, cancelled ? "Import cancelled" : "Import failed", error);
+                safe->operationOverlayHideAt = 0;
                 safe->operationId.clear();
                 safe->operationProgressPollInFlight.store(false);
             });
@@ -3530,6 +3583,8 @@ void SoundCapsuleAudioProcessorEditor::pollOperationProgress()
             const auto value = static_cast<int>(response.getProperty("progress", 0));
             const auto step = response.getProperty("step", "Working").toString();
             safe->operationProgress.update(static_cast<double>(value) / 100.0, step);
+            safe->operationProgress.setCancellable(static_cast<bool>(
+                response.getProperty("cancellable", false)));
         },
         5000,
         true,

@@ -20,6 +20,28 @@ def write_audible_wave(path: Path) -> None:
 
 
 class RendererTests(unittest.TestCase):
+    def test_cancellable_render_terminates_the_render_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "FL64.exe"
+            executable.write_bytes(b"")
+            process = mock.Mock()
+            process.poll.return_value = None
+            process.wait.return_value = 0
+
+            with mock.patch("platform.system", return_value="Windows"), mock.patch(
+                "soundcapsule.renderer.subprocess.Popen", return_value=process
+            ):
+                with self.assertRaisesRegex(RenderError, "Operation cancelled"):
+                    render_project(
+                        root / "preview.flp",
+                        root / "preview.wav",
+                        fl_executable=executable,
+                        cancel_requested=lambda: True,
+                    )
+
+            process.terminate.assert_called_once_with()
+
     def test_windows_uses_native_command_line_renderer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

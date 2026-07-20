@@ -259,6 +259,33 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(payload["operation_id"], "operation-1")
             self.assertIn("validating", payload["step"])
 
+    def test_only_a_cancellable_active_operation_accepts_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            with SoundCapsuleServer(settings) as server:
+                server._update_operation_progress(
+                    "operation-1", 28, "Rendering preview", cancellable=True
+                )
+                accepted = server.dispatch(
+                    {
+                        "command": "cancel_operation",
+                        "args": {"operation_id": "operation-1"},
+                    }
+                )
+                server.operation_cancel.clear()
+                server._update_operation_progress(
+                    "operation-1", 72, "Writing project", cancellable=False
+                )
+                rejected = server.dispatch(
+                    {
+                        "command": "cancel_operation",
+                        "args": {"operation_id": "operation-1"},
+                    }
+                )
+
+            self.assertTrue(accepted["cancel_requested"])
+            self.assertFalse(rejected["cancel_requested"])
+
     def test_capture_progress_reports_success_and_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings = Settings(data_dir=Path(temporary), server_port=0)

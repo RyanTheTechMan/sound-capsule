@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import platform
 import shutil
 import socketserver
 import threading
@@ -49,6 +50,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         self.service = CapsuleService(settings)
         self.operation_lock = threading.RLock()
         self.progress_lock = threading.Lock()
+        self.operation_cancel = threading.Event()
         self.session_project_lock = threading.Lock()
         self.session_project_token: str | None = None
         self.session_project_path: Path | None = None
@@ -60,6 +62,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             "progress": 0,
             "step": "Idle",
             "error": None,
+            "cancellable": False,
             "updated_at": time.time(),
         }
         super().__init__((settings.server_host, settings.server_port), SoundCapsuleRequestHandler)
@@ -151,6 +154,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         *,
         active: bool = True,
         error: str | None = None,
+        cancellable: bool = False,
     ) -> None:
         with self.progress_lock:
             self.operation_progress = {
@@ -159,6 +163,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "progress": max(0, min(100, int(progress))),
                 "step": str(step)[:300],
                 "error": error,
+                "cancellable": bool(cancellable and active),
                 "updated_at": time.time(),
             }
 
@@ -501,8 +506,22 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                     "progress": 0,
                     "step": "Waiting to start",
                     "error": None,
+                    "cancellable": False,
                 }
             return progress
+        if command == "cancel_operation":
+            requested_id = str(args.get("operation_id", ""))
+            with self.progress_lock:
+                progress = dict(self.operation_progress)
+            accepted = bool(
+                requested_id
+                and progress.get("operation_id") == requested_id
+                and progress.get("active")
+                and progress.get("cancellable")
+            )
+            if accepted:
+                self.operation_cancel.set()
+            return {"cancel_requested": accepted}
         if command == "list":
             search = str(args.get("search", ""))[:256]
             return {
@@ -562,7 +581,19 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             if not isinstance(raw_tags, list):
                 raise ValueError("capture tags must be a list")
             operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
-            self._update_operation_progress(operation_id, 1, "Starting capture")
+            self.operation_cancel.clear()
+            self._update_operation_progress(
+                operation_id, 1, "Starting capture", cancellable=True
+            )
+            def capture_progress(value: int, step: str) -> None:
+                if value < 50 and self.operation_cancel.is_set():
+                    raise RuntimeError("Operation cancelled")
+                cancellable = value < 50 and not (
+                    platform.system() == "Darwin" and step.startswith("Rendering preview")
+                )
+                self._update_operation_progress(
+                    operation_id, value, step, cancellable=cancellable
+                )
             try:
                 with self.operation_lock:
                     capsules = self.service.capture(
@@ -571,9 +602,8 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                         preview_wav=Path(args["preview"]) if args.get("preview") else None,
                         individually=bool(args.get("individually", False)),
                         tags=[str(tag)[:100] for tag in raw_tags][:100],
-                        progress_callback=lambda value, step: self._update_operation_progress(
-                            operation_id, value, step
-                        ),
+                        progress_callback=capture_progress,
+                        cancel_requested=self.operation_cancel.is_set,
                     )
             except Exception as error:
                 self._update_operation_progress(
@@ -589,7 +619,17 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             }
         if command == "import":
             operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
-            self._update_operation_progress(operation_id, 1, "Starting import")
+            self.operation_cancel.clear()
+            self._update_operation_progress(
+                operation_id, 1, "Starting import", cancellable=True
+            )
+            def import_progress(value: int, step: str) -> None:
+                cancellable = value < 62
+                if value <= 62 and self.operation_cancel.is_set():
+                    raise RuntimeError("Operation cancelled")
+                self._update_operation_progress(
+                    operation_id, value, step, cancellable=cancellable
+                )
             try:
                 with self.operation_lock:
                     result = self.service.import_capsule(
@@ -600,9 +640,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                         import_destination=args.get("import_destination"),
                         open_project=bool(args.get("open", True)),
                         in_place=bool(args.get("in_place", True)),
-                        progress_callback=lambda value, step: self._update_operation_progress(
-                            operation_id, value, step
-                        ),
+                        progress_callback=import_progress,
                     )
             except Exception as error:
                 self._update_operation_progress(

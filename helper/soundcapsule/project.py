@@ -170,6 +170,7 @@ class CapsuleService:
         individually: bool = False,
         tags: list[str] | None = None,
         progress_callback: Callable[[int, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> list[Capsule]:
         def progress(value: int, step: str) -> None:
             if progress_callback is not None:
@@ -262,11 +263,19 @@ class CapsuleService:
                             start + max(1, (finish - start) // 8),
                             f"Rendering preview for {selected_name}",
                         )
-                        selected_preview = render_project(
-                            staged,
-                            output,
-                            fl_executable=render_executable,
-                        )
+                        if cancel_requested is None:
+                            selected_preview = render_project(
+                                staged,
+                                output,
+                                fl_executable=render_executable,
+                            )
+                        else:
+                            selected_preview = render_project(
+                                staged,
+                                output,
+                                fl_executable=render_executable,
+                                cancel_requested=cancel_requested,
+                            )
                     progress(max(start + 1, finish - 8), f"Packaging {selected_name}")
                     destination = unique_capsule_path(
                         self.settings.library_dir, selected_name

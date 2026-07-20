@@ -35,15 +35,21 @@ public:
     OperationProgressOverlay();
     void begin(const juce::String& title, const juce::String& initialStep);
     void update(double progress, const juce::String& step);
+    void setCancellable(bool);
     void finish(bool succeeded, const juce::String& title, const juce::String& detail);
     void paint(juce::Graphics&) override;
     void resized() override;
+
+    std::function<void()> onCancel;
+    std::function<void()> onRetry;
 
 private:
     double progressValue = 0.0;
     juce::Label heading;
     juce::Label stepLabel;
     juce::ProgressBar progressBar{progressValue};
+    juce::TextButton cancelButton{"Cancel"};
+    juce::TextButton retryButton{"Retry"};
 };
 
 class SoundCapsuleAudioProcessorEditor final : public juce::AudioProcessorEditor,
@@ -200,6 +206,7 @@ private:
     juce::String availableChecksumUrl;
     juce::String availableReleaseUrl;
     std::atomic<bool> operationProgressPollInFlight{false};
+    std::atomic<bool> operationCancelRequested{false};
     std::atomic<bool> updateCheckInFlight{false};
     std::atomic<bool> updateDownloadInFlight{false};
     std::atomic<bool> setupRepairInFlight{false};
@@ -216,6 +223,7 @@ private:
     bool pendingPreviewStartsAtAudio = false;
     bool normalizeWaveformDisplay = false;
     bool showSingleChannelNameInRename = false;
+    std::function<void()> retryOperation;
 
     juce::ImageComponent brandLogo;
     juce::Label title;
