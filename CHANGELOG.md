@@ -31,6 +31,8 @@ version's section is also used as its GitHub release notes.
   32-, 60-, and FL 26.1.1 88-byte item layouts, preserving or adapting opaque
   layout extensions when importing between FL releases. Failed operations also
   provide a Close button instead of trapping the user behind Retry.
+- Automation previews now mark their synthesized note item as a Pattern clip,
+  so FL Studio renders the selected generator instead of a silent WAV.
 
 ## [0.3.4] - 2026-07-13
 

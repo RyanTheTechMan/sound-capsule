@@ -392,8 +392,13 @@ class PlaylistItem:
         struct.pack_into("<I", raw, 0, max(0, position))
         struct.pack_into("<H", raw, 6, self.pattern_base + pattern_id)
         struct.pack_into("<I", raw, 8, max(1, length))
-        struct.pack_into("<f", raw, 24, 0.0)
-        struct.pack_into("<f", raw, 28, 0.0)
+        # Playlist audio/automation records store real clip offsets here, while
+        # Pattern clips use FL's all-bits-set sentinel for "no offset". Keeping
+        # the automation values makes FL accept the item but render no notes.
+        raw[24:32] = b"\xff" * 8
+        if len(raw) > 32:
+            # FL 26.1 identifies Pattern clips with type 6 (automation is 7).
+            raw[32] = 6
         return PlaylistItem(bytes(raw))
 
     def adapt_size(

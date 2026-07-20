@@ -534,11 +534,30 @@ class AutomationClipFLPTests(unittest.TestCase):
         pattern = next(item for item in items if item.item_index > item.pattern_base)
         automation = next(item for item in items if item.item_index <= item.pattern_base)
         self.assertEqual((pattern.position, pattern.item_index), (0, pattern.pattern_base + 3))
+        self.assertEqual(pattern.raw[24:32], b"\xff" * 8)
+        self.assertEqual(pattern.raw[32], 6)
         self.assertEqual((automation.position, automation.item_index), (0, 9))
         self.assertEqual(
             {note.rack_channel for note in preview.pattern_notes()[3]},
             {2},
         )
+
+    def test_fl26_automation_preview_marks_synthesized_item_as_pattern(self) -> None:
+        preview = fixture_project_with_automation(
+            playlist_item_size=88
+        ).isolated_preview_project([2, 9], 3)
+
+        playlist_index = preview._current_playlist_event_index()
+        self.assertIsNotNone(playlist_index)
+        pattern = next(
+            item
+            for item in PlaylistItem.parse_many(preview.events[playlist_index].payload)
+            if item.item_index > item.pattern_base
+        )
+
+        self.assertEqual(pattern.record_size, 88)
+        self.assertEqual(pattern.raw[24:32], b"\xff" * 8)
+        self.assertEqual(pattern.raw[32], 6)
 
     def test_append_remaps_target_and_places_automation_at_playhead(self) -> None:
         source = fixture_project_with_automation(ppq=96)
