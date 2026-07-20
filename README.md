@@ -70,7 +70,8 @@ overwritten and can be revealed from the result message.
 ## Save a capsule
 
 1. In FL Studio, select the generator channel or channels you want to save and
-   choose the pattern to capture.
+   choose the pattern to capture. You may also select Automation Clip channels
+   in the Channel Rack; select each clip's target generator channel as well.
 2. In Sound Capsule, enter a name and optional comma-separated tags.
 3. Click **Save capsule** for one channel, **Save selected** for a grouped capsule,
    or **Save individually** to create one capsule per selected channel.
@@ -92,6 +93,11 @@ overwritten and can be revealed from the result message.
    - **New pattern** creates a pattern for the capsule.
    - **Override selection** replaces matching selected channels while keeping
      their mixer destinations.
+
+Selected Automation Clips that target captured Channel Rack channels are saved
+with their current-arrangement Playlist instances. On import, those instances
+are recreated from the playhead. Mixer, effect, and global-control automation is
+not yet supported.
 
 Sound Capsule creates a backup before changing a project. **Undo Import** is
 available for the recovery period configured in Settings.
@@ -120,9 +126,10 @@ or import its embedded contents.
 
 ## What’s included
 
-Sound Capsule currently captures generator channels and their active-pattern
-notes. Third-party plug-ins, sample libraries, and other dependencies must be
-installed on the computer where you import the capsule.
+Sound Capsule captures generator channels, their active-pattern notes, and
+explicitly selected Automation Clips targeting those channels. Third-party
+plug-ins, sample libraries, and other dependencies must be installed on the
+computer where you import the capsule.
 
 ## Contributing
 

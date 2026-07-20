@@ -32,6 +32,9 @@ class BridgeSession:
     host_executable: str = ""
     host_pid: int = 0
     bridge_active: bool = True
+    selected_channel_types: list[int] = field(default_factory=list)
+    channel_types: list[int] = field(default_factory=list)
+    song_position_ticks: int = 0
 
     @classmethod
     def read(cls, path: Path) -> "BridgeSession":
@@ -62,6 +65,9 @@ class BridgeSession:
         payload.setdefault("host_executable", "")
         payload.setdefault("host_pid", 0)
         payload.setdefault("bridge_active", True)
+        payload.setdefault("selected_channel_types", [])
+        payload.setdefault("channel_types", [])
+        payload.setdefault("song_position_ticks", 0)
         if "pattern_length_steps" not in payload:
             payload["pattern_length_steps"] = payload.pop("pattern_length_beats", 0)
         else:

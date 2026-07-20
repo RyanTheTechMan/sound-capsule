@@ -82,15 +82,20 @@ def _read_json(path):
 def _selected_channels():
     selected = []
     names = []
+    selected_types = []
     channel_names = []
+    channel_types = []
     count = channels.channelCount(1)
     for index in range(count):
         channel_name = channels.getChannelName(index, True)
+        channel_type = channels.getChannelType(index, True)
         channel_names.append(channel_name)
+        channel_types.append(channel_type)
         if channels.isChannelSelected(index, True):
             selected.append(index)
             names.append(channel_name)
-    return selected, names, channel_names
+            selected_types.append(channel_type)
+    return selected, names, selected_types, channel_names, channel_types
 
 
 def _midi_api_version():
@@ -119,7 +124,7 @@ def _publish_session(force=False, bridge_active=True):
     now = time.time()
     if not force and now - _last_publish < 0.25:
         return
-    selected, names, channel_names = _selected_channels()
+    selected, names, selected_types, channel_names, channel_types = _selected_channels()
     pattern = patterns.patternNumber()
     payload = {
         "timestamp": now,
@@ -129,14 +134,17 @@ def _publish_session(force=False, bridge_active=True):
         "host_executable": _host_executable(),
         "selected_channels": selected,
         "selected_channel_names": names,
+        "selected_channel_types": selected_types,
         "channel_count": len(channel_names),
         "channel_names": channel_names,
+        "channel_types": channel_types,
         "current_pattern": pattern,
         "pattern_name": patterns.getPatternName(pattern),
         # FL 25.2 reports this timeline in Channel Rack step units (four per
         # quarter-note beat), despite older API text calling the value beats.
         "pattern_length_steps": patterns.getPatternLength(pattern),
         "ppq": general.getRecPPQ(),
+        "song_position_ticks": int(transport.getSongPos(midi.SONGLENGTH_ABSTICKS)),
         "changed": general.getChangedFlag(),
         "save_sequence": _save_sequence,
         "last_save_requested_at": _last_save_requested_at,

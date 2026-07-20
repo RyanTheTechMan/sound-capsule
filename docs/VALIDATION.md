@@ -16,7 +16,8 @@ uv run --python 3.12 --project helper python -m unittest discover -s helper/test
 ```
 
 It covers lossless parsing, opaque events, exact note properties, grouped and
-individual capsule packaging, embedded Sampler assets, ZIP/checksum attacks,
+individual capsule packaging, selected Automation Clip target remapping and
+playhead placement, automation-aware Song-mode previews, embedded Sampler assets, ZIP/checksum attacks,
 new-pattern and current-pattern append, override, PPQ scaling, isolated preview construction, project lookup,
 dirty-state rejection, in-place backup/restore, configurable time-limited Undo,
 post-import-change safety backups, expired-restore rejection, library indexing,
@@ -94,26 +95,32 @@ release is claimed as host-tested:
    PPQ. Verify plugin state, pattern selection/naming, all note properties,
    preserved active-pattern notes, direct-to-Master routing, and unchanged existing
    channels, mixer, Playlist, and arrangement state.
-5. Override an equal-size destination selection. Verify target routing and
+5. Select generator-targeted Automation Clips in the Channel Rack alongside
+   their target generators. Capture grouped and individually, verify the audible
+   preview follows automation, then import at several playhead positions and
+   confirm every selected Playlist instance and relative offset is preserved.
+   Confirm unselected automation is excluded and mixer/global automation reports
+   the documented unsupported-target error.
+6. Override an equal-size destination selection. Verify target routing and
    unrelated notes remain unchanged. Reject count mismatches.
-6. Exercise the in-place transaction on disposable projects. Verify the backup
+7. Exercise the in-place transaction on disposable projects. Verify the backup
    before replacement, atomic main-file write, OS reopen, `PL_LoadOk` reload
    acknowledgment, reopen in the same FL Studio major version that initiated
    the import even when another version is the OS default, exact custom Undo
    during the configured recovery window,
    before-Undo safety backup after later project saves, and expired-Undo
    rejection.
-7. Exercise unsaved projects, duplicate titles, nonstandard project locations, project
+8. Exercise unsaved projects, duplicate titles, nonstandard project locations, project
    data folders, locked files, helper/app termination, render failures,
    corrupted capsules, missing plugins/assets, and newer FL formats. Confirm a
    newer-version capsule has an orange warning on its library row, shows a
    Try-import confirmation, and can still proceed after explicit acceptance.
-8. Exercise capsule sharing on macOS and Windows: drag a row to Finder/Explorer,
+9. Exercise capsule sharing on macOS and Windows: drag a row to Finder/Explorer,
    another folder, and Discord; confirm the library source remains present. Drop
    single and multiple valid capsules back into the window, then repeat with a
    duplicate and a corrupt capsule in the same batch. Verify the native Export
    dialog's default filename, cancellation, overwrite warning, and saved bytes.
-9. Repeat the suite on Windows x64, macOS Intel, and macOS Apple Silicon before
+10. Repeat the suite on Windows x64, macOS Intel, and macOS Apple Silicon before
    claiming a release as host-tested. Untested releases remain available on a
    best-effort basis when their structure passes the same safety checks.
 

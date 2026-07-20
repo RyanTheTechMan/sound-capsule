@@ -11,16 +11,22 @@ from pathlib import Path
 
 from soundcapsule.capsule import Capsule, _open_capsule_archive
 from soundcapsule.flp import (
+    AUTOMATION_BINDING_STRUCT,
+    EVENT_ARRANGEMENT_NEW,
+    EVENT_AUTOMATION_BINDINGS,
     EVENT_CHANNEL_NEW,
     EVENT_CHANNEL_ENABLED,
     EVENT_CHANNEL_ROUTED_TO,
     EVENT_CHANNEL_SAMPLE_PATH,
     EVENT_CHANNEL_TYPE,
     EVENT_CURRENT_PATTERN,
+    EVENT_CURRENT_ARRANGEMENT,
     EVENT_FL_VERSION,
     EVENT_PATTERN_NAME,
     EVENT_PATTERN_NEW,
     EVENT_PATTERN_NOTES,
+    EVENT_PLAYLIST,
+    EVENT_PROJECT_LOOP_MODE,
     EVENT_PADDING,
     EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PLUGIN_NAME,
@@ -28,6 +34,7 @@ from soundcapsule.flp import (
     FLPFile,
     FORMAT_PROJECT,
     NOTE_STRUCT,
+    PlaylistItem,
     NoteRecord,
     data_event,
     scalar_event,
@@ -88,6 +95,53 @@ def fixture_project(*, ppq: int = 96) -> FLPFile:
         text_event(EVENT_PATTERN_NAME, "Verse"),
     ]
     return FLPFile(FORMAT_PROJECT, 2, ppq, events)
+
+
+def playlist_item(channel_iid: int, *, position: int, length: int) -> bytes:
+    raw = bytearray(60)
+    struct.pack_into("<IHHIHH", raw, 0, position, 20_480, channel_iid, length, 499, 0)
+    raw[16:20] = bytes((120, 0, 64, 0))
+    raw[20:24] = bytes((64, 100, 128, 128))
+    struct.pack_into("<ff", raw, 24, 0.0, 0.0)
+    return bytes(raw)
+
+
+def fixture_project_with_automation(*, ppq: int = 96) -> FLPFile:
+    project = fixture_project(ppq=ppq)
+    pattern_at = next(
+        index for index, event in enumerate(project.events)
+        if event.id == EVENT_PATTERN_NEW
+    )
+    project.events[pattern_at:pattern_at] = [
+        scalar_event(EVENT_CHANNEL_NEW, 9),
+        scalar_event(EVENT_CHANNEL_TYPE, 5),
+        text_event(EVENT_PLUGIN_INTERNAL_NAME, "Automation Clip"),
+        text_event(EVENT_PLUGIN_NAME, "Serum macro sweep"),
+        data_event(218, b"opaque-automation-state"),
+    ]
+    first_channel = next(
+        index for index, event in enumerate(project.events)
+        if event.id == EVENT_CHANNEL_NEW
+    )
+    project.events.insert(
+        first_channel,
+        data_event(
+            EVENT_AUTOMATION_BINDINGS,
+            AUTOMATION_BINDING_STRUCT.pack(0, (2 << 16) | 0x80D5, 0),
+        ),
+    )
+    project.events.extend(
+        [
+            scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+            data_event(
+                EVENT_PLAYLIST,
+                playlist_item(9, position=960, length=384),
+            ),
+            scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+        ]
+    )
+    project.channel_count = 3
+    return project
 
 
 def write_silence(path: Path, duration_seconds: float | None = None) -> None:
@@ -436,7 +490,123 @@ class FLPRoundTripTests(unittest.TestCase):
         self.assertEqual((replacement.position, replacement.length, replacement.key), (48, 192, 60))
 
 
+class AutomationClipFLPTests(unittest.TestCase):
+    def test_reads_channel_target_and_current_playlist_instances(self) -> None:
+        project = fixture_project_with_automation()
+
+        binding = project.automation_bindings()[9]
+        playlist = project.playlist_items_for_channels([9])[9]
+
+        self.assertEqual(binding.target_channel_iid({2, 5, 9}), 2)
+        self.assertEqual(binding.target_event_id, (2 << 16) | 0x80D5)
+        self.assertEqual(len(playlist), 1)
+        self.assertEqual((playlist[0].position, playlist[0].length), (960, 384))
+
+    def test_automation_preview_uses_song_mode_and_normalizes_playlist(self) -> None:
+        preview = fixture_project_with_automation().isolated_preview_project([2, 9], 3)
+
+        loop_mode = next(
+            event.scalar for event in preview.events
+            if event.id == EVENT_PROJECT_LOOP_MODE
+        )
+        playlist_index = preview._current_playlist_event_index()
+        self.assertIsNotNone(playlist_index)
+        items = PlaylistItem.parse_many(preview.events[playlist_index].payload)
+
+        self.assertEqual(loop_mode, 1)
+        self.assertEqual(len(items), 2)
+        pattern = next(item for item in items if item.item_index > item.pattern_base)
+        automation = next(item for item in items if item.item_index <= item.pattern_base)
+        self.assertEqual((pattern.position, pattern.item_index), (0, pattern.pattern_base + 3))
+        self.assertEqual((automation.position, automation.item_index), (0, 9))
+        self.assertEqual(
+            {note.rack_channel for note in preview.pattern_notes()[3]},
+            {2},
+        )
+
+    def test_append_remaps_target_and_places_automation_at_playhead(self) -> None:
+        source = fixture_project_with_automation(ppq=96)
+        destination = fixture_project(ppq=192)
+        destination.events.extend(
+            [
+                scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+                data_event(EVENT_PLAYLIST, b""),
+                scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+            ]
+        )
+        sections = [
+            section for section in source.channel_sections()
+            if section.iid in {2, 9}
+        ]
+
+        merged, mapping, _ = destination.append_capsule(
+            sections,
+            {2: source.pattern_notes()[3]},
+            source_ppq=source.ppq,
+            pattern_name="Imported",
+            automation_bindings=source.automation_bindings(),
+            automation_playlist_items=source.playlist_items_for_channels([9]),
+            playlist_anchor=480,
+        )
+
+        self.assertEqual(mapping, {2: 6, 9: 7})
+        binding = merged.automation_bindings()[7]
+        self.assertEqual(binding.target_channel_iid({2, 5, 6, 7}), 6)
+        item = merged.playlist_items_for_channels([7])[7][0]
+        self.assertEqual((item.position, item.length), (480, 768))
+
+
 class CapsuleTests(unittest.TestCase):
+    def test_capsule_preserves_selected_automation_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Automated.flcapsule",
+                name="Automated",
+                project=fixture_project_with_automation(),
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+
+            capsule.verify()
+            self.assertEqual(capsule.manifest.schema_version, 3)
+            self.assertEqual(len(capsule.manifest.automations), 1)
+            automation = capsule.manifest.automations[0]
+            self.assertEqual((automation.source_iid, automation.target_source_iid), (9, 2))
+            self.assertEqual(capsule.read_automation_binding(automation).target_event_id, (2 << 16) | 0x80D5)
+            item = capsule.read_automation_playlist(automation)[0]
+            self.assertEqual((item.item_index, item.position, item.length), (9, 960, 384))
+
+    def test_capsule_rejects_mixer_or_global_automation_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            project = fixture_project_with_automation()
+            binding = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding)] = binding.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, 0x70401FC0, 0)
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "targets a mixer, effect, or global control",
+            ):
+                Capsule.build(
+                    root / "Unsupported.flcapsule",
+                    name="Unsupported",
+                    project=project,
+                    channel_ids=[2, 9],
+                    pattern_id=3,
+                    preview_wav=preview,
+                )
+
     def test_float_preview_duration_matches_fl_studio_mac_render(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -481,7 +651,7 @@ class CapsuleTests(unittest.TestCase):
             capsule.verify()
             manifest = capsule.manifest
             self.assertEqual(manifest.name, "Lead")
-            self.assertEqual(manifest.schema_version, 2)
+            self.assertEqual(manifest.schema_version, 3)
             self.assertEqual(manifest.source_tempo_bpm, 130.0)
             self.assertEqual(manifest.tags, ["dark", "lead"])
             self.assertEqual([channel.source_iid for channel in manifest.channels], [2, 5])
@@ -636,7 +806,7 @@ class CapsuleTests(unittest.TestCase):
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist() if name != "checksums.json"}
             manifest = json.loads(members["manifest.json"])
-            manifest["schema_version"] = 3
+            manifest["schema_version"] = 4
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
             with zipfile.ZipFile(capsule.path, "w") as target:

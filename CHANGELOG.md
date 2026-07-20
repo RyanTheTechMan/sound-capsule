@@ -6,6 +6,18 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Explicitly selected Channel Rack Automation Clips can now be captured with
+  their selected generator targets, previewed in Song mode, and imported into
+  the current Playlist arrangement at the playhead. Individual saves bundle
+  each selected automation clip only with its selected target channel.
+
+### Changed
+
+- Capsule schema 3 stores Automation Clip target bindings and Playlist
+  instances while preserving imports of schema 1 and 2 capsules.
+
 ## [0.3.4] - 2026-07-13
 
 ### Changed

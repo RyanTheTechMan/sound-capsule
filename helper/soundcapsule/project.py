@@ -198,6 +198,31 @@ class CapsuleService:
             pattern_id = session.current_pattern if session else project.current_pattern
             if not channel_ids:
                 raise FLPUnsupportedError("select at least one Channel Rack channel")
+            sections_by_id = {
+                section.iid: section for section in project.channel_sections()
+            }
+            selected_automations = [
+                iid for iid in channel_ids if sections_by_id[iid].channel_type == 5
+            ]
+            automation_targets: dict[int, int] = {}
+            if selected_automations:
+                bindings = project.automation_bindings()
+                selected_set = set(channel_ids)
+                known_ids = set(sections_by_id)
+                for automation_iid in selected_automations:
+                    target = bindings[automation_iid].target_channel_iid(known_ids)
+                    if target is None:
+                        raise FLPUnsupportedError(
+                            f'automation clip "{sections_by_id[automation_iid].name}" '
+                            "targets a mixer, effect, or global control; the first automation "
+                            "release supports Channel Rack targets only"
+                        )
+                    if target not in selected_set:
+                        raise FLPUnsupportedError(
+                            f'automation clip "{sections_by_id[automation_iid].name}" '
+                            "requires its target Channel Rack channel to be selected"
+                        )
+                    automation_targets[automation_iid] = target
 
             render_executable = self.settings.fl_executable
             live_macos_render = (
@@ -236,7 +261,28 @@ class CapsuleService:
                 else nullcontext()
             )
             with render_lifecycle:
-                captures = [[iid] for iid in channel_ids] if individually else [channel_ids]
+                if individually:
+                    primary_channels = [
+                        iid for iid in channel_ids
+                        if sections_by_id[iid].channel_type != 5
+                    ]
+                    if not primary_channels:
+                        raise FLPUnsupportedError(
+                            "select the Channel Rack channel targeted by the automation clip"
+                        )
+                    captures = [
+                        [
+                            primary,
+                            *[
+                                automation
+                                for automation in selected_automations
+                                if automation_targets[automation] == primary
+                            ],
+                        ]
+                        for primary in primary_channels
+                    ]
+                else:
+                    captures = [channel_ids]
                 results: list[Capsule] = []
                 for capture_index, selected in enumerate(captures):
                     start = 28 + round(capture_index * 62 / len(captures))
@@ -388,6 +434,21 @@ class CapsuleService:
             section = state_section.remap(channel.source_iid)
             sections.append(section)
             notes_by_source[channel.source_iid] = capsule.read_notes(channel)
+        automation_bindings = {
+            automation.source_iid: capsule.read_automation_binding(automation)
+            for automation in manifest.automations
+        }
+        automation_playlist_items = {
+            automation.source_iid: capsule.read_automation_playlist(automation)
+            for automation in manifest.automations
+        }
+        automation_sections = [
+            section for section in sections if section.channel_type == 5
+        ]
+        primary_sections = [
+            section for section in sections if section.channel_type != 5
+        ]
+        playlist_anchor = session.song_position_ticks if session is not None else 0
 
         destination_mode = import_destination or self.settings.import_destination
         if destination_mode not in (
@@ -412,22 +473,41 @@ class CapsuleService:
                 target_pattern_id=(
                     active_pattern if destination_mode == "current_pattern" else None
                 ),
+                automation_bindings=automation_bindings,
+                automation_playlist_items=automation_playlist_items,
+                playlist_anchor=playlist_anchor,
             )
         elif mode == "override":
             targets = target_channels or (self._session_channel_ids(project, session) if session else [])
+            channel_types = {
+                section.iid: section.channel_type for section in project.channel_sections()
+            }
+            targets = [iid for iid in targets if channel_types.get(iid) != 5]
             active_pattern = (
                 pattern_id
                 if pattern_id is not None
                 else (session.current_pattern if session else project.current_pattern)
             )
             merged = project.override_capsule(
-                sections,
+                primary_sections,
                 notes_by_source,
                 targets,
                 source_ppq=manifest.source_ppq,
                 pattern_id=active_pattern,
             )
-            mapping = {section.iid: target for section, target in zip(sections, targets, strict=True)}
+            mapping = {
+                section.iid: target
+                for section, target in zip(primary_sections, targets, strict=True)
+            }
+            if automation_sections:
+                merged, mapping = merged.append_automation_channels(
+                    automation_sections,
+                    target_mapping=mapping,
+                    bindings=automation_bindings,
+                    playlist_items=automation_playlist_items,
+                    source_ppq=manifest.source_ppq,
+                    playlist_anchor=playlist_anchor,
+                )
             new_pattern = active_pattern
         else:
             raise ValueError("mode must be 'append' or 'override'")

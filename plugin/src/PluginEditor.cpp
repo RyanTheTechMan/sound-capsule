@@ -2326,6 +2326,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
             safe->list.repaint();
         }
         auto selectedCount = 0;
+        auto selectedAutomationCount = 0;
         juce::StringArray selectedNames;
         if (auto* selectedChannels = response.getProperty("selected_channels", juce::var()).getArray())
             selectedCount = selectedChannels->size();
@@ -2333,6 +2334,10 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
             for (const auto& name : *names)
                 if (name.toString().trim().isNotEmpty())
                     selectedNames.add(name.toString().trim());
+        if (auto* types = response.getProperty("selected_channel_types", juce::var()).getArray())
+            for (const auto& type : *types)
+                if (static_cast<int>(type) == 5)
+                    ++selectedAutomationCount;
 
         auto nextSuggestion = selectedNames.joinIntoString(" + ");
         if (nextSuggestion.length() > 80 && selectedNames.size() > 1)
@@ -2371,6 +2376,11 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
                                + (selectedCount == 1 ? " channel" : " channels");
             if (!selectedNames.isEmpty())
                 selectionText << "  —  " << selectedNames.joinIntoString(", ");
+            if (selectedAutomationCount > 0)
+                selectionText << "  •  " << selectedAutomationCount
+                              << (selectedAutomationCount == 1
+                                      ? " automation clip"
+                                      : " automation clips");
             safe->selectionSummary.setText(selectionText, juce::dontSendNotification);
             safe->selectionSummary.setTooltip(selectedNames.joinIntoString(", "));
         }

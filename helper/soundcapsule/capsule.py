@@ -15,16 +15,17 @@ import tempfile
 import uuid
 import zipfile
 
-from .flp import FLPFile, NoteRecord
+from .flp import AutomationBinding, FLPFile, FLPUnsupportedError, NoteRecord, PlaylistItem
 
 
-CAPSULE_SCHEMA_VERSION = 2
+CAPSULE_SCHEMA_VERSION = 3
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_BYTES = 512 * 1024 * 1024
 MAX_CHANNEL_STATE_BYTES = 512 * 1024 * 1024
 MAX_NOTES_BYTES = 256 * 1024 * 1024
+MAX_AUTOMATION_METADATA_BYTES = 64 * 1024 * 1024
 CAPSULE_EXTENSION = ".flcapsule.wav"
 LEGACY_CAPSULE_EXTENSION = ".flcapsule"
 SCAP_CHUNK_ID = b"SCAP"
@@ -137,6 +138,14 @@ class ChannelManifest:
 
 
 @dataclass(slots=True)
+class AutomationManifest:
+    source_iid: int
+    target_source_iid: int
+    binding_path: str
+    playlist_path: str
+
+
+@dataclass(slots=True)
 class CapsuleManifest:
     id: str
     schema_version: int
@@ -147,6 +156,7 @@ class CapsuleManifest:
     source_pattern: int
     save_mode: str
     channels: list[ChannelManifest]
+    automations: list[AutomationManifest] = field(default_factory=list)
     source_pattern_length_steps: int | None = None
     source_tempo_bpm: float | None = None
     preview_path: str = "preview.wav"
@@ -164,6 +174,7 @@ class CapsuleManifest:
         pattern_length_steps: int | None,
         save_mode: str,
         channels: list[ChannelManifest],
+        automations: list[AutomationManifest] | None = None,
     ) -> "CapsuleManifest":
         return cls(
             id=str(uuid.uuid4()),
@@ -175,6 +186,7 @@ class CapsuleManifest:
             source_pattern=pattern_id,
             save_mode=save_mode,
             channels=channels,
+            automations=list(automations or []),
             source_pattern_length_steps=pattern_length_steps,
             source_tempo_bpm=project.tempo_bpm,
         )
@@ -194,13 +206,17 @@ class CapsuleManifest:
         channels_payload = values.pop("channels", None)
         if not isinstance(channels_payload, list):
             raise ValueError("capsule manifest channels must be a list")
+        automations_payload = values.pop("automations", [])
+        if not isinstance(automations_payload, list):
+            raise ValueError("capsule manifest automations must be a list")
         channels = [ChannelManifest(**item) for item in channels_payload]
-        manifest = cls(channels=channels, **values)
+        automations = [AutomationManifest(**item) for item in automations_payload]
+        manifest = cls(channels=channels, automations=automations, **values)
         manifest.validate()
         return manifest
 
     def validate(self) -> None:
-        if self.schema_version not in {1, CAPSULE_SCHEMA_VERSION}:
+        if self.schema_version not in {1, 2, CAPSULE_SCHEMA_VERSION}:
             relation = "newer" if self.schema_version > CAPSULE_SCHEMA_VERSION else "unsupported legacy"
             raise ValueError(f"{relation} capsule schema {self.schema_version}; supported schema is {CAPSULE_SCHEMA_VERSION}")
         try:
@@ -224,11 +240,29 @@ class CapsuleManifest:
         source_ids = [channel.source_iid for channel in self.channels]
         if len(source_ids) != len(set(source_ids)):
             raise ValueError("capsule contains duplicate source channel ids")
+        channels_by_id = {channel.source_iid: channel for channel in self.channels}
         paths = [self.preview_path]
         for channel in self.channels:
             paths.extend([channel.state_path, channel.notes_path])
             if channel.sample_asset:
                 paths.append(channel.sample_asset)
+        automation_ids = [automation.source_iid for automation in self.automations]
+        if len(automation_ids) != len(set(automation_ids)):
+            raise ValueError("capsule contains duplicate automation metadata")
+        for automation in self.automations:
+            if automation.source_iid not in source_ids:
+                raise ValueError("automation metadata references a missing channel")
+            if automation.target_source_iid not in source_ids:
+                raise ValueError("automation target is not included in the capsule")
+            if channels_by_id[automation.source_iid].channel_type != 5:
+                raise ValueError("automation metadata references a non-automation channel")
+            if channels_by_id[automation.target_source_iid].channel_type == 5:
+                raise ValueError("automation target must be a generator or sampler channel")
+            paths.extend([automation.binding_path, automation.playlist_path])
+        if self.schema_version >= 3 and set(automation_ids) != {
+            channel.source_iid for channel in self.channels if channel.channel_type == 5
+        }:
+            raise ValueError("capsule automation channels require matching automation metadata")
         if len(paths) != len(set(paths)):
             raise ValueError("capsule manifest reuses a member path")
 
@@ -273,6 +307,8 @@ class Capsule:
                 required.update({channel.state_path, channel.notes_path})
                 if channel.sample_asset:
                     required.add(channel.sample_asset)
+            for automation in manifest.automations:
+                required.update({automation.binding_path, automation.playlist_path})
             missing = required - names
             if missing:
                 raise ValueError("capsule is missing required members: " + ", ".join(sorted(missing)))
@@ -304,6 +340,30 @@ class Capsule:
             for channel in manifest.channels:
                 FLPFile.from_bytes(_read_limited(archive, channel.state_path, MAX_CHANNEL_STATE_BYTES))
                 NoteRecord.parse_many(_read_limited(archive, channel.notes_path, MAX_NOTES_BYTES))
+            for automation in manifest.automations:
+                bindings = AutomationBinding.parse_many(
+                    _read_limited(
+                        archive,
+                        automation.binding_path,
+                        MAX_AUTOMATION_METADATA_BYTES,
+                    )
+                )
+                if len(bindings) != 1:
+                    raise ValueError("automation metadata must contain exactly one target binding")
+                known_ids = {channel.source_iid for channel in manifest.channels}
+                if bindings[0].target_channel_iid(known_ids) != automation.target_source_iid:
+                    raise ValueError("automation target binding does not match the manifest")
+                playlist = PlaylistItem.parse_many(
+                    _read_limited(
+                        archive,
+                        automation.playlist_path,
+                        MAX_AUTOMATION_METADATA_BYTES,
+                    )
+                )
+                if not playlist or any(
+                    item.item_index != automation.source_iid for item in playlist
+                ):
+                    raise ValueError("automation Playlist metadata does not match its channel")
             if container_format == "legacy":
                 _validate_wave_member(archive, manifest.preview_path)
             elif container_info is None or container_info.scap_offset > MAX_PREVIEW_BYTES:
@@ -366,6 +426,27 @@ class Capsule:
         with _open_capsule_archive(self.path) as archive:
             raw = _read_limited(archive, channel.notes_path, MAX_NOTES_BYTES)
         return NoteRecord.parse_many(raw)
+
+    def read_automation_binding(
+        self, automation: AutomationManifest
+    ) -> AutomationBinding:
+        with _open_capsule_archive(self.path) as archive:
+            raw = _read_limited(
+                archive, automation.binding_path, MAX_AUTOMATION_METADATA_BYTES
+            )
+        records = AutomationBinding.parse_many(raw)
+        if len(records) != 1:
+            raise ValueError("automation metadata must contain exactly one target binding")
+        return records[0]
+
+    def read_automation_playlist(
+        self, automation: AutomationManifest
+    ) -> list[PlaylistItem]:
+        with _open_capsule_archive(self.path) as archive:
+            raw = _read_limited(
+                archive, automation.playlist_path, MAX_AUTOMATION_METADATA_BYTES
+            )
+        return PlaylistItem.parse_many(raw)
 
     def extract_sample_asset(self, channel: ChannelManifest, destination_dir: Path) -> Path | None:
         if not channel.sample_asset:
@@ -483,7 +564,15 @@ class Capsule:
         all_notes = project.pattern_notes().get(pattern_id, [])
         notes_by_channel = {iid: [note for note in all_notes if note.rack_channel == iid] for iid in channel_ids}
         channel_manifests: list[ChannelManifest] = []
+        automation_manifests: list[AutomationManifest] = []
         files: dict[str, bytes | Path] = {}
+
+        selected_automation_ids = [
+            section.iid for section in sections if section.channel_type == 5
+        ]
+        automation_bindings = project.automation_bindings()
+        automation_items = project.playlist_items_for_channels(selected_automation_ids)
+        known_channel_ids = {section.iid for section in project.channel_sections()}
 
         for index, section in enumerate(sections):
             state_path = f"channels/{index:03d}.fst"
@@ -508,6 +597,40 @@ class Capsule:
                     sample_asset=asset_path,
                 )
             )
+            if section.channel_type == 5:
+                binding = automation_bindings.get(section.iid)
+                if binding is None:
+                    raise FLPUnsupportedError(
+                        f'automation clip "{section.name}" is missing its target binding'
+                    )
+                target_source_iid = binding.target_channel_iid(known_channel_ids)
+                if target_source_iid is None:
+                    raise FLPUnsupportedError(
+                        f'automation clip "{section.name}" targets a mixer, effect, or global control; '
+                        "the first automation release supports Channel Rack targets only"
+                    )
+                if target_source_iid not in channel_ids:
+                    raise FLPUnsupportedError(
+                        f'automation clip "{section.name}" targets channel {target_source_iid}; '
+                        "select that Channel Rack channel too"
+                    )
+                playlist = automation_items.get(section.iid, [])
+                if not playlist:
+                    raise FLPUnsupportedError(
+                        f'automation clip "{section.name}" is not placed in the current Playlist arrangement'
+                    )
+                binding_path = f"automation/{index:03d}-binding.bin"
+                playlist_path = f"automation/{index:03d}-playlist.bin"
+                files[binding_path] = binding.raw
+                files[playlist_path] = b"".join(item.raw for item in playlist)
+                automation_manifests.append(
+                    AutomationManifest(
+                        source_iid=section.iid,
+                        target_source_iid=target_source_iid,
+                        binding_path=binding_path,
+                        playlist_path=playlist_path,
+                    )
+                )
 
         if len(channel_manifests) == 1:
             channel_manifests[0].name = name
@@ -519,6 +642,7 @@ class Capsule:
             pattern_length_steps=pattern_length_steps,
             save_mode=save_mode,
             channels=channel_manifests,
+            automations=automation_manifests,
         )
         manifest.tags = sorted(
             {tag.strip() for tag in (tags or []) if tag.strip()}, key=str.casefold

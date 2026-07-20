@@ -4,9 +4,10 @@ FL Studio files use a fixed 22-byte header followed by a typed event stream.
 Every event retains its original encoded bytes. Mutating code only re-encodes
 the exact events it changes, so unknown future events survive round trips.
 
-The merger intentionally handles generator channel states and pattern notes
-only. Mixer, automation, playlist, layer, and routing graph changes are out of
-scope for version one.
+The merger handles generator and Automation Clip channel states, pattern notes,
+Channel Rack automation targets, and the selected automation instances in the
+current Playlist arrangement. Mixer/global automation, layers, and routing graph
+changes remain intentionally out of scope.
 """
 
 from __future__ import annotations
@@ -41,6 +42,10 @@ EVENT_PLUGIN_INTERNAL_NAME = 201
 EVENT_PLUGIN_NAME = 203
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
+EVENT_AUTOMATION_BINDINGS = 216
+EVENT_PLAYLIST = 225
+EVENT_ARRANGEMENT_NEW = 99
+EVENT_CURRENT_ARRANGEMENT = 100
 
 # Although event IDs 128-191 normally carry four-byte scalar payloads, current
 # FL 25/26 projects write event 172 with three bytes. Treating its following
@@ -77,6 +82,8 @@ RACK_GLOBAL_EVENT_IDS = frozenset({11, 13, 133})
 
 NOTE_STRUCT = struct.Struct("<IHHIHHBBBBBBBB")
 NOTE_SIZE = NOTE_STRUCT.size
+AUTOMATION_BINDING_STRUCT = struct.Struct("<III")
+PLAYLIST_ITEM_SIZE = 60
 
 SUPPORTED_PROJECT_MAJOR = 25
 
@@ -284,6 +291,94 @@ class NoteRecord:
             "release": v[8], "midi_channel": v[9], "pan": v[10], "velocity": v[11],
             "mod_x": v[12], "mod_y": v[13], "slide": bool(v[1] & 8),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationBinding:
+    raw: bytes
+
+    @classmethod
+    def parse_many(cls, payload: bytes) -> list["AutomationBinding"]:
+        if len(payload) % AUTOMATION_BINDING_STRUCT.size:
+            raise FLPFormatError("automation binding payload is not a sequence of 12-byte records")
+        return [
+            cls(payload[offset : offset + AUTOMATION_BINDING_STRUCT.size])
+            for offset in range(0, len(payload), AUTOMATION_BINDING_STRUCT.size)
+        ]
+
+    @property
+    def target_event_id(self) -> int:
+        return AUTOMATION_BINDING_STRUCT.unpack(self.raw)[1]
+
+    def target_channel_iid(self, known_channel_ids: set[int]) -> int | None:
+        candidate = self.target_event_id >> 16
+        return candidate if candidate in known_channel_ids else None
+
+    def remap_target_channel(self, target_iid: int) -> "AutomationBinding":
+        prefix, event_id, initial_value = AUTOMATION_BINDING_STRUCT.unpack(self.raw)
+        remapped = ((target_iid & 0xFFFF) << 16) | (event_id & 0xFFFF)
+        return AutomationBinding(
+            AUTOMATION_BINDING_STRUCT.pack(prefix, remapped, initial_value)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistItem:
+    raw: bytes
+
+    @classmethod
+    def parse_many(cls, payload: bytes) -> list["PlaylistItem"]:
+        if len(payload) % PLAYLIST_ITEM_SIZE:
+            raise FLPUnsupportedError(
+                "the current FL Studio Playlist item format is not supported"
+            )
+        return [
+            cls(payload[offset : offset + PLAYLIST_ITEM_SIZE])
+            for offset in range(0, len(payload), PLAYLIST_ITEM_SIZE)
+        ]
+
+    @property
+    def position(self) -> int:
+        return struct.unpack_from("<I", self.raw, 0)[0]
+
+    @property
+    def pattern_base(self) -> int:
+        return struct.unpack_from("<H", self.raw, 4)[0]
+
+    @property
+    def item_index(self) -> int:
+        return struct.unpack_from("<H", self.raw, 6)[0]
+
+    @property
+    def length(self) -> int:
+        return struct.unpack_from("<I", self.raw, 8)[0]
+
+    def remap_channel(
+        self,
+        channel_iid: int,
+        *,
+        source_anchor: int,
+        destination_anchor: int,
+        source_ppq: int,
+        destination_ppq: int,
+    ) -> "PlaylistItem":
+        raw = bytearray(self.raw)
+        relative = self.position - source_anchor
+        position = destination_anchor + round(relative * destination_ppq / source_ppq)
+        length = round(self.length * destination_ppq / source_ppq)
+        struct.pack_into("<I", raw, 0, max(0, position))
+        struct.pack_into("<H", raw, 6, channel_iid)
+        struct.pack_into("<I", raw, 8, max(1, length))
+        return PlaylistItem(bytes(raw))
+
+    def as_pattern(self, pattern_id: int, *, position: int, length: int) -> "PlaylistItem":
+        raw = bytearray(self.raw)
+        struct.pack_into("<I", raw, 0, max(0, position))
+        struct.pack_into("<H", raw, 6, self.pattern_base + pattern_id)
+        struct.pack_into("<I", raw, 8, max(1, length))
+        struct.pack_into("<f", raw, 24, 0.0)
+        struct.pack_into("<f", raw, 28, 0.0)
+        return PlaylistItem(bytes(raw))
 
 
 def _normalized_note_payload(notes: Sequence[NoteRecord]) -> bytes:
@@ -495,6 +590,41 @@ class FLPFile:
             sections.append(ChannelSection(owned[0].scalar, owned))
         return sections
 
+    def automation_bindings(self) -> dict[int, AutomationBinding]:
+        automation_channels = [
+            section for section in self.channel_sections() if section.channel_type == 5
+        ]
+        event = next(
+            (candidate for candidate in self.events if candidate.id == EVENT_AUTOMATION_BINDINGS),
+            None,
+        )
+        if not automation_channels:
+            return {}
+        if event is None:
+            raise FLPUnsupportedError("automation channels are missing their target bindings")
+        records = AutomationBinding.parse_many(event.payload)
+        if len(records) != len(automation_channels):
+            raise FLPUnsupportedError(
+                "automation target bindings do not match the Channel Rack"
+            )
+        return {
+            section.iid: record
+            for section, record in zip(automation_channels, records, strict=True)
+        }
+
+    def playlist_items_for_channels(
+        self, channel_ids: Sequence[int]
+    ) -> dict[int, list[PlaylistItem]]:
+        selected = set(channel_ids)
+        result = {iid: [] for iid in selected}
+        playlist_index = self._current_playlist_event_index()
+        if playlist_index is None:
+            return result
+        for item in PlaylistItem.parse_many(self.events[playlist_index].payload):
+            if item.item_index <= item.pattern_base and item.item_index in selected:
+                result[item.item_index].append(item)
+        return result
+
     def _channel_start_indices(self) -> list[int]:
         # FL 26 overloads event 64 in pre-rack project state. A real channel
         # declaration contains a channel-type event before the next rack or
@@ -567,9 +697,9 @@ class FLPFile:
             raise FLPUnsupportedError(
                 "selected channels contain unprofiled FLP events: " + ", ".join(map(str, ambiguous))
             )
-        unsupported = [section.name for section in sections if section.channel_type in (3, 5)]
+        unsupported = [section.name for section in sections if section.channel_type == 3]
         if unsupported:
-            raise FLPUnsupportedError("version one supports generator and sampler channels only: " + ", ".join(unsupported))
+            raise FLPUnsupportedError("layer channels are not supported: " + ", ".join(unsupported))
         return sections
 
     def channel_state(self, section: ChannelSection) -> "FLPFile":
@@ -598,8 +728,16 @@ class FLPFile:
 
         target._filter_pattern_notes(pattern_id, selected)
         target._set_current_pattern(pattern_id)
-        # FL stores transport loop mode as 0 = Pattern, 1 = Song.
-        target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 0)
+        automation_ids = [
+            section.iid for section in sections
+            if section.iid in selected and section.channel_type == 5
+        ]
+        if automation_ids:
+            target._isolate_automation_preview(automation_ids, pattern_id)
+            # FL stores transport loop mode as 0 = Pattern, 1 = Song.
+            target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 1)
+        else:
+            target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 0)
         target.validate()
         return target
 
@@ -614,6 +752,92 @@ class FLPFile:
                 return index + 1
         raise FLPFormatError("could not locate last channel boundary")
 
+    def _current_playlist_event_index(self) -> int | None:
+        starts = [
+            (index, event.scalar) for index, event in enumerate(self.events)
+            if event.id == EVENT_ARRANGEMENT_NEW
+        ]
+        if not starts:
+            channel_owned = {
+                id(event)
+                for section in self.channel_sections()
+                for event in section.events
+            }
+            return next(
+                (
+                    index for index, event in enumerate(self.events)
+                    if event.id == EVENT_PLAYLIST and id(event) not in channel_owned
+                ),
+                None,
+            )
+        current = next(
+            (event.scalar for event in self.events if event.id == EVENT_CURRENT_ARRANGEMENT),
+            starts[0][1],
+        )
+        current_position = next(
+            (position for position, (_, arrangement_id) in enumerate(starts)
+             if arrangement_id == current),
+            None,
+        )
+        if current_position is None:
+            raise FLPUnsupportedError("the current Playlist arrangement could not be identified")
+        start = starts[current_position][0]
+        end = (
+            starts[current_position + 1][0]
+            if current_position + 1 < len(starts)
+            else len(self.events)
+        )
+        return next(
+            (
+                index for index in range(start, end)
+                if self.events[index].id == EVENT_PLAYLIST
+            ),
+            None,
+        )
+
+    def _isolate_automation_preview(
+        self, automation_ids: Sequence[int], pattern_id: int
+    ) -> None:
+        items_by_channel = self.playlist_items_for_channels(automation_ids)
+        missing = [iid for iid, items in items_by_channel.items() if not items]
+        if missing:
+            raise FLPUnsupportedError(
+                "selected automation clips are not placed in the current Playlist arrangement: "
+                + ", ".join(map(str, sorted(missing)))
+            )
+        playlist_index = self._current_playlist_event_index()
+        if playlist_index is None:
+            raise FLPUnsupportedError("the current Playlist arrangement has no clip data")
+        source_items = [item for items in items_by_channel.values() for item in items]
+        source_anchor = min(item.position for item in source_items)
+        automation_items = [
+            item.remap_channel(
+                item.item_index,
+                source_anchor=source_anchor,
+                destination_anchor=0,
+                source_ppq=self.ppq,
+                destination_ppq=self.ppq,
+            )
+            for item in source_items
+        ]
+        note_end = max(
+            (
+                note.position + note.length
+                for note in self.pattern_notes().get(pattern_id, ())
+            ),
+            default=self.ppq * 4,
+        )
+        automation_end = max(
+            (item.position + item.length for item in automation_items),
+            default=note_end,
+        )
+        pattern_item = source_items[0].as_pattern(
+            pattern_id, position=0, length=max(note_end, automation_end)
+        )
+        self.events[playlist_index] = self.events[playlist_index].with_payload(
+            b"".join(item.raw for item in (pattern_item, *automation_items))
+        )
+
     def append_capsule(
         self,
         sections: Sequence[ChannelSection],
@@ -622,6 +846,9 @@ class FLPFile:
         source_ppq: int,
         pattern_name: str,
         target_pattern_id: int | None = None,
+        automation_bindings: dict[int, AutomationBinding] | None = None,
+        automation_playlist_items: dict[int, Sequence[PlaylistItem]] | None = None,
+        playlist_anchor: int = 0,
     ) -> tuple["FLPFile", dict[int, int], int]:
         target = self.clone()
         existing_ids = [section.iid for section in target.channel_sections()]
@@ -661,9 +888,135 @@ class FLPFile:
             target.events[pattern_insert:pattern_insert] = pattern_events
         else:
             target._append_pattern_notes(pattern_id, imported_notes)
+        target._append_automation_support(
+            sections,
+            mapping,
+            automation_bindings or {},
+            automation_playlist_items or {},
+            source_ppq=source_ppq,
+            destination_anchor=playlist_anchor,
+        )
         target._set_current_pattern(pattern_id)
         target.validate()
         return target, mapping, pattern_id
+
+    def append_automation_channels(
+        self,
+        sections: Sequence[ChannelSection],
+        *,
+        target_mapping: dict[int, int],
+        bindings: dict[int, AutomationBinding],
+        playlist_items: dict[int, Sequence[PlaylistItem]],
+        source_ppq: int,
+        playlist_anchor: int,
+    ) -> tuple["FLPFile", dict[int, int]]:
+        target = self.clone()
+        existing_ids = [section.iid for section in target.channel_sections()]
+        next_channel = max(existing_ids, default=-1) + 1
+        automation_mapping = {
+            section.iid: next_channel + offset
+            for offset, section in enumerate(sections)
+        }
+        new_events: list[Event] = []
+        for section in sections:
+            new_events.extend(section.remap(automation_mapping[section.iid]).events)
+        insert_at = target._channel_insert_index()
+        target.events[insert_at:insert_at] = new_events
+        target.channel_count += len(sections)
+        complete_mapping = {**target_mapping, **automation_mapping}
+        target._append_automation_support(
+            sections,
+            complete_mapping,
+            bindings,
+            playlist_items,
+            source_ppq=source_ppq,
+            destination_anchor=playlist_anchor,
+        )
+        target.validate()
+        return target, complete_mapping
+
+    def _append_automation_support(
+        self,
+        sections: Sequence[ChannelSection],
+        mapping: dict[int, int],
+        bindings: dict[int, AutomationBinding],
+        playlist_items: dict[int, Sequence[PlaylistItem]],
+        *,
+        source_ppq: int,
+        destination_anchor: int,
+    ) -> None:
+        automation_sections = [section for section in sections if section.channel_type == 5]
+        if not automation_sections:
+            return
+        source_channel_ids = set(mapping)
+        remapped_bindings: list[AutomationBinding] = []
+        for section in automation_sections:
+            binding = bindings.get(section.iid)
+            if binding is None:
+                raise FLPUnsupportedError(
+                    f'automation clip "{section.name}" is missing its target binding'
+                )
+            target_source_iid = binding.target_channel_iid(source_channel_ids)
+            if target_source_iid is None or target_source_iid not in mapping:
+                raise FLPUnsupportedError(
+                    f'automation clip "{section.name}" does not target a captured Channel Rack channel'
+                )
+            remapped_bindings.append(
+                binding.remap_target_channel(mapping[target_source_iid])
+            )
+
+        binding_index = next(
+            (
+                index for index, event in enumerate(self.events)
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            ),
+            None,
+        )
+        payload = b"".join(binding.raw for binding in remapped_bindings)
+        if binding_index is None:
+            insert_at = next(
+                (index for index, event in enumerate(self.events) if event.id == EVENT_CHANNEL_NEW),
+                0,
+            )
+            self.events.insert(insert_at, data_event(EVENT_AUTOMATION_BINDINGS, payload))
+        else:
+            event = self.events[binding_index]
+            self.events[binding_index] = event.with_payload(event.payload + payload)
+
+        source_items = [
+            item
+            for section in automation_sections
+            for item in playlist_items.get(section.iid, ())
+        ]
+        missing_items = [
+            section.name
+            for section in automation_sections
+            if not playlist_items.get(section.iid)
+        ]
+        if missing_items:
+            raise FLPUnsupportedError(
+                "automation clips are not placed in the captured Playlist arrangement: "
+                + ", ".join(missing_items)
+            )
+        playlist_index = self._current_playlist_event_index()
+        if playlist_index is None:
+            raise FLPUnsupportedError("the destination project has no current Playlist arrangement")
+        source_anchor = min(item.position for item in source_items)
+        remapped_items = [
+            item.remap_channel(
+                mapping[source_iid],
+                source_anchor=source_anchor,
+                destination_anchor=destination_anchor,
+                source_ppq=source_ppq,
+                destination_ppq=self.ppq,
+            )
+            for source_iid in (section.iid for section in automation_sections)
+            for item in playlist_items[source_iid]
+        ]
+        playlist = self.events[playlist_index]
+        self.events[playlist_index] = playlist.with_payload(
+            playlist.payload + b"".join(item.raw for item in remapped_items)
+        )
 
     def override_capsule(
         self,

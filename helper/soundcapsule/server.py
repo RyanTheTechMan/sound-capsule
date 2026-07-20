@@ -365,6 +365,8 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "host_executable": session.host_executable,
                 "selected_channels": session.selected_channels,
                 "selected_channel_names": session.selected_channel_names,
+                "selected_channel_types": session.selected_channel_types,
+                "song_position_ticks": session.song_position_ticks,
                 "current_pattern": session.current_pattern,
                 "pattern_name": session.pattern_name,
                 "pattern_length_steps": session.pattern_length_steps,

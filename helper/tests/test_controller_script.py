@@ -37,6 +37,7 @@ class ControllerScriptTests(unittest.TestCase):
                 "channels",
                 channelCount=lambda _include_all: 1,
                 getChannelName=lambda _index, _include_all: "Lead",
+                getChannelType=lambda _index, _include_all: 2,
                 isChannelSelected=lambda _index, _include_all: True,
             ),
             "general": stub_module(
@@ -46,7 +47,7 @@ class ControllerScriptTests(unittest.TestCase):
                 getRecPPQ=lambda: 96,
                 getChangedFlag=lambda: 0,
             ),
-            "midi": stub_module("midi", FPT_Save=100),
+            "midi": stub_module("midi", FPT_Save=100, SONGLENGTH_ABSTICKS=2),
             "patterns": stub_module(
                 "patterns",
                 patternNumber=lambda: 1,
@@ -56,6 +57,7 @@ class ControllerScriptTests(unittest.TestCase):
             "transport": stub_module(
                 "transport",
                 globalTransport=lambda command, value: saves.append((command, value)),
+                getSongPos=lambda _mode: 384,
             ),
             "ui": stub_module("ui", getProgTitle=lambda: "FL Studio 2026"),
         }
@@ -136,6 +138,8 @@ class ControllerScriptTests(unittest.TestCase):
             self.assertEqual(session.project_title, "Song")
             self.assertEqual(session.selected_channels, [0])
             self.assertEqual(session.selected_channel_names, ["Lead"])
+            self.assertEqual(session.selected_channel_types, [2])
+            self.assertEqual(session.song_position_ticks, 384)
             self.assertEqual(session.host_name, "FL Studio 2026")
             self.assertEqual(session.midi_api_version, 42)
 
