@@ -933,6 +933,10 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     search.setTextToShowWhenEmpty("Search names, plugins, or tags", juce::Colours::grey);
     capsuleName.setTextToShowWhenEmpty("Capsule name", juce::Colours::grey);
     tagsInput.setTextToShowWhenEmpty("Tags (comma-separated)", juce::Colours::grey);
+    selectionSummary.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+    selectionSummary.setJustificationType(juce::Justification::centredLeft);
+    selectionSummary.setBorderSize({});
+    selectionSummary.setVisible(false);
     for (auto* clear : {&capsuleNameClear, &tagsInputClear})
     {
         clear->setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
@@ -982,7 +986,7 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
 
     for (auto* component : std::initializer_list<juce::Component*>{
              &brandLogo, &title, &status, &search, &capsuleName, &capsuleNameClear,
-             &tagsInput, &tagsInputClear, &favoritesOnly,
+             &tagsInput, &tagsInputClear, &selectionSummary, &favoritesOnly,
              &sortBy, &sortDirection, &waveformToggle, &midiToggle, &loopToggle,
              &list, &saveGroup, &saveIndividual,
              &connectionStatus, &projectStatus, &patternStatus,
@@ -1265,6 +1269,11 @@ void SoundCapsuleAudioProcessorEditor::resized()
         tagsInput.setBounds(tagsBounds);
         tagsInputClear.setBounds(tagsBounds.removeFromRight(26).reduced(3, 5));
         bounds.removeFromBottom(8);
+    }
+    if (selectionSummary.isVisible())
+    {
+        selectionSummary.setBounds(bounds.removeFromBottom(22));
+        bounds.removeFromBottom(4);
     }
     list.setBounds(bounds);
     operationProgress.setBounds(getLocalBounds());
@@ -2167,10 +2176,21 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->patternStatus.setText("Pattern: " + patternName, juce::dontSendNotification);
         safe->patternStatus.setColour(juce::Label::textColourId, juce::Colours::white);
         const auto saveVisibilityChanged = safe->saveGroup.isVisible() != (selectedCount > 0)
-                                        || safe->saveIndividual.isVisible() != (selectedCount > 1);
+                                        || safe->saveIndividual.isVisible() != (selectedCount > 1)
+                                        || safe->selectionSummary.isVisible() != (selectedCount > 0);
         safe->saveGroup.setButtonText(selectedCount > 1 ? "Save selected" : "Save capsule");
         safe->saveGroup.setVisible(selectedCount > 0);
         safe->saveIndividual.setVisible(selectedCount > 1);
+        if (selectedCount > 0)
+        {
+            auto selectionText = "Selected in FL: " + juce::String(selectedCount)
+                               + (selectedCount == 1 ? " channel" : " channels");
+            if (!selectedNames.isEmpty())
+                selectionText << "  —  " << selectedNames.joinIntoString(", ");
+            safe->selectionSummary.setText(selectionText, juce::dontSendNotification);
+            safe->selectionSummary.setTooltip(selectedNames.joinIntoString(", "));
+        }
+        safe->selectionSummary.setVisible(selectedCount > 0);
         const auto undoAvailable = static_cast<bool>(
             response.getProperty("undo_available", false));
         const auto undoRemaining = static_cast<int>(
@@ -3759,6 +3779,7 @@ void SoundCapsuleAudioProcessorEditor::sendCommand(const juce::String& command,
                     safe->capsuleNameClear.setVisible(false);
                     safe->tagsInput.setVisible(false);
                     safe->tagsInputClear.setVisible(false);
+                    safe->selectionSummary.setVisible(false);
                     safe->saveGroup.setVisible(false);
                     safe->saveIndividual.setVisible(false);
                     safe->undoImport.setVisible(false);

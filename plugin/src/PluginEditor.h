@@ -222,6 +222,7 @@ private:
     juce::TextButton capsuleNameClear{juce::String::charToString(0x00d7)};
     juce::TextEditor tagsInput;
     juce::TextButton tagsInputClear{juce::String::charToString(0x00d7)};
+    juce::Label selectionSummary;
     IconToggleButton favoritesOnly{IconToggleButton::Icon::favorite};
     juce::ComboBox sortBy;
     juce::TextButton sortDirection;
