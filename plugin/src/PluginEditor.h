@@ -209,6 +209,7 @@ private:
     bool normalizeWaveformDisplay = false;
     bool showSingleChannelNameInRename = false;
 
+    juce::ImageComponent brandLogo;
     juce::Label title;
     juce::Label status;
     juce::Label connectionStatus;

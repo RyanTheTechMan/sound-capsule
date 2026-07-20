@@ -16,6 +16,10 @@ juce_add_plugin(SoundCapsule
     VST3_CATEGORIES Fx Tools
 )
 
+juce_add_binary_data(SoundCapsuleAssets
+    SOURCES resources/logo-transparent.png
+)
+
 target_sources(SoundCapsule PRIVATE
     src/CapsulePreviewSource.cpp
     src/CapsulePreviewSource.h
@@ -40,6 +44,7 @@ target_compile_definitions(SoundCapsule PRIVATE
 )
 
 target_link_libraries(SoundCapsule PRIVATE
+    SoundCapsuleAssets
     juce::juce_audio_utils
     juce::juce_cryptography
     juce::juce_gui_extra

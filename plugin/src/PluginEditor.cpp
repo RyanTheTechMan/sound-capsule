@@ -2,6 +2,7 @@
 #include "CapsulePreviewSource.h"
 #include "FlVersion.h"
 #include "PreviewMath.h"
+#include "BinaryData.h"
 
 #include <juce_cryptography/juce_cryptography.h>
 
@@ -294,7 +295,7 @@ public:
                         const juce::String& libraryDirectory,
                         bool startAtFirstAudio, bool normalizeWaveform,
                         bool showSingleChannel)
-        : juce::AlertWindow(title, {}, juce::MessageBoxIconType::QuestionIcon),
+        : juce::AlertWindow(title, {}, juce::MessageBoxIconType::NoIcon),
           previewSettings(startAtFirstAudio, normalizeWaveform, showSingleChannel),
           updateSettings(checkOnStartup),
           libraryLocation(libraryDirectory, "Capsule save location:",
@@ -900,6 +901,11 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     setResizable(true, true);
     setResizeLimits(820, 440, 1300, 900);
 
+    brandLogo.setImage(
+        juce::ImageCache::getFromMemory(
+            BinaryData::logotransparent_png, BinaryData::logotransparent_pngSize),
+        juce::RectanglePlacement::centred);
+    brandLogo.setInterceptsMouseClicks(false, false);
     title.setText("SOUND CAPSULE", juce::dontSendNotification);
     title.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     title.setColour(juce::Label::textColourId, accent);
@@ -975,7 +981,7 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     updateSortDirectionButton();
 
     for (auto* component : std::initializer_list<juce::Component*>{
-             &title, &status, &search, &capsuleName, &capsuleNameClear,
+             &brandLogo, &title, &status, &search, &capsuleName, &capsuleNameClear,
              &tagsInput, &tagsInputClear, &favoritesOnly,
              &sortBy, &sortDirection, &waveformToggle, &midiToggle, &loopToggle,
              &list, &saveGroup, &saveIndividual,
@@ -1186,7 +1192,9 @@ void SoundCapsuleAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds().reduced(16);
     auto header = bounds.removeFromTop(40);
-    title.setBounds(header.removeFromLeft(220));
+    brandLogo.setBounds(header.removeFromLeft(28).reduced(2, 1));
+    header.removeFromLeft(8);
+    title.setBounds(header.removeFromLeft(184));
     setup.setBounds(header.removeFromRight(34).reduced(2, 2));
     header.removeFromRight(6);
     previewVolume.setBounds(header.removeFromRight(170).reduced(2, 2));
