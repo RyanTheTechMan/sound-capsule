@@ -35,6 +35,8 @@ endif()
 
 project(FLSoundCapsule VERSION "${SOUNDCAPSULE_VERSION}" LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

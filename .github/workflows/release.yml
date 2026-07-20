@@ -120,6 +120,9 @@ jobs:
       - name: Build app and VST3
         run: cmake --build build --config Release --parallel 4
 
+      - name: Test preview and FL version behavior
+        run: ctest --test-dir build -C Release --output-on-failure
+
       - name: Install frozen-helper builder
         run: python -m pip install PyInstaller==6.21.0
 

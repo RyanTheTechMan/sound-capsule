@@ -68,6 +68,9 @@ target_link_libraries(SoundCapsulePreviewTests PRIVATE
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
 )
+if(BUILD_TESTING)
+    add_test(NAME SoundCapsulePreviewTests COMMAND SoundCapsulePreviewTests)
+endif()
 
 if(APPLE)
     add_custom_command(TARGET SoundCapsule_VST3 POST_BUILD
