@@ -516,6 +516,10 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 ),
                 "migration_summary": self.service.library_migration_summary,
             }
+        if command == "refresh_library":
+            with self.operation_lock:
+                count = self.service.library.reindex()
+            return {"count": count}
         if command == "preview":
             capsule = self.service.library.find(args["id"])
             capsule.verify()

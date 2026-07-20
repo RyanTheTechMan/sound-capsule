@@ -3516,7 +3516,7 @@ void SoundCapsuleAudioProcessorEditor::showRowMenu(int rowNumber, juce::Point<in
                 safe->status.setText("Capsule file was not found", juce::dontSendNotification);
         }
         else if (result == 14) safe->exportCapsule(capsulePath, name);
-        else if (result == 13) safe->confirmDelete(id, name);
+        else if (result == 13) safe->confirmDelete(id, name, capsulePath);
     });
 }
 
@@ -3745,17 +3745,49 @@ void SoundCapsuleAudioProcessorEditor::promptTags(const juce::String& id,
 }
 
 void SoundCapsuleAudioProcessorEditor::confirmDelete(const juce::String& id,
-                                                      const juce::String& name)
+                                                      const juce::String& name,
+                                                      const juce::String& path)
 {
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     juce::AlertWindow::showAsync(
         juce::MessageBoxOptions::makeOptionsOkCancel(juce::MessageBoxIconType::WarningIcon,
-                                                      "Delete capsule", "Delete \"" + name + "\"?",
-                                                      "Delete", "Cancel", this),
-        [safe, id](int result) {
-            if (result == 1 && safe != nullptr)
-                safe->sendCommand("delete", object({{"id", id}}),
-                                  [safe](juce::var) { if (safe != nullptr) safe->refreshLibrary(); });
+                                                      "Move capsule to Trash",
+                                                      "Move \"" + name + "\" to the system Trash?",
+                                                      "Move to Trash", "Cancel", this),
+        [safe, id, path](int result) {
+            juce::ignoreUnused(id);
+            if (result != 1 || safe == nullptr)
+                return;
+            safe->setBusy("Moving capsule to Trash...");
+            ++safe->requestsInFlight;
+            const juce::File capsule(path);
+            safe->requestPool.addJob([safe, capsule] {
+                const auto alreadyMissing = !capsule.existsAsFile();
+                const auto moved = alreadyMissing || capsule.moveToTrash();
+                juce::MessageManager::callAsync([safe, moved, alreadyMissing] {
+                    if (safe == nullptr)
+                        return;
+                    --safe->requestsInFlight;
+                    if (!moved)
+                    {
+                        safe->status.setText(
+                            "Could not move the capsule to Trash",
+                            juce::dontSendNotification);
+                        return;
+                    }
+                    safe->sendCommand(
+                        "refresh_library", object({}),
+                        [safe, alreadyMissing](juce::var) {
+                            if (safe == nullptr)
+                                return;
+                            safe->status.setText(
+                                alreadyMissing ? "Removed missing capsule from the library"
+                                               : "Capsule moved to Trash",
+                                juce::dontSendNotification);
+                            safe->refreshLibrary();
+                        });
+                });
+            });
         });
 }
 

@@ -81,6 +81,26 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(payload["failed"])
             self.assertTrue(Path(payload["imported"][0]["path"]).is_file())
 
+    def test_refresh_library_forgets_files_moved_to_trash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(
+                settings.library_dir / "Disposable.flcapsule", "Disposable", preview
+            )
+
+            with SoundCapsuleServer(settings) as server:
+                self.assertEqual(len(server.dispatch({"command": "list", "args": {}})["capsules"]), 1)
+                capsule.path.unlink()
+                payload = server.dispatch({"command": "refresh_library", "args": {}})
+                listed = server.dispatch({"command": "list", "args": {}})
+
+            self.assertEqual(payload["count"], 0)
+            self.assertFalse(listed["capsules"])
+
     def test_list_reports_non_destructive_library_migration_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
