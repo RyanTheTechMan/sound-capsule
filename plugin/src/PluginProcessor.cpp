@@ -268,6 +268,11 @@ double SoundCapsuleAudioProcessor::getPreviewPositionProportion() const
     return juce::jlimit(0.0, 1.0, position / length);
 }
 
+double SoundCapsuleAudioProcessor::getPreviewLengthSeconds() const
+{
+    return previewTransport.getLengthInSeconds();
+}
+
 #if ! JUCE_WINDOWS
 void SoundCapsuleAudioProcessor::initialiseFlControlMidi()
 {
@@ -289,30 +294,40 @@ void SoundCapsuleAudioProcessor::initialiseFlControlMidi()
 }
 #endif
 
-bool SoundCapsuleAudioProcessor::ensureHelperRunning()
+bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
 {
     if (!isRunningStandalone())
         return false;
-    if (helperProcess != nullptr && helperProcess->isRunning())
+    if (!refreshSetup && helperProcess != nullptr && helperProcess->isRunning())
         return true;
 
     const auto frozenHelper = frozenHelperExecutable();
     if (frozenHelper.existsAsFile())
     {
-        const auto bridge = installedSetupRoot()
-            .getChildFile("fl-studio").getChildFile("SoundCapsule")
-            .getChildFile("device_SoundCapsule.py");
-        juce::ChildProcess setupProcess;
-        const juce::StringArray setupArguments{
-            frozenHelper.getFullPathName(), "setup",
-            "--bridge-script", bridge.getFullPathName(),
-            "--app-path", soundCapsuleApplication().getFullPathName()
-        };
-        if (!bridge.existsAsFile()
-            || !setupProcess.start(setupArguments, 0)
-            || !setupProcess.waitForProcessToFinish(60 * 1000)
-            || setupProcess.getExitCode() != 0)
-            return false;
+        if (refreshSetup)
+        {
+            const auto bridge = installedSetupRoot()
+                .getChildFile("fl-studio").getChildFile("SoundCapsule")
+                .getChildFile("device_SoundCapsule.py");
+            juce::ChildProcess setupProcess;
+            const juce::StringArray setupArguments{
+                frozenHelper.getFullPathName(), "setup",
+                "--bridge-script", bridge.getFullPathName(),
+                "--app-path", soundCapsuleApplication().getFullPathName()
+            };
+            if (!bridge.existsAsFile() || !setupProcess.start(setupArguments, 0))
+                return false;
+            if (!setupProcess.waitForProcessToFinish(60 * 1000))
+            {
+                setupProcess.kill();
+                return false;
+            }
+            if (setupProcess.getExitCode() != 0)
+                return false;
+        }
+
+        if (helperProcess != nullptr && helperProcess->isRunning())
+            return true;
 
         helperProcess = std::make_unique<juce::ChildProcess>();
         if (!helperProcess->start(

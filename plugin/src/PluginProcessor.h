@@ -37,6 +37,7 @@ public:
     void stopPreview();
     bool isPreviewPlaying() const;
     double getPreviewPositionProportion() const;
+    double getPreviewLengthSeconds() const;
     void setPreviewVolume(float position)
     {
         const auto limited = juce::jlimit(0.0f, 1.0f, position);
@@ -50,7 +51,7 @@ public:
     void setPreviewLooping(bool shouldLoop);
     bool getPreviewLooping() const { return previewLooping.load(); }
     bool isRunningStandalone() const { return wrapperType == wrapperType_Standalone; }
-    bool ensureHelperRunning();
+    bool ensureHelperRunning(bool refreshSetup = false);
 
 private:
     static BusesProperties soundCapsuleBuses();

@@ -48,6 +48,49 @@ int main()
     passed &= expect(closeTo(soundcapsule::preview::waveformVerticalZoom(0.25f, false), 1.0),
                      "disabled waveform normalization must not alter display scale");
 
+    const auto exactNote = soundcapsule::preview::midiNoteTiming(0.25, 0.25, 1.0, 0.5);
+    passed &= expect(closeTo(exactNote.displayStart, 0.25)
+                         && closeTo(exactNote.displayEnd, 0.5)
+                         && closeTo(exactNote.audioStart, 0.125)
+                         && closeTo(exactNote.audioEnd, 0.25),
+                     "exact MIDI timing must map the trimmed timeline into audio progress");
+    const auto legacyNote = soundcapsule::preview::midiNoteTiming(0.25, 0.125, 0.5, 0.5);
+    passed &= expect(closeTo(legacyNote.displayStart, 0.5)
+                         && closeTo(legacyNote.displayEnd, 0.75)
+                         && closeTo(legacyNote.audioStart, 0.25)
+                         && closeTo(legacyNote.audioEnd, 0.375),
+                     "legacy MIDI timing must account for its shorter stored timeline");
+    const auto openingRest = soundcapsule::preview::midiNoteTiming(0.2, 0.1, 1.0, 0.8);
+    passed &= expect(!soundcapsule::preview::isMidiNoteActive(0.159, openingRest)
+                         && soundcapsule::preview::isMidiNoteActive(0.161, openingRest)
+                         && !soundcapsule::preview::isMidiNoteActive(0.241, openingRest),
+                     "active-note boundaries must preserve opening rests and exclude note end");
+    const auto attackAge = soundcapsule::preview::midiAttackAgeSeconds(
+        0.18, openingRest, 4.0);
+    passed &= expect(closeTo(attackAge, 0.08),
+                     "attack age must be measured in preview seconds");
+    passed &= expect(closeTo(soundcapsule::preview::midiAttackEnvelope(0.0, 0.28), 1.0)
+                         && soundcapsule::preview::midiAttackEnvelope(0.14, 0.28) > 0.0f
+                         && closeTo(soundcapsule::preview::midiAttackEnvelope(0.28, 0.28), 0.0),
+                     "attack envelope must start full, decay, and finish cleanly");
+    const auto overlapping = soundcapsule::preview::midiNoteTiming(0.22, 0.2, 1.0, 0.8);
+    passed &= expect(soundcapsule::preview::isMidiNoteActive(0.2, openingRest)
+                         && soundcapsule::preview::isMidiNoteActive(0.2, overlapping),
+                     "overlapping notes must be independently active");
+
+    passed &= expect(closeTo(soundcapsule::preview::midiPlayedDisplayEnd(
+                                 0.1, exactNote, 0.5), exactNote.displayStart)
+                         && closeTo(soundcapsule::preview::midiPlayedDisplayEnd(
+                                        0.1875, exactNote, 0.5), 0.375)
+                         && closeTo(soundcapsule::preview::midiPlayedDisplayEnd(
+                                        0.4, exactNote, 0.5), exactNote.displayEnd),
+                     "MIDI glow must stop at the playhead while a note is playing");
+    passed &= expect(closeTo(soundcapsule::preview::midiPlayedDisplayEnd(
+                                 0.3, legacyNote, 0.5), 0.6)
+                         && closeTo(soundcapsule::preview::midiPlayedDisplayEnd(
+                                        0.3, legacyNote, 0.0), legacyNote.displayStart),
+                     "played MIDI clipping must support legacy timing and zero playback spans");
+
     using soundcapsule::flversion::displayRelease;
     using soundcapsule::flversion::sourceIsNewer;
     passed &= expect(sourceIsNewer("26.4.0.100", "26.2.9.9999"),

@@ -281,11 +281,18 @@ class ProjectLocator:
         cache_key: str | None = None,
     ) -> Path:
         recent = self._valid_unique(self.recent_provider())
-        rooted = self._root_candidates()
+        rooted_cache: list[Path] | None = None
+
+        def rooted() -> list[Path]:
+            nonlocal rooted_cache
+            if rooted_cache is None:
+                rooted_cache = self._root_candidates()
+            return rooted_cache
+
         if changed_after is not None:
             changed = [
                 path
-                for path in self._valid_unique(recent + rooted)
+                for path in self._valid_unique(recent + rooted())
                 if (not title.strip() or _matching_title(path, title))
                 and path.stat().st_mtime >= changed_after - 2.0
             ]
@@ -309,9 +316,7 @@ class ProjectLocator:
                     return valid_cached[0]
         if candidate_validator is not None:
             recent = [path for path in recent if candidate_validator(path)]
-            rooted = [path for path in rooted if candidate_validator(path)]
         if not title.strip():
-            ordered = self._valid_unique(recent + rooted)
             if len(recent) == 1:
                 if cache_key:
                     self._remember_key(cache_key, recent[0])
@@ -322,6 +327,12 @@ class ProjectLocator:
                     "multiple saved FLPs match the live Channel Rack and FL did not publish a "
                     f"project title; save the current project to disambiguate it: {names}"
                 )
+            rooted_candidates = rooted()
+            if candidate_validator is not None:
+                rooted_candidates = [
+                    path for path in rooted_candidates if candidate_validator(path)
+                ]
+            ordered = self._valid_unique(rooted_candidates)
             if len(ordered) == 1:
                 return ordered[0]
             raise FileNotFoundError(
@@ -333,15 +344,20 @@ class ProjectLocator:
         if candidate_validator is not None:
             cached = cached if cached is not None and candidate_validator(cached) else None
             indexed = [path for path in indexed if candidate_validator(path)]
-        ordered = self._valid_unique(recent + ([cached] if cached else []) + indexed + rooted)
-        matching = [path for path in ordered if _matching_title(path, title)]
         recent_matching = [path for path in recent if _matching_title(path, title)]
         if recent_matching:
             selected = recent_matching[0]
             self._remember(title, selected)
             return selected
-        if cached is not None and cached in matching:
+        if cached is not None and _matching_title(cached, title):
             return cached
+        rooted_candidates = rooted()
+        if candidate_validator is not None:
+            rooted_candidates = [
+                path for path in rooted_candidates if candidate_validator(path)
+            ]
+        ordered = self._valid_unique(recent + indexed + rooted_candidates)
+        matching = [path for path in ordered if _matching_title(path, title)]
         if len(matching) == 1:
             self._remember(title, matching[0])
             return matching[0]

@@ -14,6 +14,8 @@ const auto background = juce::Colour(0xff101318);
 const auto panel = juce::Colour(0xff1b2028);
 const auto accent = juce::Colour(0xff69d2a8);
 
+constexpr double midiAttackPulseDurationSeconds = 0.28;
+
 bool isSoundCapsuleFile(const juce::File& file)
 {
     const auto name = file.getFileName();
@@ -1411,7 +1413,29 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
     for (int dot = -1; dot <= 1; ++dot)
         graphics.fillEllipse(menuX - 1.7f, static_cast<float>(height / 2 + dot * 7) - 1.7f, 3.4f, 3.4f);
 
-    const auto previewArea = juce::Rectangle<int>(contentX, 39, actionsX - contentX - 8, height - 45);
+    const auto noteIdleColour = [&](int channel) {
+        if (row.channelCount <= 1)
+            return juce::Colours::lightgrey.withAlpha(0.9f);
+        constexpr float levels[] = {0.88f, 0.60f, 0.74f, 0.50f, 0.82f, 0.66f};
+        const auto level = levels[static_cast<size_t>(channel) % std::size(levels)];
+        return juce::Colour::fromFloatRGBA(level, level, level, 0.95f);
+    };
+    const auto notePlayingColour = [&](int channel) {
+        if (row.channelCount <= 1 || channel == 0)
+            return accent.withAlpha(0.95f);
+        constexpr juce::uint32 colours[] = {
+            0xff78b7ff, 0xffffb45f, 0xffc99aff,
+            0xffff83ad, 0xffffdc6e, 0xff62d8d0,
+        };
+        return juce::Colour(
+            colours[(static_cast<size_t>(channel) - 1) % std::size(colours)]);
+    };
+
+    const auto previewDurationSeconds = isPlaying
+                                      ? audioProcessor.getPreviewLengthSeconds() : 0.0;
+
+    const auto previewArea = juce::Rectangle<int>(contentX, 39,
+                                                   actionsX - contentX - 8, height - 45);
     auto drawWaveform = [&](juce::Rectangle<int> area)
     {
         graphics.setColour(juce::Colours::grey.withAlpha(0.35f));
@@ -1447,28 +1471,11 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         const auto midiScale = 1.0f / row.midiTimelineEnd;
         graphics.setColour(juce::Colours::grey.withAlpha(0.25f));
         graphics.drawRect(area, 1);
-        const auto idleColour = [&](int channel) {
-            if (row.channelCount <= 1)
-                return juce::Colours::lightgrey.withAlpha(0.9f);
-            constexpr float levels[] = {0.88f, 0.60f, 0.74f, 0.50f, 0.82f, 0.66f};
-            const auto level = levels[static_cast<size_t>(channel) % std::size(levels)];
-            return juce::Colour::fromFloatRGBA(level, level, level, 0.95f);
-        };
-        const auto playingColour = [&](int channel) {
-            if (row.channelCount <= 1 || channel == 0)
-                return accent.withAlpha(0.95f);
-            constexpr juce::uint32 colours[] = {
-                0xff78b7ff, 0xffffb45f, 0xffc99aff,
-                0xffff83ad, 0xffffdc6e, 0xff62d8d0,
-            };
-            return juce::Colour(
-                colours[(static_cast<size_t>(channel) - 1) % std::size(colours)]);
-        };
         auto render = [&](bool played) {
             for (const auto& note : row.notes)
             {
-                graphics.setColour(played ? playingColour(note.channel)
-                                          : idleColour(note.channel));
+                graphics.setColour(played ? notePlayingColour(note.channel)
+                                          : noteIdleColour(note.channel));
                 const auto x = static_cast<float>(area.getX())
                              + note.start * midiScale * static_cast<float>(area.getWidth());
                 const auto noteWidth = juce::jmax(
@@ -1488,6 +1495,71 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
             juce::Graphics::ScopedSaveState state(graphics);
             graphics.reduceClipRegion(area.withWidth(progressWidth));
             render(true);
+        }
+        if (isPlaying && previewDurationSeconds > 0.0)
+        {
+            juce::Graphics::ScopedSaveState state(graphics);
+            graphics.reduceClipRegion(area);
+            for (const auto& note : row.notes)
+            {
+                const auto timing = soundcapsule::preview::midiNoteTiming(
+                    note.start, note.length, row.midiTimelineEnd, row.midiPlaybackEnd);
+                const auto activeNow = soundcapsule::preview::isMidiNoteActive(
+                    previewProgress, timing);
+                const auto age = soundcapsule::preview::midiAttackAgeSeconds(
+                    previewProgress, timing, previewDurationSeconds);
+                const auto attack = soundcapsule::preview::midiAttackEnvelope(
+                    age, midiAttackPulseDurationSeconds);
+                if (!activeNow && attack <= 0.0f)
+                    continue;
+
+                const auto x = static_cast<float>(area.getX())
+                             + static_cast<float>(timing.displayStart)
+                                   * static_cast<float>(area.getWidth());
+                const auto playedDisplayEnd = soundcapsule::preview::midiPlayedDisplayEnd(
+                    previewProgress, timing, row.midiPlaybackEnd);
+                const auto playedEndX = static_cast<float>(area.getX())
+                                      + static_cast<float>(playedDisplayEnd)
+                                            * static_cast<float>(area.getWidth());
+                const auto playedWidth = juce::jmax(0.0f, playedEndX - x);
+                if (playedWidth <= 0.0f)
+                    continue;
+                const auto y = static_cast<float>(area.getBottom() - 2)
+                             - note.pitch * static_cast<float>(juce::jmax(1, area.getHeight() - 4));
+                const auto pulse = juce::jmax(activeNow ? 0.45f : 0.0f, attack);
+                const auto thickness = 3.0f + 2.0f * attack;
+                const auto colour = notePlayingColour(note.channel);
+                juce::Graphics::ScopedSaveState noteState(graphics);
+                juce::Path playedClip;
+                playedClip.addRectangle(x, static_cast<float>(area.getY()), playedWidth,
+                                        static_cast<float>(area.getHeight()));
+                graphics.reduceClipRegion(playedClip);
+                for (const auto layer : {6.0f, 4.0f, 2.0f})
+                {
+                    const auto layerAlpha = layer == 6.0f ? 0.055f
+                                          : layer == 4.0f ? 0.095f : 0.17f;
+                    graphics.setColour(colour.withAlpha(juce::jlimit(
+                        0.0f, 0.42f, layerAlpha * pulse)));
+                    graphics.fillRoundedRectangle(
+                        x, y - thickness * 0.5f - layer * 0.4f,
+                        playedWidth, thickness + layer * 0.8f,
+                        1.0f + layer * 0.35f);
+                }
+                graphics.setColour(colour.withAlpha(0.83f));
+                graphics.fillRoundedRectangle(
+                    x, y - thickness * 0.5f, playedWidth, thickness, 1.2f);
+                const auto edgeDepth = juce::jmin(playedWidth, 19.0f);
+                juce::ColourGradient edgeGlow(
+                    colour.withAlpha(0.0f), playedEndX - edgeDepth, y,
+                    colour.withAlpha(juce::jlimit(
+                        0.0f, 1.0f, 0.78f + 0.18f * attack)),
+                    playedEndX, y, false);
+                graphics.setGradientFill(edgeGlow);
+                graphics.fillRoundedRectangle(
+                    playedEndX - edgeDepth,
+                    y - thickness * 0.5f - 2.0f,
+                    edgeDepth, thickness + 4.0f, 1.2f);
+            }
         }
     };
 
@@ -2553,7 +2625,8 @@ void SoundCapsuleAudioProcessorEditor::runSetupRepair()
             .getChildFile("SoundCapsule");
         failureFile = dataRoot.getChildFile("setup-failed.txt");
        #endif
-        const auto ready = safe != nullptr && safe->audioProcessor.ensureHelperRunning();
+        const auto ready = safe != nullptr
+                        && safe->audioProcessor.ensureHelperRunning(true);
         const auto error = !ready && failureFile.existsAsFile()
                              ? failureFile.loadFileAsString().trim()
                              : juce::String();

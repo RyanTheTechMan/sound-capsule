@@ -401,6 +401,23 @@ class ProjectServiceTests(unittest.TestCase):
             )
             self.assertEqual(locator.find_current(""), current.resolve())
 
+    def test_project_locator_does_not_scan_roots_after_recent_project_resolves(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = root / "current.flp"
+            current.write_bytes(fixture_project().to_bytes())
+            locator = ProjectLocator(
+                [root / "permission-protected-projects"],
+                recent_provider=lambda: [current],
+                indexed_provider=lambda _: [],
+            )
+            with mock.patch.object(
+                locator,
+                "_root_candidates",
+                side_effect=AssertionError("project roots should remain lazy"),
+            ):
+                self.assertEqual(locator.find_current(""), current.resolve())
+
     def test_windows_project_search_finds_exact_current_flp_in_standard_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             documents = Path(temporary) / "Documents"
