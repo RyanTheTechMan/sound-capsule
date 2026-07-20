@@ -43,7 +43,7 @@ EVENT_PLUGIN_NAME = 203
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
 EVENT_AUTOMATION_BINDINGS = 216
-EVENT_PLAYLIST = 225
+EVENT_PLAYLIST = 233
 EVENT_ARRANGEMENT_NEW = 99
 EVENT_CURRENT_ARRANGEMENT = 100
 
@@ -83,7 +83,7 @@ RACK_GLOBAL_EVENT_IDS = frozenset({11, 13, 133})
 NOTE_STRUCT = struct.Struct("<IHHIHHBBBBBBBB")
 NOTE_SIZE = NOTE_STRUCT.size
 AUTOMATION_BINDING_STRUCT = struct.Struct("<III")
-PLAYLIST_ITEM_SIZE = 60
+PLAYLIST_ITEM_SIZES = (88, 60, 32)
 
 SUPPORTED_PROJECT_MAJOR = 25
 
@@ -328,14 +328,30 @@ class PlaylistItem:
 
     @classmethod
     def parse_many(cls, payload: bytes) -> list["PlaylistItem"]:
-        if len(payload) % PLAYLIST_ITEM_SIZE:
-            raise FLPUnsupportedError(
-                "the current FL Studio Playlist item format is not supported"
-            )
-        return [
-            cls(payload[offset : offset + PLAYLIST_ITEM_SIZE])
-            for offset in range(0, len(payload), PLAYLIST_ITEM_SIZE)
-        ]
+        if not payload:
+            return []
+        for item_size in PLAYLIST_ITEM_SIZES:
+            if len(payload) % item_size:
+                continue
+            items = [
+                cls(payload[offset : offset + item_size])
+                for offset in range(0, len(payload), item_size)
+            ]
+            # These invariant fields distinguish Playlist items from other
+            # variable-size event payloads and prevent a coincidental length
+            # match from being accepted as a known layout.
+            if all(
+                item.pattern_base == 20_480 and item.raw[16:18] == b"\x78\x00"
+                for item in items
+            ):
+                return items
+        raise FLPUnsupportedError(
+            "the current FL Studio Playlist item format is not supported"
+        )
+
+    @property
+    def record_size(self) -> int:
+        return len(self.raw)
 
     @property
     def position(self) -> int:
@@ -379,6 +395,22 @@ class PlaylistItem:
         struct.pack_into("<f", raw, 24, 0.0)
         struct.pack_into("<f", raw, 28, 0.0)
         return PlaylistItem(bytes(raw))
+
+    def adapt_size(
+        self, item_size: int, *, template: "PlaylistItem | None" = None
+    ) -> "PlaylistItem":
+        if item_size not in PLAYLIST_ITEM_SIZES:
+            raise FLPUnsupportedError("the destination Playlist item format is not supported")
+        if self.record_size == item_size:
+            return self
+        if self.record_size > item_size:
+            return PlaylistItem(self.raw[:item_size])
+        extension = (
+            template.raw[self.record_size:item_size]
+            if template is not None and template.record_size >= item_size
+            else b"\0" * (item_size - self.record_size)
+        )
+        return PlaylistItem(self.raw + extension)
 
 
 def _normalized_note_payload(notes: Sequence[NoteRecord]) -> bytes:
@@ -1014,6 +1046,17 @@ class FLPFile:
             for item in playlist_items[source_iid]
         ]
         playlist = self.events[playlist_index]
+        destination_items = PlaylistItem.parse_many(playlist.payload)
+        destination_template = destination_items[0] if destination_items else None
+        destination_size = (
+            destination_template.record_size
+            if destination_template is not None
+            else remapped_items[0].record_size
+        )
+        remapped_items = [
+            item.adapt_size(destination_size, template=destination_template)
+            for item in remapped_items
+        ]
         self.events[playlist_index] = playlist.with_payload(
             playlist.payload + b"".join(item.raw for item in remapped_items)
         )

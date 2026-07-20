@@ -27,6 +27,10 @@ version's section is also used as its GitHub release notes.
 - On macOS, newly saved projects in custom or cloud-backed locations can be
   identified before FL Studio flushes them to its on-disk recent-project lists;
   FL-generated Backup and autosave copies are excluded from consideration.
+- Automation capture now reads the correct Playlist event and supports the
+  32-, 60-, and FL 26.1.1 88-byte item layouts, preserving or adapting opaque
+  layout extensions when importing between FL releases. Failed operations also
+  provide a Close button instead of trapping the user behind Retry.
 
 ## [0.3.4] - 2026-07-13
 

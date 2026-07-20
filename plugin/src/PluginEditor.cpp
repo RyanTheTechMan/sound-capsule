@@ -835,7 +835,12 @@ OperationProgressOverlay::OperationProgressOverlay()
     stepLabel.setJustificationType(juce::Justification::centred);
     progressBar.setColour(juce::ProgressBar::foregroundColourId, accent);
     progressBar.setColour(juce::ProgressBar::backgroundColourId, juce::Colour(0xff303641));
-    cancelButton.onClick = [this] { if (onCancel) onCancel(); };
+    cancelButton.onClick = [this] {
+        if (retryButton.isVisible())
+            setVisible(false);
+        else if (onCancel)
+            onCancel();
+    };
     retryButton.onClick = [this] { if (onRetry) onRetry(); };
     addAndMakeVisible(heading);
     addAndMakeVisible(stepLabel);
@@ -852,6 +857,7 @@ void OperationProgressOverlay::begin(const juce::String& titleText,
     heading.setText(titleText, juce::dontSendNotification);
     heading.setColour(juce::Label::textColourId, juce::Colours::white);
     stepLabel.setText(initialStep, juce::dontSendNotification);
+    cancelButton.setButtonText("Cancel");
     cancelButton.setEnabled(true);
     cancelButton.setVisible(true);
     retryButton.setVisible(false);
@@ -883,7 +889,9 @@ void OperationProgressOverlay::finish(bool succeeded, const juce::String& titleT
     heading.setColour(juce::Label::textColourId,
                       succeeded ? accent : juce::Colour(0xffff6b6b));
     stepLabel.setText(detail, juce::dontSendNotification);
-    cancelButton.setVisible(false);
+    cancelButton.setButtonText("Close");
+    cancelButton.setEnabled(true);
+    cancelButton.setVisible(!succeeded);
     retryButton.setVisible(!succeeded);
     progressBar.repaint();
     resized();

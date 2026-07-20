@@ -97,8 +97,10 @@ def fixture_project(*, ppq: int = 96) -> FLPFile:
     return FLPFile(FORMAT_PROJECT, 2, ppq, events)
 
 
-def playlist_item(channel_iid: int, *, position: int, length: int) -> bytes:
-    raw = bytearray(60)
+def playlist_item(
+    channel_iid: int, *, position: int, length: int, item_size: int = 60
+) -> bytes:
+    raw = bytearray(item_size)
     struct.pack_into("<IHHIHH", raw, 0, position, 20_480, channel_iid, length, 499, 0)
     raw[16:20] = bytes((120, 0, 64, 0))
     raw[20:24] = bytes((64, 100, 128, 128))
@@ -106,7 +108,9 @@ def playlist_item(channel_iid: int, *, position: int, length: int) -> bytes:
     return bytes(raw)
 
 
-def fixture_project_with_automation(*, ppq: int = 96) -> FLPFile:
+def fixture_project_with_automation(
+    *, ppq: int = 96, playlist_item_size: int = 60
+) -> FLPFile:
     project = fixture_project(ppq=ppq)
     pattern_at = next(
         index for index, event in enumerate(project.events)
@@ -135,7 +139,10 @@ def fixture_project_with_automation(*, ppq: int = 96) -> FLPFile:
             scalar_event(EVENT_ARRANGEMENT_NEW, 0),
             data_event(
                 EVENT_PLAYLIST,
-                playlist_item(9, position=960, length=384),
+                playlist_item(
+                    9, position=960, length=384,
+                    item_size=playlist_item_size,
+                ),
             ),
             scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
         ]
@@ -502,6 +509,15 @@ class AutomationClipFLPTests(unittest.TestCase):
         self.assertEqual(len(playlist), 1)
         self.assertEqual((playlist[0].position, playlist[0].length), (960, 384))
 
+    def test_reads_fl26_88_byte_playlist_items(self) -> None:
+        project = fixture_project_with_automation(playlist_item_size=88)
+
+        playlist = project.playlist_items_for_channels([9])[9]
+
+        self.assertEqual(len(playlist), 1)
+        self.assertEqual(playlist[0].record_size, 88)
+        self.assertEqual((playlist[0].item_index, playlist[0].length), (9, 384))
+
     def test_automation_preview_uses_song_mode_and_normalizes_playlist(self) -> None:
         preview = fixture_project_with_automation().isolated_preview_project([2, 9], 3)
 
@@ -554,6 +570,38 @@ class AutomationClipFLPTests(unittest.TestCase):
         self.assertEqual(binding.target_channel_iid({2, 5, 6, 7}), 6)
         item = merged.playlist_items_for_channels([7])[7][0]
         self.assertEqual((item.position, item.length), (480, 768))
+
+    def test_append_adapts_automation_to_destination_playlist_layout(self) -> None:
+        source = fixture_project_with_automation(playlist_item_size=60)
+        destination = fixture_project()
+        destination.events.extend(
+            [
+                scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+                data_event(
+                    EVENT_PLAYLIST,
+                    playlist_item(5, position=0, length=384, item_size=88),
+                ),
+                scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+            ]
+        )
+        sections = [
+            section for section in source.channel_sections()
+            if section.iid in {2, 9}
+        ]
+
+        merged, mapping, _ = destination.append_capsule(
+            sections,
+            {2: source.pattern_notes()[3]},
+            source_ppq=source.ppq,
+            pattern_name="Imported",
+            automation_bindings=source.automation_bindings(),
+            automation_playlist_items=source.playlist_items_for_channels([9]),
+            playlist_anchor=480,
+        )
+
+        imported = merged.playlist_items_for_channels([mapping[9]])[mapping[9]][0]
+        self.assertEqual(imported.record_size, 88)
+        self.assertEqual((imported.position, imported.length), (480, 384))
 
 
 class CapsuleTests(unittest.TestCase):
