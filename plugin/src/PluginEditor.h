@@ -49,11 +49,14 @@ private:
 class SoundCapsuleAudioProcessorEditor final : public juce::AudioProcessorEditor,
                                                 public juce::FileDragAndDropTarget,
                                                 private juce::ListBoxModel,
+                                                private juce::KeyListener,
                                                 private juce::Timer
 {
 public:
     explicit SoundCapsuleAudioProcessorEditor(SoundCapsuleAudioProcessor&);
     ~SoundCapsuleAudioProcessorEditor() override;
+
+    using juce::Component::keyPressed;
 
     void paint(juce::Graphics&) override;
     void paintOverChildren(juce::Graphics&) override;
@@ -97,11 +100,15 @@ private:
     };
 
     int getNumRows() override;
+    juce::String getNameForRow(int row) override;
     juce::String getTooltipForRow(int row) override;
     void paintListBoxItem(int row, juce::Graphics&, int width, int height, bool selected) override;
     void listBoxItemClicked(int row, const juce::MouseEvent&) override;
     void selectedRowsChanged(int row) override;
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override;
+    void deleteKeyPressed(int row) override;
+    void returnKeyPressed(int row) override;
+    bool keyPressed(const juce::KeyPress&, juce::Component*) override;
     void timerCallback() override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;

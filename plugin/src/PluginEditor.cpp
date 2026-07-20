@@ -1010,6 +1010,9 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     list.setRowHeight(64);
     list.setColour(juce::ListBox::backgroundColourId, panel);
     list.addMouseListener(this, true);
+    list.addKeyListener(this);
+    list.setWantsKeyboardFocus(true);
+    list.setTitle("Capsule library. Use arrow keys to select, Space to preview, Return to import, F to favorite, M for more actions, and Delete to move a capsule to Trash.");
     libraryEmptyState.setColour(juce::Label::textColourId,
                                 juce::Colours::lightgrey.withAlpha(0.78f));
     libraryEmptyState.setFont(juce::FontOptions(14.0f));
@@ -1126,6 +1129,7 @@ SoundCapsuleAudioProcessorEditor::~SoundCapsuleAudioProcessorEditor()
 {
     stopTimer();
     list.removeMouseListener(this);
+    list.removeKeyListener(this);
     shuttingDown.store(true);
     previewPreloadPool.removeAllJobs(true, 5000);
     requestPool.removeAllJobs(true, 5000);
@@ -1290,6 +1294,24 @@ void SoundCapsuleAudioProcessorEditor::resized()
 }
 
 int SoundCapsuleAudioProcessorEditor::getNumRows() { return static_cast<int>(rows.size()); }
+
+juce::String SoundCapsuleAudioProcessorEditor::getNameForRow(int rowNumber)
+{
+    if (!juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
+        return {};
+    const auto& row = rows[static_cast<size_t>(rowNumber)];
+    auto description = row.name;
+    if (row.plugins.isNotEmpty())
+        description << ", " << row.plugins;
+    description << ", " << row.channelCount
+                << (row.channelCount == 1 ? " channel" : " channels")
+                << ", " << row.useCount << (row.useCount == 1 ? " use" : " uses");
+    if (row.tags.isNotEmpty())
+        description << ", tags " << row.tags;
+    if (row.favorite)
+        description << ", favorite";
+    return description;
+}
 
 juce::String SoundCapsuleAudioProcessorEditor::getTooltipForRow(int rowNumber)
 {
@@ -1698,8 +1720,59 @@ void SoundCapsuleAudioProcessorEditor::selectedRowsChanged(int)
 {
 }
 
-void SoundCapsuleAudioProcessorEditor::listBoxItemDoubleClicked(int, const juce::MouseEvent&)
+void SoundCapsuleAudioProcessorEditor::listBoxItemDoubleClicked(
+    int rowNumber, const juce::MouseEvent&)
 {
+    startPreview(rowNumber, 0.0, true);
+}
+
+void SoundCapsuleAudioProcessorEditor::deleteKeyPressed(int rowNumber)
+{
+    if (!juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
+        return;
+    const auto& row = rows[static_cast<size_t>(rowNumber)];
+    confirmDelete(row.id, row.name, row.capsulePath);
+}
+
+void SoundCapsuleAudioProcessorEditor::returnKeyPressed(int rowNumber)
+{
+    if (juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
+        importCapsule(rows[static_cast<size_t>(rowNumber)].id, defaultImportMode);
+}
+
+bool SoundCapsuleAudioProcessorEditor::keyPressed(
+    const juce::KeyPress& key, juce::Component* originatingComponent)
+{
+    if (originatingComponent != &list)
+        return false;
+    const auto rowNumber = list.getSelectedRow();
+    if (key == juce::KeyPress::escapeKey)
+    {
+        stopPreviewPlayback();
+        return true;
+    }
+    if (!juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
+        return false;
+    const auto character = juce::CharacterFunctions::toLowerCase(key.getTextCharacter());
+    if (character == ' ')
+    {
+        startPreview(rowNumber, 0.0, true);
+        return true;
+    }
+    if (character == 'f')
+    {
+        const auto& row = rows[static_cast<size_t>(rowNumber)];
+        sendCommand("favorite", object({{"id", row.id}, {"value", !row.favorite}}),
+                    [this](juce::var) { refreshLibrary(); });
+        return true;
+    }
+    if (character == 'm')
+    {
+        const auto rowBounds = list.getRowPosition(rowNumber, true);
+        showRowMenu(rowNumber, list.localPointToGlobal(rowBounds.getCentre()));
+        return true;
+    }
+    return false;
 }
 
 void SoundCapsuleAudioProcessorEditor::timerCallback()
