@@ -6,6 +6,8 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-20
+
 ### Added
 
 - Explicitly selected Channel Rack Automation Clips can now be captured with
