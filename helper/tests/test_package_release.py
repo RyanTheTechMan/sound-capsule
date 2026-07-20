@@ -9,6 +9,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PackageReleaseTests(unittest.TestCase):
+    def test_windows_installer_installs_helper_dependencies_before_freezing(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows_installer = workflow.split("  windows-installer:", 1)[1]
+
+        self.assertLess(
+            windows_installer.index("python -m pip install ./helper"),
+            windows_installer.index("python scripts/build_frozen_helper.py"),
+        )
+
     def test_windows_custom_actions_run_frozen_helper_without_powershell(self) -> None:
         source = (ROOT / "packaging/windows/Package.wxs").read_text(encoding="utf-8")
         self.assertNotIn("powershell", source.casefold())

@@ -45,6 +45,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Install helper dependencies
+        run: python -m pip install ./helper
       - name: Validate Windows installer source
         shell: powershell
         run: '[void][xml](Get-Content -Raw packaging/windows/Package.wxs)'
