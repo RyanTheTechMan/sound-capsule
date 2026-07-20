@@ -143,28 +143,28 @@ def install_helper(root: Path) -> Path:
     environment = root / "venv"
     # Source/development installs reuse their running interpreter. Native
     # releases ship a frozen helper and never call this path on user machines.
-    # The helper has no third-party dependencies, so pip is omitted.
     subprocess.run(
         [
             sys.executable,
             "-m",
             "venv",
             "--clear",
-            "--without-pip",
             str(environment),
         ],
         check=True,
     )
     python = environment / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
-    site_packages = Path(
-        subprocess.check_output(
-            [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
-            text=True,
-        ).strip()
+    subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            str(helper_root),
+        ],
+        check=True,
     )
-    # The helper has no third-party runtime dependencies. A .pth file makes
-    # the copied package importable without pip or a build backend download.
-    (site_packages / "soundcapsule.pth").write_text(str(helper_root) + "\n", encoding="utf-8")
     return python
 
 

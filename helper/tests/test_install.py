@@ -120,7 +120,7 @@ class InstallTests(unittest.TestCase):
             self.assertFalse(missing.exists())
             self.assertTrue((root / "BridgeScript" / "device_SoundCapsule.py").is_file())
 
-    def test_helper_environment_uses_the_running_python_without_uv_resolution(self) -> None:
+    def test_helper_environment_installs_runtime_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "SoundCapsule"
 
@@ -128,7 +128,10 @@ class InstallTests(unittest.TestCase):
 
             self.assertTrue(python.is_file())
             version = subprocess.check_output(
-                [str(python), "-c", "import soundcapsule; print(soundcapsule.__version__)"],
+                [
+                    str(python), "-c",
+                    "import send2trash, soundcapsule; print(soundcapsule.__version__)",
+                ],
                 text=True,
             ).strip()
             self.assertRegex(version, r"^\d+\.\d+\.\d+$")
