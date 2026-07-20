@@ -1070,7 +1070,7 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     tagsInput.setVisible(false);
     saveGroup.setVisible(false);
     saveIndividual.setVisible(false);
-    list.setRowHeight(64);
+    list.setRowHeight(84);
     list.setColour(juce::ListBox::backgroundColourId, panel);
     list.addMouseListener(this, true);
     list.addKeyListener(this);
@@ -2144,8 +2144,8 @@ void SoundCapsuleAudioProcessorEditor::toggleWaveformChannels()
 void SoundCapsuleAudioProcessorEditor::applyPreviewHeight(const juce::String& height)
 {
     previewHeight = height == "small" || height == "large" ? height : "medium";
-    const auto rowHeight = previewHeight == "small" ? 54
-                         : (previewHeight == "large" ? 84 : 64);
+    const auto rowHeight = previewHeight == "small" ? 64
+                         : (previewHeight == "large" ? 104 : 84);
     list.setRowHeight(rowHeight);
     list.updateContent();
     list.repaint();
