@@ -72,8 +72,8 @@ overwritten and can be revealed from the result message.
 1. In FL Studio, select the generator channel or channels you want to save and
    choose the pattern to capture.
 2. In Sound Capsule, enter a name and optional comma-separated tags.
-3. Click **Import** for one channel, **Import selected** for a grouped capsule,
-   or **Import individually** to create one capsule per selected channel.
+3. Click **Save capsule** for one channel, **Save selected** for a grouped capsule,
+   or **Save individually** to create one capsule per selected channel.
 4. Sound Capsule saves the capsule to its library and creates an audio preview.
 
 ## Use a capsule

@@ -228,8 +228,8 @@ private:
     IconToggleButton midiToggle{IconToggleButton::Icon::midi};
     IconToggleButton loopToggle{IconToggleButton::Icon::loop};
     juce::ListBox list{"Capsule library", this};
-    juce::TextButton saveGroup{"Import selected"};
-    juce::TextButton saveIndividual{"Import individually"};
+    juce::TextButton saveGroup{"Save selected"};
+    juce::TextButton saveIndividual{"Save individually"};
     juce::TextButton undoImport{"Undo import"};
     SettingsIconButton setup;
     juce::Label volumeLabel{{}, "Volume"};

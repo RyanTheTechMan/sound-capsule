@@ -2152,7 +2152,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->patternStatus.setColour(juce::Label::textColourId, juce::Colours::white);
         const auto saveVisibilityChanged = safe->saveGroup.isVisible() != (selectedCount > 0)
                                         || safe->saveIndividual.isVisible() != (selectedCount > 1);
-        safe->saveGroup.setButtonText(selectedCount > 1 ? "Import selected" : "Import");
+        safe->saveGroup.setButtonText(selectedCount > 1 ? "Save selected" : "Save capsule");
         safe->saveGroup.setVisible(selectedCount > 0);
         safe->saveIndividual.setVisible(selectedCount > 1);
         const auto undoAvailable = static_cast<bool>(
@@ -2227,7 +2227,7 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
                     juce::Time::getMillisecondCounter() + 1100;
                 safe->operationId.clear();
                 safe->operationProgressPollInFlight.store(false);
-                safe->status.setText("Imported to library", juce::dontSendNotification);
+                safe->status.setText("Saved to library", juce::dontSendNotification);
                 safe->refreshLibrary();
             },
             300000, false, showFailure);
