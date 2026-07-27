@@ -19,8 +19,8 @@ from soundcapsule.bridge import (
 )
 from soundcapsule.capsule import Capsule
 from soundcapsule.config import Settings
-from soundcapsule.flp import EVENT_FL_VERSION
-from soundcapsule.server import SoundCapsuleServer
+from soundcapsule.flp import EVENT_FL_VERSION, FLPFile
+from soundcapsule.server import PROTOCOL_VERSION, SoundCapsuleServer
 from test_flp import fixture_project, write_silence
 
 
@@ -100,6 +100,44 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(payload["count"], 0)
             self.assertFalse(listed["capsules"])
+
+    def test_library_list_is_paginated_and_preview_details_are_lazy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsules = [
+                self._build_capsule(
+                    settings.library_dir / f"Capsule-{index}.flcapsule",
+                    f"Capsule {index}",
+                    preview,
+                )
+                for index in range(3)
+            ]
+
+            with SoundCapsuleServer(settings) as server:
+                first = server.dispatch({
+                    "command": "list",
+                    "args": {"limit": 2, "offset": 0, "sort_by": "name", "descending": False},
+                })
+                second = server.dispatch({
+                    "command": "list",
+                    "args": {"limit": 2, "offset": 2, "sort_by": "name", "descending": False},
+                })
+                details = server.dispatch({
+                    "command": "preview_details",
+                    "args": {"ids": [capsules[0].manifest.id]},
+                })
+
+            self.assertEqual(first["total"], 3)
+            self.assertEqual(len(first["capsules"]), 2)
+            self.assertTrue(first["has_more"])
+            self.assertEqual(len(second["capsules"]), 1)
+            self.assertFalse(second["has_more"])
+            self.assertNotIn("note_preview", first["capsules"][0])
+            self.assertIn("note_preview", details["capsules"][0])
 
     def test_trash_command_uses_recoverable_platform_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -272,7 +310,13 @@ class ServerTests(unittest.TestCase):
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 with socket.create_connection(server.server_address, timeout=2) as client:
-                    client.sendall(json.dumps({"command": "ping", "args": {}}).encode() + b"\n")
+                    client.sendall(json.dumps({
+                        "protocol_version": PROTOCOL_VERSION,
+                        "client_version": __version__,
+                        "auth_token": server.auth_token,
+                        "command": "ping",
+                        "args": {},
+                    }).encode() + b"\n")
                     response = b""
                     while not response.endswith(b"\n"):
                         response += client.recv(4096)
@@ -281,6 +325,55 @@ class ServerTests(unittest.TestCase):
             payload = json.loads(response)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["version"], __version__)
+            self.assertEqual(payload["protocol_version"], PROTOCOL_VERSION)
+
+    def test_json_line_protocol_rejects_missing_authentication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            with SoundCapsuleServer(settings) as server:
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                with socket.create_connection(server.server_address, timeout=2) as client:
+                    client.sendall(json.dumps({
+                        "protocol_version": PROTOCOL_VERSION,
+                        "client_version": __version__,
+                        "command": "ping",
+                        "args": {},
+                    }).encode() + b"\n")
+                    response = client.recv(4096)
+                server.shutdown()
+                thread.join(timeout=2)
+
+            payload = json.loads(response)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["type"], "PermissionError")
+
+    def test_json_line_protocol_rejects_incompatible_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            with SoundCapsuleServer(settings) as server:
+                with self.assertRaisesRegex(RuntimeError, "incompatible helper protocol"):
+                    server.handle_request({
+                        "protocol_version": PROTOCOL_VERSION + 1,
+                        "client_version": __version__,
+                        "auth_token": server.auth_token,
+                        "command": "ping",
+                        "args": {},
+                    })
+
+    def test_second_helper_fails_before_initializing_shared_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            owner_settings = Settings(data_dir=root / "owner", server_port=0)
+            with SoundCapsuleServer(owner_settings) as owner:
+                contender_settings = Settings(
+                    data_dir=root / "contender",
+                    server_port=owner.server_address[1],
+                )
+                with mock.patch("soundcapsule.server.CapsuleService") as service:
+                    with self.assertRaises(OSError):
+                        SoundCapsuleServer(contender_settings)
+                    service.assert_not_called()
 
     def test_import_progress_can_be_polled_while_operation_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -371,6 +464,113 @@ class ServerTests(unittest.TestCase):
                 self.assertFalse(failure["active"])
                 self.assertEqual(failure["step"], "Capture failed")
                 self.assertEqual(failure["error"], "render failed")
+
+    def test_concurrent_mutation_is_rejected_without_clobbering_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            with SoundCapsuleServer(settings) as server:
+                started = threading.Event()
+                release = threading.Event()
+                errors: list[Exception] = []
+
+                def blocking_capture(*_args, progress_callback, **_kwargs):
+                    progress_callback(35, "Rendering preview")
+                    started.set()
+                    release.wait(timeout=5)
+                    return []
+
+                def run_first() -> None:
+                    try:
+                        server.dispatch({
+                            "command": "capture",
+                            "args": {"name": "Lead", "operation_id": "capture-one"},
+                        })
+                    except Exception as error:
+                        errors.append(error)
+
+                with mock.patch.object(
+                    server.service, "capture", side_effect=blocking_capture
+                ):
+                    thread = threading.Thread(target=run_first)
+                    thread.start()
+                    self.assertTrue(started.wait(timeout=2))
+                    with self.assertRaisesRegex(RuntimeError, "already in progress"):
+                        server.dispatch({
+                            "command": "capture",
+                            "args": {"name": "Bass", "operation_id": "capture-two"},
+                        })
+                    status = server.dispatch({
+                        "command": "operation_status",
+                        "args": {"operation_id": "capture-one"},
+                    })
+                    release.set()
+                    thread.join(timeout=2)
+
+                self.assertFalse(errors)
+                self.assertEqual(status["progress"], 35)
+                self.assertEqual(status["step"], "Rendering preview")
+
+    def test_completed_capture_operation_is_replayed_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            request = {
+                "command": "capture",
+                "args": {"name": "Lead", "operation_id": "durable-capture"},
+            }
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "capture", return_value=[]
+            ) as capture:
+                first = server.dispatch(request)
+                capture.assert_called_once()
+
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "capture", side_effect=AssertionError("capture repeated")
+            ) as capture:
+                second = server.dispatch(request)
+                capture.assert_not_called()
+
+            self.assertEqual(second, first)
+
+    def test_committed_import_is_replayed_from_transaction_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.ensure()
+            project = root / "Song.flp"
+            project.write_bytes(fixture_project().to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = self._build_capsule(
+                settings.library_dir / "Lead.flcapsule", "Lead", preview
+            )
+            request = {
+                "command": "import",
+                "args": {
+                    "id": capsule.manifest.id,
+                    "mode": "append",
+                    "project": str(project),
+                    "operation_id": "durable-import",
+                    "open": False,
+                    "in_place": True,
+                },
+            }
+
+            with SoundCapsuleServer(settings) as server:
+                first = server.dispatch(request)
+            self.assertTrue(first["committed"])
+            self.assertEqual(FLPFile.read(project).channel_count, 3)
+            (settings.data_dir / "operations.json").unlink(missing_ok=True)
+
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service,
+                "import_capsule",
+                side_effect=AssertionError("import repeated"),
+            ) as import_capsule:
+                second = server.dispatch(request)
+                import_capsule.assert_not_called()
+
+            self.assertEqual(second["transaction_id"], first["transaction_id"])
+            self.assertEqual(FLPFile.read(project).channel_count, 3)
 
     def test_save_request_is_atomic_and_short_lived(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

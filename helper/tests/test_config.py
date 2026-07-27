@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
-from soundcapsule.config import Settings, registered_fl_user_folder
+from soundcapsule.config import (
+    HELPER_TOKEN_FILENAME,
+    Settings,
+    load_or_create_helper_token,
+    registered_fl_user_folder,
+)
 
 
 class ConfigTests(unittest.TestCase):
+    def test_helper_token_is_private_and_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            first = load_or_create_helper_token(data)
+            second = load_or_create_helper_token(data)
+            token_path = data / HELPER_TOKEN_FILENAME
+
+            self.assertEqual(first, second)
+            self.assertGreaterEqual(len(first), 32)
+            self.assertEqual(token_path.read_text(encoding="utf-8").strip(), first)
+            if os.name != "nt":
+                self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
+
     def test_windows_fl_user_folder_comes_from_image_line_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             shared = Path(temporary) / "Image-Line Data"

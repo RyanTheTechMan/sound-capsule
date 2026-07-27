@@ -732,6 +732,195 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(merged.channel_count, 3)
             self.assertEqual(result.channel_mapping, {2: 6})
             self.assertEqual(merged.channel_sections()[-1].name, "Lead")
+            self.assertFalse(list(settings.staging_dir.glob("import-*.flp")))
+
+    def test_failed_import_always_deletes_its_staged_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            original = source.read_bytes()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule",
+                name="Lead", project=fixture_project(), channel_ids=[2],
+                pattern_id=3, preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+
+            with mock.patch(
+                "soundcapsule.project.FLPFile.read",
+                side_effect=RuntimeError("staged parse failed"),
+            ), self.assertRaisesRegex(RuntimeError, "staged parse failed"):
+                service.import_capsule(
+                    capsule.manifest.id,
+                    mode="append",
+                    project_path=source,
+                    open_project=False,
+                    in_place=True,
+                )
+
+            self.assertEqual(source.read_bytes(), original)
+            self.assertFalse(list(settings.staging_dir.glob("import-*.flp")))
+
+    def test_reload_failure_reports_a_committed_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule",
+                name="Lead", project=fixture_project(), channel_ids=[2],
+                pattern_id=3, preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+
+            with mock.patch.object(
+                service, "_open", side_effect=OSError("FL Studio did not reopen")
+            ):
+                result = service.import_capsule(
+                    capsule.manifest.id,
+                    mode="append",
+                    project_path=source,
+                    open_project=True,
+                    in_place=True,
+                    operation_id="reload-failure",
+                )
+
+            self.assertTrue(result.committed)
+            self.assertFalse(result.reload_confirmed)
+            self.assertIn("did not reopen", result.reload_error)
+            self.assertEqual(FLPFile.read(source).channel_count, 3)
+            self.assertFalse(list(settings.staging_dir.glob("import-*.flp")))
+
+    def test_transaction_journal_failure_rolls_back_in_place_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            original = source.read_bytes()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule",
+                name="Lead", project=fixture_project(), channel_ids=[2],
+                pattern_id=3, preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+
+            with mock.patch.object(
+                service, "_write_transaction", side_effect=OSError("journal full")
+            ), self.assertRaisesRegex(OSError, "journal full"):
+                service.import_capsule(
+                    capsule.manifest.id,
+                    mode="append",
+                    project_path=source,
+                    open_project=False,
+                    in_place=True,
+                    operation_id="journal-failure",
+                )
+
+            self.assertEqual(source.read_bytes(), original)
+            self.assertFalse(list(settings.staging_dir.glob("import-*.flp")))
+
+    def test_visible_commit_is_success_even_if_journal_close_reports_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule",
+                name="Lead", project=fixture_project(), channel_ids=[2],
+                pattern_id=3, preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+            write_transaction = service._write_transaction
+
+            def commit_then_error(*args, **kwargs):
+                write_transaction(*args, **kwargs)
+                raise OSError("close reported an error after commit")
+
+            with mock.patch.object(
+                service, "_write_transaction", side_effect=commit_then_error
+            ):
+                result = service.import_capsule(
+                    capsule.manifest.id,
+                    mode="append",
+                    project_path=source,
+                    open_project=False,
+                    in_place=True,
+                    operation_id="visible-commit",
+                )
+
+            self.assertTrue(result.committed)
+            self.assertEqual(FLPFile.read(source).channel_count, 3)
+
+    def test_startup_recovers_an_interrupted_prepared_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            original = source.read_bytes()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule",
+                name="Lead", project=fixture_project(), channel_ids=[2],
+                pattern_id=3, preview_wav=preview,
+            )
+            service = CapsuleService(settings)
+            service.import_capsule(
+                capsule.manifest.id,
+                mode="append",
+                project_path=source,
+                open_project=False,
+                in_place=True,
+                operation_id="interrupted-import",
+            )
+            journal = settings.data_dir / "transactions.jsonl"
+            records = [
+                json.loads(line)
+                for line in journal.read_text(encoding="utf-8").splitlines()
+            ]
+            prepare = next(
+                record for record in records
+                if record.get("action") == "import_prepare"
+            )
+            prior_abort = {
+                "action": "import_abort",
+                "transaction_id": prepare["transaction_id"],
+                "timestamp": time.time() - 1,
+                "reason": "prior failed attempt",
+            }
+            journal.write_text(
+                json.dumps(prepare) + "\n"
+                + json.dumps(prior_abort) + "\n"
+                + json.dumps(prepare) + "\n",
+                encoding="utf-8",
+            )
+
+            recovered = CapsuleService(settings)
+
+            self.assertEqual(source.read_bytes(), original)
+            self.assertFalse(recovered.recovery_warnings)
+            actions = [
+                json.loads(line)["action"]
+                for line in journal.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                actions,
+                ["import_prepare", "import_abort", "import_prepare", "import_abort"],
+            )
 
     def test_import_applies_saved_channel_names_for_append_and_override(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -955,9 +1144,17 @@ class ProjectServiceTests(unittest.TestCase):
                 open_project=False, in_place=True,
             )
             journal = settings.data_dir / "transactions.jsonl"
-            record = json.loads(journal.read_text(encoding="utf-8"))
-            record["timestamp"] = time.time() - 61
-            journal.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            records = [
+                json.loads(line)
+                for line in journal.read_text(encoding="utf-8").splitlines()
+            ]
+            for record in records:
+                if record.get("action") == "import":
+                    record["timestamp"] = time.time() - 61
+            journal.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
 
             self.assertFalse(service.undo_status(source)["available"])
             with self.assertRaisesRegex(FLPUnsupportedError, "expired"):

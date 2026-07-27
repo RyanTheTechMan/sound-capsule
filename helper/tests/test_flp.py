@@ -757,7 +757,10 @@ class CapsuleTests(unittest.TestCase):
             self.assertEqual(
                 [channel.name for channel in manifest.channels], ["Serum Lead", "Kick"]
             )
-            self.assertEqual(capsule.read_channel_state(manifest.channels[0]).format, 0x20)
+            channel_state = capsule.read_channel_state(manifest.channels[0])
+            self.assertEqual(channel_state.format, 0x20)
+            self.assertEqual(channel_state.events[0].id, EVENT_FL_VERSION)
+            self.assertEqual(channel_state.fl_version, "25.2.5.5055")
             self.assertEqual(capsule.read_notes(manifest.channels[0])[0].to_dict()["mod_y"], 55)
             extracted_preview = capsule.extract_preview(root / "cache")
             self.assertEqual(extracted_preview.read_bytes(), preview.read_bytes())

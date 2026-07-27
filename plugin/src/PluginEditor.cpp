@@ -2212,96 +2212,129 @@ SoundCapsuleAudioProcessorEditor::CapsuleRow* SoundCapsuleAudioProcessorEditor::
     return juce::isPositiveAndBelow(index, static_cast<int>(rows.size())) ? &rows[static_cast<size_t>(index)] : nullptr;
 }
 
+SoundCapsuleAudioProcessorEditor::CapsuleRow
+SoundCapsuleAudioProcessorEditor::capsuleRowFromValue(const juce::var& value)
+{
+    CapsuleRow row;
+    row.id = value.getProperty("id", "").toString();
+    row.name = value.getProperty("name", "").toString();
+    row.sourceFlVersion = value.getProperty("source_fl_version", "").toString();
+    row.favorite = static_cast<bool>(value.getProperty("favorite", false));
+    row.channelCount = static_cast<int>(value.getProperty("channel_count", 0));
+    row.useCount = static_cast<int>(value.getProperty("use_count", 0));
+    row.capsulePath = value.getProperty("path", "").toString();
+    row.midiPlaybackEnd = juce::jlimit(
+        0.000001f, 1.0f,
+        static_cast<float>(value.getProperty("midi_playback_end", 1.0)));
+
+    const auto plugins = juce::JSON::parse(
+        value.getProperty("plugin_names", "[]").toString());
+    const auto tagValues = juce::JSON::parse(
+        value.getProperty("tags", "[]").toString());
+    const auto channelValues = juce::JSON::parse(
+        value.getProperty("channel_names", "[]").toString());
+    juce::StringArray pluginNames, tagNames;
+    if (auto* array = plugins.getArray())
+        for (const auto& item : *array)
+            pluginNames.add(item.toString());
+    if (auto* array = tagValues.getArray())
+        for (const auto& item : *array)
+            tagNames.add(item.toString());
+    if (auto* array = channelValues.getArray())
+        for (const auto& item : *array)
+            row.channelNames.add(item.toString());
+    row.plugins = pluginNames.joinIntoString(", ");
+    row.tags = tagNames.joinIntoString(", ");
+    row.tagItems = tagNames;
+    return row;
+}
+
+void SoundCapsuleAudioProcessorEditor::applyPreviewDetails(
+    CapsuleRow& row, const juce::var& value)
+{
+    row.notes.clear();
+    row.automations.clear();
+    const auto noteValues = juce::JSON::parse(
+        value.getProperty("note_preview", "[]").toString());
+    const auto automationValues = juce::JSON::parse(
+        value.getProperty("automation_preview", "[]").toString());
+    if (auto* notes = noteValues.getArray())
+        for (const auto& item : *notes)
+            if (auto* note = item.getArray(); note != nullptr && note->size() >= 3)
+                row.notes.push_back({static_cast<float>((*note)[0]),
+                                     static_cast<float>((*note)[1]),
+                                     static_cast<float>((*note)[2]),
+                                     note->size() >= 4
+                                         ? static_cast<int>((*note)[3]) : 0});
+    if (auto* curves = automationValues.getArray())
+    {
+        for (const auto& item : *curves)
+        {
+            auto* curve = item.getArray();
+            if (curve == nullptr || curve->size() < 2)
+                continue;
+            AutomationPreview automation;
+            automation.channel = static_cast<int>((*curve)[0]);
+            if (auto* points = (*curve)[1].getArray())
+                for (const auto& pointValue : *points)
+                    if (auto* point = pointValue.getArray();
+                        point != nullptr && point->size() >= 2)
+                        automation.points.push_back({
+                            static_cast<float>((*point)[0]),
+                            static_cast<float>((*point)[1]),
+                            point->size() >= 3
+                                ? static_cast<float>((*point)[2]) : 0.0f,
+                        });
+            if (!automation.points.empty())
+                row.automations.push_back(std::move(automation));
+        }
+    }
+    row.midiTimelineEnd = 0.0f;
+    for (const auto& note : row.notes)
+        row.midiTimelineEnd = juce::jmax(
+            row.midiTimelineEnd, note.start + note.length);
+    for (const auto& automation : row.automations)
+        for (const auto& point : automation.points)
+            row.midiTimelineEnd = juce::jmax(
+                row.midiTimelineEnd, point.position);
+    row.midiTimelineEnd = juce::jlimit(
+        0.000001f, 1.0f,
+        row.midiTimelineEnd > 0.0f ? row.midiTimelineEnd : 1.0f);
+    row.midiPlaybackEnd = juce::jlimit(
+        0.000001f, 1.0f,
+        static_cast<float>(value.getProperty("midi_playback_end", row.midiPlaybackEnd)));
+    row.previewDetailsLoaded = true;
+    row.previewDetailsQueued = false;
+}
+
 void SoundCapsuleAudioProcessorEditor::refreshLibrary()
 {
     const auto generation = ++listGeneration;
     const auto sortId = sortBy.getSelectedId();
     const auto sortName = sortId == 2 ? "name" : (sortId == 3 ? "uses" : "recent");
     const auto directionIndex = juce::jlimit(0, 2, sortId - 1);
-    sendCommand("list", object({{"search", search.getText()},
-                                {"favorites_only", favoritesOnly.getToggleState()},
-                                {"sort_by", sortName},
-                                {"descending", sortDescendingByMode[static_cast<size_t>(directionIndex)]}}),
+    activeLibrarySearch = search.getText();
+    activeLibraryFavoritesOnly = favoritesOnly.getToggleState();
+    activeLibrarySort = sortName;
+    activeLibraryDescending = sortDescendingByMode[static_cast<size_t>(directionIndex)];
+    activeLibraryTotal = 0;
+    libraryHasMore = false;
+    libraryPageLoading = true;
+    sendCommand("list", object({{"search", activeLibrarySearch},
+                                {"favorites_only", activeLibraryFavoritesOnly},
+                                {"sort_by", activeLibrarySort},
+                                {"descending", activeLibraryDescending},
+                                {"limit", 100}, {"offset", 0}}),
                 [this, generation](juce::var response) {
         if (generation != listGeneration)
             return;
+        libraryPageLoading = false;
+        libraryHasMore = static_cast<bool>(response.getProperty("has_more", false));
+        activeLibraryTotal = static_cast<int>(response.getProperty("total", 0));
         std::vector<CapsuleRow> updated;
         if (auto* values = response.getProperty("capsules", juce::var()).getArray())
-        {
             for (const auto& value : *values)
-            {
-                CapsuleRow row;
-                row.id = value.getProperty("id", "").toString();
-                row.name = value.getProperty("name", "").toString();
-                row.sourceFlVersion = value.getProperty("source_fl_version", "").toString();
-                row.favorite = static_cast<bool>(value.getProperty("favorite", false));
-                row.channelCount = static_cast<int>(value.getProperty("channel_count", 0));
-                row.useCount = static_cast<int>(value.getProperty("use_count", 0));
-                row.capsulePath = value.getProperty("path", "").toString();
-                auto plugins = juce::JSON::parse(value.getProperty("plugin_names", "[]").toString());
-                auto tagValues = juce::JSON::parse(value.getProperty("tags", "[]").toString());
-                auto channelValues = juce::JSON::parse(
-                    value.getProperty("channel_names", "[]").toString());
-                auto noteValues = juce::JSON::parse(value.getProperty("note_preview", "[]").toString());
-                auto automationValues = juce::JSON::parse(
-                    value.getProperty("automation_preview", "[]").toString());
-                juce::StringArray pluginNames, tagNames;
-                if (auto* array = plugins.getArray()) for (const auto& item : *array) pluginNames.add(item.toString());
-                if (auto* array = tagValues.getArray()) for (const auto& item : *array) tagNames.add(item.toString());
-                if (auto* array = channelValues.getArray())
-                    for (const auto& item : *array)
-                        row.channelNames.add(item.toString());
-                if (auto* notes = noteValues.getArray())
-                    for (const auto& item : *notes)
-                        if (auto* note = item.getArray(); note != nullptr && note->size() >= 3)
-                            row.notes.push_back({static_cast<float>((*note)[0]),
-                                                 static_cast<float>((*note)[1]),
-                                                 static_cast<float>((*note)[2]),
-                                                 note->size() >= 4
-                                                     ? static_cast<int>((*note)[3]) : 0});
-                if (auto* curves = automationValues.getArray())
-                {
-                    for (const auto& item : *curves)
-                    {
-                        auto* curve = item.getArray();
-                        if (curve == nullptr || curve->size() < 2)
-                            continue;
-                        AutomationPreview automation;
-                        automation.channel = static_cast<int>((*curve)[0]);
-                        if (auto* points = (*curve)[1].getArray())
-                            for (const auto& pointValue : *points)
-                                if (auto* point = pointValue.getArray();
-                                    point != nullptr && point->size() >= 2)
-                                    automation.points.push_back({
-                                        static_cast<float>((*point)[0]),
-                                        static_cast<float>((*point)[1]),
-                                        point->size() >= 3
-                                            ? static_cast<float>((*point)[2]) : 0.0f,
-                                    });
-                        if (!automation.points.empty())
-                            row.automations.push_back(std::move(automation));
-                    }
-                }
-                row.midiTimelineEnd = 0.0f;
-                for (const auto& note : row.notes)
-                    row.midiTimelineEnd = juce::jmax(
-                        row.midiTimelineEnd, note.start + note.length);
-                for (const auto& automation : row.automations)
-                    for (const auto& point : automation.points)
-                        row.midiTimelineEnd = juce::jmax(
-                            row.midiTimelineEnd, point.position);
-                row.midiTimelineEnd = juce::jlimit(
-                    0.000001f, 1.0f,
-                    row.midiTimelineEnd > 0.0f ? row.midiTimelineEnd : 1.0f);
-                row.midiPlaybackEnd = juce::jlimit(
-                    0.000001f, 1.0f,
-                    static_cast<float>(value.getProperty("midi_playback_end", 1.0)));
-                row.plugins = pluginNames.joinIntoString(", ");
-                row.tags = tagNames.joinIntoString(", ");
-                row.tagItems = tagNames;
-                updated.push_back(std::move(row));
-            }
-        }
+                updated.push_back(capsuleRowFromValue(value));
         rows = std::move(updated);
         list.updateContent();
         list.repaint();
@@ -2323,10 +2356,11 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
         libraryEmptyState.setVisible(rows.empty());
         libraryEmptyState.toFront(false);
         preloadVisibleRows();
-        auto statusText = juce::String(rows.size()) + " capsules";
+        auto statusText = juce::String(activeLibraryTotal) + " capsules";
         const auto healthValue = response.getProperty("health_summary", juce::var());
         const auto* health = healthValue.getArray();
-        const auto healthCount = health != nullptr ? health->size() : 0;
+        const auto healthCount = static_cast<int>(response.getProperty(
+            "health_total", health != nullptr ? health->size() : 0));
         if (healthCount > 0)
             statusText << "; " << healthCount
                        << (healthCount == 1 ? " file needs attention" : " files need attention");
@@ -2375,10 +2409,14 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
             const auto migration = response.getProperty("migration_summary", juce::var());
             const auto convertedValue = migration.getProperty("converted", juce::var());
             const auto failedValue = migration.getProperty("failed", juce::var());
+            const auto migrationCounts = response.getProperty(
+                "migration_counts", juce::var());
             const auto* converted = convertedValue.getArray();
             const auto* failed = failedValue.getArray();
-            const auto convertedCount = converted != nullptr ? converted->size() : 0;
-            const auto failedCount = failed != nullptr ? failed->size() : 0;
+            const auto convertedCount = static_cast<int>(migrationCounts.getProperty(
+                "converted", converted != nullptr ? converted->size() : 0));
+            const auto failedCount = static_cast<int>(migrationCounts.getProperty(
+                "failed", failed != nullptr ? failed->size() : 0));
             if (convertedCount > 0 || failedCount > 0)
             {
                 statusText = "Upgraded " + juce::String(convertedCount)
@@ -2408,7 +2446,57 @@ void SoundCapsuleAudioProcessorEditor::refreshLibrary()
             }
         }
         status.setText(statusText, juce::dontSendNotification);
+    }, 60000, false,
+    [this, generation](const juce::String& error) {
+        if (generation == listGeneration)
+        {
+            libraryPageLoading = false;
+            status.setText("Could not load the capsule library: " + error,
+                           juce::dontSendNotification);
+        }
     });
+}
+
+void SoundCapsuleAudioProcessorEditor::loadNextLibraryPage()
+{
+    if (!libraryHasMore || libraryPageLoading)
+        return;
+    libraryPageLoading = true;
+    const auto generation = listGeneration;
+    const auto offset = static_cast<int>(rows.size());
+    juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+    sendCommand(
+        "list", object({{"search", activeLibrarySearch},
+                        {"favorites_only", activeLibraryFavoritesOnly},
+                        {"sort_by", activeLibrarySort},
+                        {"descending", activeLibraryDescending},
+                        {"limit", 100}, {"offset", offset}}),
+        [safe, generation, offset](juce::var response) {
+            if (safe == nullptr || generation != safe->listGeneration)
+                return;
+            safe->libraryPageLoading = false;
+            if (offset != static_cast<int>(safe->rows.size()))
+                return;
+            if (auto* values = response.getProperty("capsules", juce::var()).getArray())
+                for (const auto& value : *values)
+                    safe->rows.push_back(capsuleRowFromValue(value));
+            safe->activeLibraryTotal = static_cast<int>(
+                response.getProperty("total", safe->activeLibraryTotal));
+            safe->libraryHasMore = static_cast<bool>(
+                response.getProperty("has_more", false));
+            safe->list.updateContent();
+            safe->list.repaint();
+            safe->preloadVisibleRows();
+        },
+        60000, true,
+        [safe, generation](const juce::String& error) {
+            if (safe == nullptr || generation != safe->listGeneration)
+                return;
+            safe->libraryPageLoading = false;
+            safe->status.setText(
+                "Could not load more capsules: " + error,
+                juce::dontSendNotification);
+        });
 }
 
 void SoundCapsuleAudioProcessorEditor::preloadVisibleRows()
@@ -2425,8 +2513,12 @@ void SoundCapsuleAudioProcessorEditor::preloadVisibleRows()
                                     first + list.getNumRowsOnScreen());
     first = juce::jmax(0, first - 1);
     last = juce::jmin(static_cast<int>(rows.size()) - 1, last + 1);
+    if (libraryHasMore && last >= static_cast<int>(rows.size()) - 4)
+        loadNextLibraryPage();
 
     juce::StringArray retainedPaths;
+    juce::StringArray requestedPreviewIds;
+    juce::Array<juce::var> previewIds;
     auto repaintNeeded = false;
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     for (int index = 0; index < static_cast<int>(rows.size()); ++index)
@@ -2440,6 +2532,13 @@ void SoundCapsuleAudioProcessorEditor::preloadVisibleRows()
         }
         const juce::File capsule(row.capsulePath);
         retainedPaths.add(capsule.getFullPathName());
+        if (!row.previewDetailsLoaded && !row.previewDetailsQueued
+            && previewIds.size() < 2)
+        {
+            row.previewDetailsQueued = true;
+            requestedPreviewIds.add(row.id);
+            previewIds.add(row.id);
+        }
         if (row.thumbnail == nullptr && capsule.existsAsFile())
         {
             row.thumbnail = std::make_unique<juce::AudioThumbnail>(
@@ -2460,6 +2559,51 @@ void SoundCapsuleAudioProcessorEditor::preloadVisibleRows()
         }
     }
     audioProcessor.retainPreloadedPreviewFiles(retainedPaths);
+    if (!previewIds.isEmpty())
+    {
+        const auto generation = listGeneration;
+        sendCommand(
+            "preview_details", object({{"ids", previewIds}}),
+            [safe, generation, requestedPreviewIds](juce::var response) {
+                if (safe == nullptr || generation != safe->listGeneration)
+                    return;
+                for (const auto& id : requestedPreviewIds)
+                    if (auto found = std::find_if(
+                            safe->rows.begin(), safe->rows.end(),
+                            [&id](const CapsuleRow& row) { return row.id == id; });
+                        found != safe->rows.end())
+                    {
+                        found->previewDetailsQueued = false;
+                        found->previewDetailsLoaded = true;
+                    }
+                if (auto* values = response.getProperty(
+                        "capsules", juce::var()).getArray())
+                    for (const auto& value : *values)
+                    {
+                        const auto id = value.getProperty("id", "").toString();
+                        if (auto found = std::find_if(
+                                safe->rows.begin(), safe->rows.end(),
+                                [&id](const CapsuleRow& row) { return row.id == id; });
+                            found != safe->rows.end())
+                            applyPreviewDetails(*found, value);
+                    }
+                safe->list.repaint();
+            },
+            30000, true,
+            [safe, generation, requestedPreviewIds](const juce::String&) {
+                if (safe == nullptr || generation != safe->listGeneration)
+                    return;
+                for (const auto& id : requestedPreviewIds)
+                    if (auto found = std::find_if(
+                            safe->rows.begin(), safe->rows.end(),
+                            [&id](const CapsuleRow& row) { return row.id == id; });
+                        found != safe->rows.end())
+                    {
+                        found->previewDetailsQueued = false;
+                        found->previewDetailsLoaded = true;
+                    }
+            });
+    }
     if (repaintNeeded)
         list.repaint();
 }
@@ -3757,11 +3901,19 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
             [safe, mode, importOperationId](juce::var response) {
                 if (safe == nullptr || safe->operationId != importOperationId) return;
                 const auto confirmed = static_cast<bool>(response.getProperty("reload_confirmed", false));
+                const auto committed = static_cast<bool>(
+                    response.getProperty("committed", true));
+                const auto reloadError = response.getProperty(
+                    "reload_error", "").toString();
+                const auto completionDetail = confirmed
+                    ? juce::String("FL Studio reopened the updated project")
+                    : (reloadError.isNotEmpty()
+                        ? juce::String("Project updated; reopen it manually. ") + reloadError
+                        : juce::String("Project updated; verify that FL Studio reopened it"));
                 safe->operationPollingEnabled = false;
                 safe->operationProgress.finish(
-                    true, "Import complete",
-                    confirmed ? "FL Studio reopened the updated project"
-                              : "Project updated; verify that FL Studio reopened it");
+                    committed, committed ? "Import complete" : "Import not committed",
+                    completionDetail);
                 safe->operationOverlayHideAt = juce::Time::getMillisecondCounter() + 1100;
                 safe->operationId.clear();
                 safe->operationProgressPollInFlight.store(false);
@@ -3770,7 +3922,9 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
                     confirmed
                         ? (mode == ImportMode::overrideSelection
                                ? "Overridden and reloaded" : "Imported and reloaded")
-                        : "Project updated; verify FL reloaded it",
+                        : (reloadError.isNotEmpty()
+                               ? "Project updated; reopen it manually"
+                               : "Project updated; verify FL reloaded it"),
                     juce::dontSendNotification);
                 safe->refreshSessionStatus();
                 safe->refreshLibrary();
@@ -4180,7 +4334,10 @@ void SoundCapsuleAudioProcessorEditor::sendCommand(const juce::String& command,
             if (error.isNotEmpty())
             {
                 if (messageError)
+                {
                     messageError(error);
+                    return;
+                }
                 if (quiet)
                 {
                     safe->connectionStatus.setText(

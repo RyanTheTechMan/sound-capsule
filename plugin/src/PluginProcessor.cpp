@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "HelperClient.h"
 #include "PreviewMath.h"
 #include "CapsulePreviewSource.h"
 
@@ -50,6 +51,37 @@ juce::File frozenHelperExecutable()
         "Sound Capsule Helper"
        #endif
     );
+}
+
+bool compatibleHelperIsRunning(int timeoutMs)
+{
+    try
+    {
+        const auto response = HelperClient().request(
+            "ping", juce::var(new juce::DynamicObject()), nullptr, timeoutMs);
+        return response.getProperty("server_version", "").toString().isNotEmpty();
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+bool waitForCompatibleHelper(int timeoutMs)
+{
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
+    do
+    {
+        const auto remaining = static_cast<int>(
+            deadline - juce::Time::getMillisecondCounterHiRes());
+        if (remaining <= 0)
+            break;
+        if (compatibleHelperIsRunning(juce::jmin(400, remaining)))
+            return true;
+        juce::Thread::sleep(50);
+    }
+    while (juce::Time::getMillisecondCounterHiRes() < deadline);
+    return false;
 }
 }
 
@@ -298,7 +330,7 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
 {
     if (!isRunningStandalone())
         return false;
-    if (!refreshSetup && helperProcess != nullptr && helperProcess->isRunning())
+    if (!refreshSetup && compatibleHelperIsRunning(350))
         return true;
 
     const auto frozenHelper = frozenHelperExecutable();
@@ -326,8 +358,10 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
                 return false;
         }
 
-        if (helperProcess != nullptr && helperProcess->isRunning())
+        if (compatibleHelperIsRunning(350))
             return true;
+        if (helperProcess != nullptr && helperProcess->isRunning())
+            return waitForCompatibleHelper(3000) || helperProcess->isRunning();
 
         helperProcess = std::make_unique<juce::ChildProcess>();
         if (!helperProcess->start(
@@ -336,7 +370,12 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
             helperProcess.reset();
             return false;
         }
-        return true;
+        if (waitForCompatibleHelper(5000))
+            return true;
+        if (helperProcess->isRunning())
+            return true; // A large first reindex may still be finishing.
+        helperProcess.reset();
+        return false;
     }
 
     // Development/source-tree fallback. Native releases always use the
@@ -377,7 +416,12 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
         helperProcess.reset();
         return false;
     }
-    return true;
+    if (waitForCompatibleHelper(5000))
+        return true;
+    if (helperProcess->isRunning())
+        return true; // A large first reindex may still be finishing.
+    helperProcess.reset();
+    return false;
 }
 
 juce::AudioProcessorEditor* SoundCapsuleAudioProcessor::createEditor()

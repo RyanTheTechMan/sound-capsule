@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
+import socket
 import socketserver
 import threading
 import time
@@ -12,10 +15,13 @@ import uuid
 
 from . import __version__
 from .capsule import CAPSULE_EXTENSION, Capsule
-from .config import Settings
+from .config import Settings, load_or_create_helper_token
 from .flp import FLPFile
 from .library import CapsuleLibrary
 from .project import CapsuleService
+
+
+PROTOCOL_VERSION = 2
 
 
 class SoundCapsuleRequestHandler(socketserver.StreamRequestHandler):
@@ -28,16 +34,37 @@ class SoundCapsuleRequestHandler(socketserver.StreamRequestHandler):
             if not raw.endswith(b"\n"):
                 raise ValueError("request is incomplete or exceeds 2 MiB")
             request = json.loads(raw)
-            response = self.server.dispatch(request)  # type: ignore[attr-defined]
-            payload = {"ok": True, **response}
+            response = self.server.handle_request(request)  # type: ignore[attr-defined]
+            payload = {
+                "ok": True,
+                "protocol_version": PROTOCOL_VERSION,
+                "server_version": __version__,
+                **response,
+            }
         except Exception as error:
-            payload = {"ok": False, "error": str(error), "type": type(error).__name__}
+            payload = {
+                "ok": False,
+                "protocol_version": PROTOCOL_VERSION,
+                "server_version": __version__,
+                "error": str(error),
+                "type": type(error).__name__,
+            }
         self.wfile.write(json.dumps(payload).encode() + b"\n")
 
 
 class SoundCapsuleServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
+    # SO_REUSEADDR has different semantics on Windows and can allow a second
+    # process to bind the helper's live port. Keep fast restarts on POSIX, but
+    # require exclusive ownership on Windows.
+    allow_reuse_address = os.name != "nt"
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        if os.name == "nt":
+            exclusive_address_use = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive_address_use is not None:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive_address_use, 1)
+        super().server_bind()
 
     def __init__(self, settings: Settings):
         import ipaddress
@@ -46,26 +73,217 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 raise ValueError("Sound Capsule helper must bind to a loopback address")
         except ValueError as error:
             raise ValueError("server_host must be a numeric loopback address") from error
-        self.settings = settings
-        self.service = CapsuleService(settings)
-        self.operation_lock = threading.RLock()
-        self.progress_lock = threading.Lock()
-        self.operation_cancel = threading.Event()
-        self.session_project_lock = threading.Lock()
-        self.session_project_token: str | None = None
-        self.session_project_path: Path | None = None
-        self.session_project_fl_version = ""
-        self.session_project_resolution: str | None = None
-        self.operation_progress: dict = {
-            "operation_id": None,
-            "active": False,
-            "progress": 0,
-            "step": "Idle",
-            "error": None,
-            "cancellable": False,
-            "updated_at": time.time(),
-        }
+        # Claim the endpoint before opening/reindexing shared state. Concurrent
+        # app launches then have exactly one owner; losing helpers exit without
+        # both attempting library migration or transaction recovery.
         super().__init__((settings.server_host, settings.server_port), SoundCapsuleRequestHandler)
+        try:
+            self.settings = settings
+            self.service = CapsuleService(settings)
+            self.auth_token = load_or_create_helper_token(settings.data_dir)
+            self.operation_lock = threading.RLock()
+            self.progress_lock = threading.RLock()
+            self.operation_cancel = threading.Event()
+            self.operation_records: dict[str, dict] = {}
+            self.active_operation_id: str | None = None
+            self.completed_operations = self._load_completed_operations()
+            self.session_project_lock = threading.Lock()
+            self.session_project_token: str | None = None
+            self.session_project_path: Path | None = None
+            self.session_project_fl_version = ""
+            self.session_project_resolution: str | None = None
+            self.operation_progress: dict = {
+                "operation_id": None,
+                "active": False,
+                "progress": 0,
+                "step": "Idle",
+                "error": None,
+                "cancellable": False,
+                "updated_at": time.time(),
+            }
+        except BaseException:
+            self.server_close()
+            raise
+
+    def handle_request(self, request: dict) -> dict:
+        if not isinstance(request, dict):
+            raise ValueError("request must be a JSON object")
+        try:
+            protocol_version = int(request.get("protocol_version", -1))
+        except (TypeError, ValueError) as error:
+            raise ValueError("request has an invalid protocol version") from error
+        if protocol_version != PROTOCOL_VERSION:
+            raise RuntimeError(
+                f"incompatible helper protocol {protocol_version}; expected {PROTOCOL_VERSION}"
+            )
+        client_version = request.get("client_version")
+        if not isinstance(client_version, str) or not client_version.strip():
+            raise ValueError("request is missing its client version")
+        supplied_token = request.get("auth_token")
+        if not isinstance(supplied_token, str) or not hmac.compare_digest(
+            supplied_token, self.auth_token
+        ):
+            raise PermissionError("Sound Capsule helper authentication failed")
+        return self.dispatch(request)
+
+    @property
+    def _completed_operations_path(self) -> Path:
+        return self.settings.data_dir / "operations.json"
+
+    def _load_completed_operations(self) -> dict[str, dict]:
+        try:
+            payload = json.loads(
+                self._completed_operations_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return {}
+        operations = payload.get("operations", {}) if isinstance(payload, dict) else {}
+        return operations if isinstance(operations, dict) else {}
+
+    def _persist_completed_operations(self) -> None:
+        newest = sorted(
+            self.completed_operations.items(),
+            key=lambda item: float(item[1].get("completed_at", 0.0)),
+            reverse=True,
+        )[:256]
+        self.completed_operations = dict(newest)
+        payload = json.dumps(
+            {"version": 1, "operations": self.completed_operations},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.service._atomic_write(self._completed_operations_path, payload)
+
+    @staticmethod
+    def _operation_fingerprint(args: dict) -> str:
+        relevant = {key: value for key, value in args.items() if key != "operation_id"}
+        return hashlib.sha256(
+            json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _validated_operation_id(raw: object) -> str:
+        operation_id = str(raw or uuid.uuid4())
+        if not 1 <= len(operation_id) <= 100 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
+            for character in operation_id
+        ):
+            raise ValueError("operation_id contains unsupported characters")
+        return operation_id
+
+    def _begin_operation(
+        self, operation_id: str, kind: str, fingerprint: str
+    ) -> tuple[threading.Event | None, dict | None]:
+        with self.progress_lock:
+            completed = self.completed_operations.get(operation_id)
+            if completed is not None:
+                if completed.get("kind") != kind or completed.get("fingerprint") != fingerprint:
+                    raise ValueError("operation_id was already used for a different operation")
+                response = completed.get("response")
+                if isinstance(response, dict):
+                    return None, dict(response)
+            existing = self.operation_records.get(operation_id)
+            if existing is not None and existing.get("active"):
+                raise RuntimeError(f"{kind.capitalize()} operation is already in progress")
+            if self.active_operation_id is not None:
+                active = self.operation_records.get(self.active_operation_id, {})
+                active_kind = str(active.get("kind", "another"))
+                raise RuntimeError(
+                    f"Cannot start {kind}; {active_kind} operation "
+                    f"{self.active_operation_id} is already in progress"
+                )
+            cancel_event = threading.Event()
+            record = {
+                "operation_id": operation_id,
+                "kind": kind,
+                "fingerprint": fingerprint,
+                "active": True,
+                "progress": 1,
+                "step": f"Starting {kind}",
+                "error": None,
+                "cancellable": True,
+                "updated_at": time.time(),
+                "cancel_event": cancel_event,
+            }
+            self.operation_records[operation_id] = record
+            self.active_operation_id = operation_id
+            self.operation_cancel = cancel_event  # Compatibility for older internal callers.
+            self.operation_progress = self._public_operation_record(record)
+            return cancel_event, None
+
+    @staticmethod
+    def _public_operation_record(record: dict) -> dict:
+        return {
+            key: record.get(key)
+            for key in (
+                "operation_id", "active", "progress", "step", "error",
+                "cancellable", "updated_at",
+            )
+        }
+
+    def _complete_operation(
+        self, operation_id: str, response: dict, *, step: str
+    ) -> None:
+        with self.progress_lock:
+            record = self.operation_records[operation_id]
+            record.update(
+                active=False,
+                progress=100,
+                step=step,
+                error=None,
+                cancellable=False,
+                updated_at=time.time(),
+                response=dict(response),
+            )
+            if self.active_operation_id == operation_id:
+                self.active_operation_id = None
+            self.operation_progress = self._public_operation_record(record)
+            self.completed_operations[operation_id] = {
+                "kind": record["kind"],
+                "fingerprint": record["fingerprint"],
+                "response": dict(response),
+                "completed_at": time.time(),
+            }
+            try:
+                self._persist_completed_operations()
+            except OSError:
+                # A completed project mutation must never be reported as failed
+                # merely because the replay cache could not be refreshed.
+                pass
+
+    def _fail_operation(self, operation_id: str, error: Exception) -> None:
+        with self.progress_lock:
+            record = self.operation_records.get(operation_id)
+            if record is None:
+                return
+            record.update(
+                active=False,
+                progress=100,
+                step=f"{str(record.get('kind', 'Operation')).capitalize()} failed",
+                error=str(error),
+                cancellable=False,
+                updated_at=time.time(),
+            )
+            if self.active_operation_id == operation_id:
+                self.active_operation_id = None
+            self.operation_progress = self._public_operation_record(record)
+
+    @staticmethod
+    def _import_response(result, operation_id: str) -> dict:
+        return {
+            "source": str(result.source_project),
+            "merged": str(result.merged_project),
+            "mapping": result.channel_mapping,
+            "pattern_id": result.pattern_id,
+            "transaction_id": result.transaction_id,
+            "in_place": result.in_place,
+            "backup": str(result.backup_project) if result.backup_project else None,
+            "reload_confirmed": result.reload_confirmed,
+            "reload_error": result.reload_error,
+            "committed": result.committed,
+            "import_destination": result.import_destination,
+            "operation_id": operation_id,
+        }
 
     @staticmethod
     def _session_resolution_token(session) -> str:
@@ -157,15 +375,30 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         cancellable: bool = False,
     ) -> None:
         with self.progress_lock:
-            self.operation_progress = {
-                "operation_id": operation_id,
-                "active": active,
-                "progress": max(0, min(100, int(progress))),
-                "step": str(step)[:300],
-                "error": error,
-                "cancellable": bool(cancellable and active),
-                "updated_at": time.time(),
-            }
+            record = self.operation_records.get(operation_id)
+            if record is None:
+                cancel_event = threading.Event()
+                record = {
+                    "operation_id": operation_id,
+                    "kind": "operation",
+                    "fingerprint": "",
+                    "cancel_event": cancel_event,
+                }
+                self.operation_records[operation_id] = record
+                if active and self.active_operation_id is None:
+                    self.active_operation_id = operation_id
+                    self.operation_cancel = cancel_event
+            record.update(
+                active=active,
+                progress=max(0, min(100, int(progress))),
+                step=str(step)[:300],
+                error=error,
+                cancellable=bool(cancellable and active),
+                updated_at=time.time(),
+            )
+            if not active and self.active_operation_id == operation_id:
+                self.active_operation_id = None
+            self.operation_progress = self._public_operation_record(record)
 
     @staticmethod
     def _file_digest(path: Path) -> str:
@@ -514,8 +747,23 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         if command in {"operation_status", "import_status"}:
             requested_id = str(args.get("operation_id", ""))
             with self.progress_lock:
-                progress = dict(self.operation_progress)
-            if requested_id and progress.get("operation_id") != requested_id:
+                record = self.operation_records.get(requested_id) if requested_id else None
+                progress = (
+                    self._public_operation_record(record)
+                    if record is not None
+                    else dict(self.operation_progress)
+                )
+                completed = self.completed_operations.get(requested_id)
+            if requested_id and record is None and completed is not None:
+                return {
+                    "operation_id": requested_id,
+                    "active": False,
+                    "progress": 100,
+                    "step": "Operation complete",
+                    "error": None,
+                    "cancellable": False,
+                }
+            if requested_id and record is None:
                 return {
                     "operation_id": requested_id,
                     "active": False,
@@ -528,30 +776,62 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
         if command == "cancel_operation":
             requested_id = str(args.get("operation_id", ""))
             with self.progress_lock:
-                progress = dict(self.operation_progress)
-            accepted = bool(
-                requested_id
-                and progress.get("operation_id") == requested_id
-                and progress.get("active")
-                and progress.get("cancellable")
-            )
-            if accepted:
-                self.operation_cancel.set()
+                record = self.operation_records.get(requested_id)
+                accepted = bool(
+                    requested_id
+                    and record is not None
+                    and record.get("active")
+                    and record.get("cancellable")
+                )
+                if accepted:
+                    record["cancel_event"].set()
             return {"cancel_requested": accepted}
         if command == "list":
             search = str(args.get("search", ""))[:256]
+            favorites_only = bool(args.get("favorites_only", False))
+            limit = max(1, min(int(args.get("limit", 100)), 100))
+            offset = max(0, int(args.get("offset", 0)))
+            capsules = self.service.library.list(
+                search,
+                favorites_only=favorites_only,
+                sort_by=str(args.get("sort_by", "recent")),
+                descending=bool(args.get("descending", True)),
+                limit=limit,
+                offset=offset,
+                include_previews=False,
+            )
+            total = self.service.library.count(
+                search, favorites_only=favorites_only
+            )
+            migration_summary = {
+                key: list(values)[:100]
+                for key, values in self.service.library_migration_summary.items()
+            }
+            migration_counts = {
+                key: len(values)
+                for key, values in self.service.library_migration_summary.items()
+            }
+            health_summary = self.service.library.last_health_summary
             return {
-                "capsules": self.service.library.list(
-                    search,
-                    favorites_only=bool(args.get("favorites_only", False)),
-                    sort_by=str(args.get("sort_by", "recent")),
-                    descending=bool(args.get("descending", True)),
-                    limit=args.get("limit", 1000),
-                    offset=args.get("offset", 0),
-                ),
-                "migration_summary": self.service.library_migration_summary,
-                "health_summary": self.service.library.last_health_summary,
+                "capsules": capsules,
+                "offset": offset,
+                "limit": limit,
+                "total": total,
+                "has_more": offset + len(capsules) < total,
+                "migration_summary": migration_summary,
+                "migration_counts": migration_counts,
+                "health_summary": health_summary[:100],
+                "health_total": len(health_summary),
                 "library_dir": str(self.service.library.library_dir),
+            }
+        if command == "preview_details":
+            capsule_ids = args.get("ids", [])
+            if not isinstance(capsule_ids, list) or not all(
+                isinstance(capsule_id, str) for capsule_id in capsule_ids
+            ):
+                raise ValueError("preview_details ids must be a list of strings")
+            return {
+                "capsules": self.service.library.preview_details(capsule_ids)
             }
         if command == "refresh_library":
             with self.operation_lock:
@@ -598,13 +878,16 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
             raw_tags = args.get("tags", [])
             if not isinstance(raw_tags, list):
                 raise ValueError("capture tags must be a list")
-            operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
-            self.operation_cancel.clear()
-            self._update_operation_progress(
-                operation_id, 1, "Starting capture", cancellable=True
+            operation_id = self._validated_operation_id(args.get("operation_id"))
+            fingerprint = self._operation_fingerprint(args)
+            cancel_event, replay = self._begin_operation(
+                operation_id, "capture", fingerprint
             )
+            if replay is not None:
+                return replay
+            assert cancel_event is not None
             def capture_progress(value: int, step: str) -> None:
-                if value < 50 and self.operation_cancel.is_set():
+                if value < 50 and cancel_event.is_set():
                     raise RuntimeError("Operation cancelled")
                 cancellable = value < 50 and not (
                     platform.system() == "Darwin" and step.startswith("Rendering preview")
@@ -621,29 +904,56 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                         individually=bool(args.get("individually", False)),
                         tags=[str(tag)[:100] for tag in raw_tags][:100],
                         progress_callback=capture_progress,
-                        cancel_requested=self.operation_cancel.is_set,
+                        cancel_requested=cancel_event.is_set,
                     )
             except Exception as error:
-                self._update_operation_progress(
-                    operation_id, 100, "Capture failed", active=False, error=str(error)
-                )
+                self._fail_operation(operation_id, error)
                 raise
-            self._update_operation_progress(
-                operation_id, 100, "Capsule saved", active=False
-            )
-            return {
+            response = {
                 "capsules": [capsule.manifest.to_dict() for capsule in capsules],
                 "operation_id": operation_id,
             }
+            self._complete_operation(operation_id, response, step="Capsule saved")
+            return response
         if command == "import":
-            operation_id = str(args.get("operation_id") or uuid.uuid4())[:100]
-            self.operation_cancel.clear()
-            self._update_operation_progress(
-                operation_id, 1, "Starting import", cancellable=True
+            operation_id = self._validated_operation_id(args.get("operation_id"))
+            fingerprint = self._operation_fingerprint(args)
+            requested_mode = str(args.get("mode", "append"))
+            cached_operation = self.completed_operations.get(operation_id)
+            if cached_operation is not None and (
+                cached_operation.get("kind") != "import"
+                or cached_operation.get("fingerprint") != fingerprint
+            ):
+                raise ValueError("operation_id was already used for a different operation")
+            previously_committed = self.service.import_result_for_operation(
+                operation_id,
+                capsule_id=str(args["id"]),
+                mode=requested_mode,
+                operation_fingerprint=fingerprint,
             )
+            if previously_committed is not None:
+                response = self._import_response(previously_committed, operation_id)
+                with self.progress_lock:
+                    self.completed_operations[operation_id] = {
+                        "kind": "import",
+                        "fingerprint": fingerprint,
+                        "response": dict(response),
+                        "completed_at": time.time(),
+                    }
+                    try:
+                        self._persist_completed_operations()
+                    except OSError:
+                        pass
+                return response
+            cancel_event, replay = self._begin_operation(
+                operation_id, "import", fingerprint
+            )
+            if replay is not None:
+                return replay
+            assert cancel_event is not None
             def import_progress(value: int, step: str) -> None:
                 cancellable = value < 62
-                if value <= 62 and self.operation_cancel.is_set():
+                if value <= 62 and cancel_event.is_set():
                     raise RuntimeError("Operation cancelled")
                 self._update_operation_progress(
                     operation_id, value, step, cancellable=cancellable
@@ -659,25 +969,15 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                         open_project=bool(args.get("open", True)),
                         in_place=bool(args.get("in_place", True)),
                         progress_callback=import_progress,
+                        operation_id=operation_id,
+                        operation_fingerprint=fingerprint,
                     )
             except Exception as error:
-                self._update_operation_progress(
-                    operation_id, 100, "Import failed", active=False, error=str(error)
-                )
+                self._fail_operation(operation_id, error)
                 raise
-            self._update_operation_progress(
-                operation_id, 100, "Import complete", active=False
-            )
-            return {
-                "source": str(result.source_project), "merged": str(result.merged_project),
-                "mapping": result.channel_mapping, "pattern_id": result.pattern_id,
-                "transaction_id": result.transaction_id,
-                "in_place": result.in_place,
-                "backup": str(result.backup_project) if result.backup_project else None,
-                "reload_confirmed": result.reload_confirmed,
-                "import_destination": result.import_destination,
-                "operation_id": operation_id,
-            }
+            response = self._import_response(result, operation_id)
+            self._complete_operation(operation_id, response, step="Import complete")
+            return response
         if command == "undo_import":
             with self.operation_lock:
                 result = self.service.undo_last_import(

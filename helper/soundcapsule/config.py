@@ -5,10 +5,55 @@ import json
 import os
 from pathlib import Path
 import platform
+import secrets
 import xml.etree.ElementTree as ET
 
 
 APP_DIR_NAME = "SoundCapsule"
+HELPER_TOKEN_FILENAME = "helper-token"
+
+
+def load_or_create_helper_token(data_dir: Path) -> str:
+    """Return the private token used by local helper clients.
+
+    The token deliberately lives outside settings.json so it is never copied as
+    part of ordinary preference migration or displayed by setup diagnostics.
+    Exclusive creation also prevents two helpers starting at the same time from
+    silently choosing different credentials.
+    """
+    data_dir = Path(data_dir).expanduser()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / HELPER_TOKEN_FILENAME
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        descriptor = None
+    if descriptor is not None:
+        token = secrets.token_urlsafe(48)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(token + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise RuntimeError(f"could not read the Sound Capsule helper token: {error}") from error
+    if not 32 <= len(token) <= 512:
+        raise RuntimeError(
+            "the Sound Capsule helper token is invalid; reinstall or remove the token file"
+        )
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError as error:
+            raise RuntimeError(
+                f"could not secure the Sound Capsule helper token: {error}"
+            ) from error
+    return token
 
 
 def default_data_dir() -> Path:
@@ -168,6 +213,7 @@ class Settings:
     def ensure(self) -> None:
         for path in (self.data_dir, self.library_dir, self.bridge_dir, self.cache_dir, self.staging_dir):
             path.mkdir(parents=True, exist_ok=True)
+        load_or_create_helper_token(self.data_dir)
 
     def save(self) -> None:
         self.ensure()

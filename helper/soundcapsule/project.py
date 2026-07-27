@@ -34,6 +34,9 @@ class ImportResult:
     in_place: bool = False
     backup_project: Path | None = None
     reload_confirmed: bool | None = None
+    reload_error: str | None = None
+    committed: bool = False
+    operation_fingerprint: str | None = None
 
 
 @dataclass(slots=True)
@@ -60,6 +63,7 @@ class CapsuleService:
             except OSError:
                 continue
         self._cleanup_staging()
+        self.recovery_warnings = self._recover_incomplete_imports()
 
     @staticmethod
     def _rack_names_match(saved: list[str], live: list[str]) -> bool:
@@ -402,6 +406,44 @@ class CapsuleService:
         open_project: bool = True,
         in_place: bool = False,
         progress_callback: Callable[[int, str], None] | None = None,
+        operation_id: str | None = None,
+        operation_fingerprint: str | None = None,
+    ) -> ImportResult:
+        staged_paths: list[Path] = []
+        try:
+            return self._import_capsule_impl(
+                capsule_id,
+                mode=mode,
+                project_path=project_path,
+                target_channels=target_channels,
+                pattern_id=pattern_id,
+                import_destination=import_destination,
+                open_project=open_project,
+                in_place=in_place,
+                progress_callback=progress_callback,
+                operation_id=operation_id,
+                operation_fingerprint=operation_fingerprint,
+                staged_paths=staged_paths,
+            )
+        finally:
+            for staged_path in staged_paths:
+                self._delete_staged_file(staged_path)
+
+    def _import_capsule_impl(
+        self,
+        capsule_id: str,
+        *,
+        mode: str,
+        project_path: Path | None = None,
+        target_channels: list[int] | None = None,
+        pattern_id: int | None = None,
+        import_destination: str | None = None,
+        open_project: bool = True,
+        in_place: bool = False,
+        progress_callback: Callable[[int, str], None] | None = None,
+        operation_id: str | None = None,
+        operation_fingerprint: str | None = None,
+        staged_paths: list[Path],
     ) -> ImportResult:
         def progress(value: int, step: str) -> None:
             if progress_callback is not None:
@@ -416,6 +458,7 @@ class CapsuleService:
         manifest = capsule.manifest
         progress(20, "Staging the saved project")
         staged_source, source_hash = self._stage_project(project_path, "import")
+        staged_paths.append(staged_source)
         project = FLPFile.read(staged_source)
         progress(32, "Restoring instruments, samples, and MIDI")
         sections: list[ChannelSection] = []
@@ -514,6 +557,12 @@ class CapsuleService:
         progress(62, "Creating the safety backup")
         merged_bytes = merged.to_bytes()
         merged_hash = _sha256(merged_bytes)
+        transaction_id = operation_id or str(uuid.uuid4())
+        if not transaction_id or len(transaction_id) > 100:
+            raise ValueError("operation_id must contain between 1 and 100 characters")
+        result_destination = (
+            "override_selection" if mode == "override" else destination_mode
+        )
         backup: Path | None = None
         if in_place:
             original_bytes = staged_source.read_bytes()
@@ -521,16 +570,57 @@ class CapsuleService:
             if _sha256(project_path.read_bytes()) != source_hash:
                 backup.unlink(missing_ok=True)
                 raise RuntimeError("source project changed during import; its staged backup was discarded")
+            destination = project_path
+            result = ImportResult(
+                source_project=project_path,
+                merged_project=destination,
+                source_sha256=source_hash,
+                merged_sha256=merged_hash,
+                channel_mapping=mapping,
+                pattern_id=new_pattern,
+                transaction_id=transaction_id,
+                import_destination=result_destination,
+                in_place=True,
+                backup_project=backup,
+                operation_fingerprint=operation_fingerprint,
+            )
+            prepared = False
+            mutated = False
             try:
+                self._write_transaction_prepare(result, capsule_id, mode)
+                prepared = True
                 progress(72, "Writing and validating the updated project")
                 self._atomic_write(project_path, merged_bytes)
+                mutated = True
                 FLPFile.read(project_path).validate()
                 if _sha256(project_path.read_bytes()) != merged_hash:
                     raise RuntimeError("in-place merged project checksum did not match")
-            except Exception:
-                self._atomic_write(project_path, original_bytes)
-                raise
-            destination = project_path
+                self._write_transaction(result, capsule_id, mode)
+            except Exception as error:
+                if self._transaction_is_committed(transaction_id):
+                    # A close/flush error can be raised after the durable line
+                    # became visible. In that case both the project and commit
+                    # are authoritative, so reporting failure would invite a
+                    # duplicate retry.
+                    pass
+                else:
+                    if mutated:
+                        try:
+                            self._atomic_write(project_path, original_bytes)
+                            FLPFile.read(project_path).validate()
+                        except Exception as rollback_error:
+                            raise RuntimeError(
+                                f"the import failed and automatic rollback also failed; "
+                                f"restore {backup} manually"
+                            ) from rollback_error
+                    if prepared:
+                        try:
+                            self._write_transaction_abort(
+                                transaction_id, f"rolled back after failure: {error}"
+                            )
+                        except OSError:
+                            pass
+                    raise
         else:
             while True:
                 destination = self._versioned_import_path(project_path, manifest.name)
@@ -539,33 +629,48 @@ class CapsuleService:
                     break
                 except FileExistsError:
                     continue
-            FLPFile.read(destination).validate()
-            if _sha256(project_path.read_bytes()) != source_hash:
-                destination.unlink(missing_ok=True)
-                raise RuntimeError("source project changed during import; merged version was discarded")
+            result = ImportResult(
+                source_project=project_path,
+                merged_project=destination,
+                source_sha256=source_hash,
+                merged_sha256=merged_hash,
+                channel_mapping=mapping,
+                pattern_id=new_pattern,
+                transaction_id=transaction_id,
+                import_destination=result_destination,
+                in_place=False,
+                operation_fingerprint=operation_fingerprint,
+            )
+            try:
+                FLPFile.read(destination).validate()
+                if _sha256(project_path.read_bytes()) != source_hash:
+                    raise RuntimeError(
+                        "source project changed during import; merged version was discarded"
+                    )
+                self._write_transaction(result, capsule_id, mode)
+            except Exception:
+                if not self._transaction_is_committed(transaction_id):
+                    destination.unlink(missing_ok=True)
+                    raise
 
-        transaction_id = str(uuid.uuid4())
-        result = ImportResult(
-            source_project=project_path,
-            merged_project=destination,
-            source_sha256=source_hash,
-            merged_sha256=merged_hash,
-            channel_mapping=mapping,
-            pattern_id=new_pattern,
-            transaction_id=transaction_id,
-            import_destination=(
-                "override_selection" if mode == "override" else destination_mode
-            ),
-            in_place=in_place,
-            backup_project=backup,
-        )
-        self._write_transaction(result, capsule_id, mode)
+        result.committed = True
         if open_project:
             progress(86, "Reopening the project in FL Studio")
             before_load = session.load_sequence if session else None
-            self._open(destination, session)
-            progress(92, "Waiting for FL Studio to reconnect")
-            result.reload_confirmed = self._wait_for_reload(before_load) if session else None
+            try:
+                self._open(destination, session)
+                progress(92, "Waiting for FL Studio to reconnect")
+                result.reload_confirmed = self._wait_for_reload(before_load) if session else None
+            except Exception as error:
+                # The validated project and its transaction are already durable.
+                # Report reload as a follow-up action instead of lying that the
+                # import itself failed and encouraging a duplicate retry.
+                result.reload_confirmed = False
+                result.reload_error = str(error)
+        try:
+            self._write_import_reload(result)
+        except OSError:
+            pass
         # Usage is non-critical bookkeeping and must never turn a completed,
         # validated project mutation into a reported import failure.
         try:
@@ -742,8 +847,54 @@ class CapsuleService:
             "mapping": result.channel_mapping, "pattern_id": result.pattern_id,
             "in_place": result.in_place,
             "backup": str(result.backup_project) if result.backup_project else None,
+            "committed": True,
+            "operation_fingerprint": result.operation_fingerprint,
         }
         self._append_journal(record)
+
+    def _write_transaction_prepare(
+        self, result: ImportResult, capsule_id: str, mode: str
+    ) -> None:
+        self._append_journal(
+            {
+                "action": "import_prepare",
+                "transaction_id": result.transaction_id,
+                "timestamp": time.time(),
+                "capsule_id": capsule_id,
+                "mode": mode,
+                "import_destination": result.import_destination,
+                "source": str(result.source_project),
+                "merged": str(result.merged_project),
+                "source_sha256": result.source_sha256,
+                "merged_sha256": result.merged_sha256,
+                "mapping": result.channel_mapping,
+                "pattern_id": result.pattern_id,
+                "in_place": result.in_place,
+                "backup": str(result.backup_project) if result.backup_project else None,
+                "operation_fingerprint": result.operation_fingerprint,
+            }
+        )
+
+    def _write_transaction_abort(self, transaction_id: str, reason: str) -> None:
+        self._append_journal(
+            {
+                "action": "import_abort",
+                "transaction_id": transaction_id,
+                "timestamp": time.time(),
+                "reason": str(reason)[:1000],
+            }
+        )
+
+    def _write_import_reload(self, result: ImportResult) -> None:
+        self._append_journal(
+            {
+                "action": "import_reload",
+                "transaction_id": result.transaction_id,
+                "timestamp": time.time(),
+                "reload_confirmed": result.reload_confirmed,
+                "reload_error": result.reload_error,
+            }
+        )
 
     def _write_undo_transaction(self, result: UndoResult) -> None:
         self._append_journal(
@@ -766,16 +917,148 @@ class CapsuleService:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def _latest_reversible_import(self, project: Path) -> dict:
+    def _journal_records(self) -> list[dict]:
         journal = self.settings.data_dir / "transactions.jsonl"
         if not journal.exists():
-            raise FLPUnsupportedError("there is no Sound Capsule import to undo")
+            return []
         records: list[dict] = []
-        for line in journal.read_text(encoding="utf-8").splitlines():
+        try:
+            lines = journal.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines:
             try:
-                records.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+
+    def _transaction_is_committed(self, transaction_id: str) -> bool:
+        return any(
+            record.get("action") == "import"
+            and record.get("transaction_id") == transaction_id
+            for record in self._journal_records()
+        )
+
+    def _recover_incomplete_imports(self) -> list[str]:
+        """Roll back an interrupted in-place import when hashes prove it is safe."""
+        records = self._journal_records()
+        pending: dict[str, dict] = {}
+        for record in records:
+            transaction_id = record.get("transaction_id")
+            if not transaction_id:
+                continue
+            if record.get("action") == "import_prepare":
+                pending[str(transaction_id)] = record
+            elif record.get("action") in {"import", "import_abort"}:
+                pending.pop(str(transaction_id), None)
+        warnings: list[str] = []
+        for transaction_id, record in pending.items():
+            if record.get("in_place") is not True:
+                continue
+            source = Path(str(record.get("source", "")))
+            backup = Path(str(record.get("backup", "")))
+            try:
+                current_bytes = source.read_bytes()
+                current_hash = _sha256(current_bytes)
+                if current_hash == record.get("source_sha256"):
+                    self._write_transaction_abort(
+                        transaction_id, "recovery found the original project unchanged"
+                    )
+                    continue
+                if current_hash != record.get("merged_sha256"):
+                    warnings.append(
+                        f"Import {transaction_id} needs manual recovery because the project changed"
+                    )
+                    continue
+                backup_bytes = backup.read_bytes()
+                if _sha256(backup_bytes) != record.get("source_sha256"):
+                    warnings.append(
+                        f"Import {transaction_id} needs manual recovery because its backup changed"
+                    )
+                    continue
+                FLPFile.from_bytes(backup_bytes).validate()
+                self._atomic_write(source, backup_bytes)
+                FLPFile.read(source).validate()
+                self._write_transaction_abort(
+                    transaction_id, "automatically rolled back an interrupted import"
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                warnings.append(f"Import {transaction_id} recovery failed: {error}")
+        return warnings
+
+    def import_result_for_operation(
+        self,
+        operation_id: str,
+        *,
+        capsule_id: str | None = None,
+        mode: str | None = None,
+        operation_fingerprint: str | None = None,
+    ) -> ImportResult | None:
+        """Reconstruct a committed import so retries cannot apply it twice."""
+        records = self._journal_records()
+        committed = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("action") == "import"
+                and record.get("transaction_id") == operation_id
+            ),
+            None,
+        )
+        if committed is None:
+            return None
+        if capsule_id is not None and committed.get("capsule_id") != capsule_id:
+            raise ValueError("operation_id was already used for a different capsule")
+        if (
+            mode is not None
+            and committed.get("mode") != mode
+            and committed.get("operation_fingerprint") is None
+        ):
+            raise ValueError("operation_id was already used for a different import mode")
+        if (
+            operation_fingerprint is not None
+            and committed.get("operation_fingerprint") is not None
+            and committed.get("operation_fingerprint") != operation_fingerprint
+        ):
+            raise ValueError("operation_id was already used for different import options")
+        reload_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("action") == "import_reload"
+                and record.get("transaction_id") == operation_id
+            ),
+            {},
+        )
+        mapping = {
+            int(source): int(target)
+            for source, target in dict(committed.get("mapping", {})).items()
+        }
+        backup = committed.get("backup")
+        return ImportResult(
+            source_project=Path(committed["source"]),
+            merged_project=Path(committed["merged"]),
+            source_sha256=str(committed["source_sha256"]),
+            merged_sha256=str(committed["merged_sha256"]),
+            channel_mapping=mapping,
+            pattern_id=int(committed["pattern_id"]),
+            transaction_id=operation_id,
+            import_destination=str(committed.get("import_destination", "new_pattern")),
+            in_place=bool(committed.get("in_place", False)),
+            backup_project=Path(backup) if backup else None,
+            reload_confirmed=reload_record.get("reload_confirmed"),
+            reload_error=reload_record.get("reload_error"),
+            committed=True,
+            operation_fingerprint=committed.get("operation_fingerprint"),
+        )
+
+    def _latest_reversible_import(self, project: Path) -> dict:
+        records = self._journal_records()
+        if not records:
+            raise FLPUnsupportedError("there is no Sound Capsule import to undo")
         undone = {
             record.get("import_transaction_id")
             for record in records

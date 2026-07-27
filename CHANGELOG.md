@@ -6,6 +6,31 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-26
+
+### Added
+
+- Helper requests now use a private per-install token and explicit protocol and
+  app versions, and only one helper process can initialize shared state.
+- Mutating operations now have durable IDs, isolated progress and cancellation,
+  completed-result recovery, and automatic rollback of interrupted imports.
+
+### Changed
+
+- Large libraries load in stable pages, and MIDI and automation preview data is
+  fetched only for rows that are visible.
+- Rendered preview output is spooled to temporary files so large renders remain
+  cancellable without blocking the renderer process.
+
+### Fixed
+
+- Capsule imports are idempotent across retries and correctly report a
+  committed import when the project was saved but FL Studio could not reopen it.
+- Import staging files are removed after success, failure, cancellation, and
+  interrupted-operation recovery.
+- Windows helper startup now claims its port exclusively, preventing a second
+  process from initializing the same library and transaction state.
+
 ## [0.3.5] - 2026-07-20
 
 ### Added

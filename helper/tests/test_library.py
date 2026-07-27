@@ -266,6 +266,13 @@ class LibraryTests(unittest.TestCase):
             )[0]
             note_end = source_note.position + source_note.length
             self.assertAlmostEqual(note_preview[0][0], source_note.position / note_end, places=6)
+
+            summary = library.list("dark", include_previews=False)[0]
+            self.assertNotIn("note_preview", summary)
+            self.assertNotIn("automation_preview", summary)
+            details = library.preview_details([summary["id"]])
+            self.assertEqual(details[0]["id"], summary["id"])
+            self.assertEqual(json.loads(details[0]["note_preview"]), note_preview)
             self.assertEqual(json.loads(row["channel_names"]), ["Lead"])
 
     def test_v2_midi_preview_uses_tempo_and_audio_tail_duration(self) -> None:

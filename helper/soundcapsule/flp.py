@@ -778,7 +778,15 @@ class FLPFile:
 
     def channel_state(self, section: ChannelSection) -> "FLPFile":
         normalized = section.remap(0)
-        return FLPFile(FORMAT_CHANNEL_STATE, 1, self.ppq, list(normalized.events))
+        version = next((event for event in self.events if event.id == EVENT_FL_VERSION), None)
+        if version is None:
+            raise FLPUnsupportedError("project has no FL version event for channel-state export")
+        return FLPFile(
+            FORMAT_CHANNEL_STATE,
+            1,
+            self.ppq,
+            [version, *normalized.events],
+        )
 
     def isolated_preview_project(self, channel_ids: Sequence[int], pattern_id: int) -> "FLPFile":
         selected = set(channel_ids)

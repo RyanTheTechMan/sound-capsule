@@ -21,7 +21,7 @@ from .capsule import (
     unique_legacy_capsule_path,
 )
 
-INDEX_VERSION = 11
+INDEX_VERSION = 12
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -251,6 +251,7 @@ class CapsuleLibrary:
         descending: bool = True,
         limit: int = 1000,
         offset: int = 0,
+        include_previews: bool = True,
     ) -> list[dict]:
         limit = max(1, min(int(limit), 1000))
         offset = max(0, int(offset))
@@ -261,7 +262,28 @@ class CapsuleLibrary:
         }
         if sort_by not in sort_columns:
             raise ValueError("sort_by must be 'recent', 'name', or 'uses'")
-        query = "SELECT * FROM capsules"
+        columns = "*" if include_previews else (
+            "id, path, name, created_at, source_fl_version, plugin_names, tags, "
+            "favorite, channel_count, channel_names, midi_playback_end, use_count, modified_ns"
+        )
+        query = f"SELECT {columns} FROM capsules"
+        conditions, args = self._list_conditions(search, favorites_only)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        direction = "DESC" if descending else "ASC"
+        query += (
+            f" ORDER BY {sort_columns[sort_by]} {direction}, "
+            "name COLLATE NOCASE ASC, id ASC LIMIT ? OFFSET ?"
+        )
+        args = (*args, limit, offset)
+        with self._lock, self.session() as database:
+            rows = [dict(row) for row in database.execute(query, args).fetchall()]
+        for row in rows:
+            row["preview_path"] = row["path"]
+        return rows
+
+    @staticmethod
+    def _list_conditions(search: str, favorites_only: bool) -> tuple[list[str], tuple]:
         conditions: list[str] = []
         args: tuple = ()
         for term in (item.strip() for item in search.split(",")):
@@ -272,16 +294,32 @@ class CapsuleLibrary:
             args = (*args, wildcard, wildcard, wildcard)
         if favorites_only:
             conditions.append("favorite = 1")
+        return conditions, args
+
+    def count(self, search: str = "", *, favorites_only: bool = False) -> int:
+        conditions, args = self._list_conditions(search, favorites_only)
+        query = "SELECT COUNT(*) FROM capsules"
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        direction = "DESC" if descending else "ASC"
-        query += f" ORDER BY {sort_columns[sort_by]} {direction}, name COLLATE NOCASE ASC LIMIT ? OFFSET ?"
-        args = (*args, limit, offset)
         with self._lock, self.session() as database:
-            rows = [dict(row) for row in database.execute(query, args).fetchall()]
-        for row in rows:
-            row["preview_path"] = row["path"]
-        return rows
+            return int(database.execute(query, args).fetchone()[0])
+
+    def preview_details(self, capsule_ids: list[str]) -> list[dict]:
+        """Return the large MIDI/automation payload only for requested rows."""
+        if not capsule_ids:
+            return []
+        if len(capsule_ids) > 2:
+            raise ValueError("preview_details accepts at most 2 capsule ids")
+        normalized = [str(capsule_id)[:200] for capsule_id in capsule_ids]
+        placeholders = ",".join("?" for _ in normalized)
+        with self._lock, self.session() as database:
+            rows = database.execute(
+                f"SELECT id, note_preview, automation_preview, midi_playback_end "
+                f"FROM capsules WHERE id IN ({placeholders})",
+                tuple(normalized),
+            ).fetchall()
+        indexed = {row["id"]: dict(row) for row in rows}
+        return [indexed[capsule_id] for capsule_id in normalized if capsule_id in indexed]
 
     @staticmethod
     def _remove_legacy_preview(capsule: Capsule) -> None:
@@ -366,6 +404,21 @@ class CapsuleLibrary:
                         (channel_indexes[automation.source_iid], curve)
                     )
                     automation_end = max(automation_end, item_start + item.length)
+        # Preview geometry is display-only. Bound it globally so a single
+        # automation-heavy capsule can never recreate an unbounded RPC payload.
+        if len(raw_automation) > 512:
+            stride = math.ceil(len(raw_automation) / 512)
+            raw_automation = raw_automation[::stride][:512]
+        total_automation_points = sum(len(curve) for _, curve in raw_automation)
+        if total_automation_points > 4096:
+            stride = math.ceil(total_automation_points / 4096)
+            sampled_automation: list[tuple[int, list[tuple[float, float, float]]]] = []
+            for channel_index, curve in raw_automation:
+                sampled = curve[::stride]
+                if curve and sampled[-1] != curve[-1]:
+                    sampled.append(curve[-1])
+                sampled_automation.append((channel_index, sampled))
+            raw_automation = sampled_automation
         if not indexed_notes and not raw_automation:
             return [], [], 1.0
         exact_timing = manifest.schema_version >= 2 and manifest.source_tempo_bpm is not None

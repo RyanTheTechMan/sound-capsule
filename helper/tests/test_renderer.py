@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 import wave
 from pathlib import Path
 from unittest import mock
 
-from soundcapsule.renderer import RenderError, render_project
+from soundcapsule.renderer import RenderError, _run_cancellable, render_project
 
 
 def write_audible_wave(path: Path) -> None:
@@ -20,6 +21,22 @@ def write_audible_wave(path: Path) -> None:
 
 
 class RendererTests(unittest.TestCase):
+    def test_cancellable_process_drains_output_larger_than_pipe_capacity(self) -> None:
+        result = _run_cancellable(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('x' * 3000000); "
+                "sys.stderr.write('y' * 3000000)",
+            ],
+            timeout=10.0,
+            cancel_requested=lambda: False,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout), 3_000_000)
+        self.assertEqual(len(result.stderr), 3_000_000)
+
     def test_cancellable_render_terminates_the_render_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

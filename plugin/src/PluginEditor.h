@@ -119,6 +119,8 @@ private:
         float midiPlaybackEnd = 1.0f;
         std::unique_ptr<juce::AudioThumbnail> thumbnail;
         bool preloadQueued = false;
+        bool previewDetailsLoaded = false;
+        bool previewDetailsQueued = false;
     };
 
     int getNumRows() override;
@@ -139,7 +141,10 @@ private:
     void mouseExit(const juce::MouseEvent&) override;
 
     CapsuleRow* selected();
+    static CapsuleRow capsuleRowFromValue(const juce::var&);
+    static void applyPreviewDetails(CapsuleRow&, const juce::var&);
     void refreshLibrary();
+    void loadNextLibraryPage();
     void preloadVisibleRows();
     void refreshSessionStatus();
     void captureSelected(bool individually);
@@ -208,6 +213,13 @@ private:
     uint32_t lastOperationProgressPollAt = 0;
     uint32_t operationOverlayHideAt = 0;
     uint64_t listGeneration = 0;
+    juce::String activeLibrarySearch;
+    juce::String activeLibrarySort{"recent"};
+    int activeLibraryTotal = 0;
+    bool activeLibraryFavoritesOnly = false;
+    bool activeLibraryDescending = true;
+    bool libraryHasMore = false;
+    bool libraryPageLoading = false;
     bool migrationNoticeShown = false;
     juce::String libraryHealthSignature;
     uint64_t previewGeneration = 0;

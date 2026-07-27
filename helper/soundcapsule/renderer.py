@@ -4,12 +4,53 @@ from pathlib import Path
 import platform
 import subprocess
 import struct
+import tempfile
 import time
 from typing import Callable
 
 
 class RenderError(RuntimeError):
     pass
+
+
+def _run_cancellable(
+    command: list[str],
+    *,
+    timeout: float,
+    cancel_requested: Callable[[], bool],
+) -> subprocess.CompletedProcess[str]:
+    """Run a cancellable child without ever allowing its output pipes to fill."""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, \
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+        process = subprocess.Popen(
+            command,
+            shell=False,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+        )
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            if cancel_requested():
+                process.terminate()
+                try:
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5.0)
+                raise RenderError("Operation cancelled")
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.wait(timeout=5.0)
+                raise RenderError(
+                    f"FL Studio render timed out after {timeout:g} seconds"
+                )
+            time.sleep(0.1)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        return subprocess.CompletedProcess(
+            command, process.returncode, stdout_file.read(), stderr_file.read()
+        )
 
 
 def close_windows_fl_studio(
@@ -173,33 +214,8 @@ def render_project(
                 text=True,
             )
         else:
-            process = subprocess.Popen(
-                command,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            deadline = time.monotonic() + timeout
-            while process.poll() is None:
-                if cancel_requested():
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5.0)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5.0)
-                    raise RenderError("Operation cancelled")
-                if time.monotonic() >= deadline:
-                    process.kill()
-                    process.wait(timeout=5.0)
-                    raise RenderError(
-                        f"FL Studio render timed out after {timeout:g} seconds"
-                    )
-                time.sleep(0.1)
-            stdout, stderr = process.communicate()
-            result = subprocess.CompletedProcess(
-                command, process.returncode, stdout, stderr
+            result = _run_cancellable(
+                command, timeout=timeout, cancel_requested=cancel_requested
             )
     except subprocess.TimeoutExpired as error:
         raise RenderError(
@@ -209,6 +225,7 @@ def render_project(
         raise RenderError(f"FL Studio render could not start: {error}") from error
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no error details"
+        detail = detail[-4000:]
         raise RenderError(f"FL Studio render failed ({result.returncode}): {detail}")
     if not output.is_file():
         raise RenderError("FL Studio exited without producing the requested WAV file")
