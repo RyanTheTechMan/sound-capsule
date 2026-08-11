@@ -23,6 +23,16 @@ from soundcapsule.flp import (
     EVENT_CURRENT_PATTERN,
     EVENT_CURRENT_ARRANGEMENT,
     EVENT_FL_VERSION,
+    EVENT_EFFECT_SLOT_INDEX,
+    EVENT_INSERT_ACTIVE,
+    EVENT_INSERT_COLOR,
+    EVENT_INSERT_FLAGS,
+    EVENT_INSERT_ICON,
+    EVENT_INSERT_INPUT,
+    EVENT_INSERT_NAME,
+    EVENT_INSERT_OUTPUT,
+    EVENT_INSERT_ROUTING,
+    EVENT_MIXER_PARAMS,
     EVENT_PATTERN_NAME,
     EVENT_PATTERN_NEW,
     EVENT_PATTERN_NOTES,
@@ -30,10 +40,13 @@ from soundcapsule.flp import (
     EVENT_PROJECT_LOOP_MODE,
     EVENT_PADDING,
     EVENT_PLUGIN_INTERNAL_NAME,
+    EVENT_PLUGIN_LOCATION,
     EVENT_PLUGIN_NAME,
     EVENT_TEMPO,
     FLPFile,
     FORMAT_PROJECT,
+    MIXER_PARAM_STRUCT,
+    MixerParamRecord,
     NOTE_STRUCT,
     PlaylistItem,
     NoteRecord,
@@ -95,7 +108,114 @@ def fixture_project(*, ppq: int = 96) -> FLPFile:
         scalar_event(EVENT_PATTERN_NEW, 3),
         text_event(EVENT_PATTERN_NAME, "Verse"),
     ]
-    return FLPFile(FORMAT_PROJECT, 2, ppq, events)
+    project = FLPFile(FORMAT_PROJECT, 2, ppq, events)
+    _add_fixture_mixer(project)
+    return project
+
+
+def _add_fixture_mixer(project: FLPFile) -> None:
+    def flags_payload(flags: int = 12) -> bytes:
+        return struct.pack("<III", 0, flags, 0)
+
+    def insert_events(index: int, *, current: bool = False) -> list:
+        events = []
+        if index > 0 or current:
+            events.extend(
+                [
+                    scalar_event(EVENT_INSERT_INPUT, 0xFFFFFFFF),
+                    scalar_event(EVENT_INSERT_OUTPUT, 0xFFFFFFFF),
+                ]
+            )
+        active = index in {7, 12}
+        if active:
+            events.extend(
+                [
+                    scalar_event(EVENT_INSERT_COLOR, 0x006C665E + index),
+                    scalar_event(EVENT_INSERT_ACTIVE, 1),
+                    *(
+                        [scalar_event(EVENT_INSERT_ICON, 42)]
+                        if index == 7
+                        else []
+                    ),
+                    text_event(
+                        EVENT_INSERT_NAME,
+                        "Lead Insert" if index == 7 else "Kick Insert",
+                    ),
+                ]
+            )
+        else:
+            events.append(scalar_event(EVENT_INSERT_ACTIVE, 0))
+        events.append(
+            data_event(
+                EVENT_INSERT_FLAGS,
+                flags_payload(13 if index == 7 else 12),
+            )
+        )
+        if active:
+            events.extend(
+                [
+                    text_event(
+                        EVENT_PLUGIN_INTERNAL_NAME,
+                        "Fruity Parametric EQ 2" if index == 7 else "Fruity Reeverb 2",
+                    ),
+                    data_event(
+                        EVENT_PLUGIN_LOCATION,
+                        struct.pack("<13I", index, 0, 2, *([0] * 10)),
+                    ),
+                    data_event(213, b"fixture-effect-state-" + bytes((index,))),
+                ]
+            )
+        events.append(scalar_event(EVENT_EFFECT_SLOT_INDEX, 0))
+        events.extend(
+            scalar_event(EVENT_EFFECT_SLOT_INDEX, slot) for slot in range(1, 10)
+        )
+        events.append(data_event(EVENT_INSERT_ROUTING, b"\x00" if index == 0 else b"\x01"))
+        return events
+
+    mixer_events = []
+    for index in range(17):
+        mixer_events.extend(insert_events(index))
+    mixer_events.extend(insert_events(17, current=True))
+
+    params = []
+    defaults = {
+        192: 12_800,
+        193: 0,
+        194: 0,
+        208: 0,
+        209: 0,
+        210: 0,
+        216: 5_777,
+        217: 33_145,
+        218: 55_825,
+        224: 17_500,
+        225: 17_500,
+        226: 17_500,
+    }
+    for index in range(17):
+        key = 64 + index
+        for slot in range(10):
+            channel_data = (key << 6) | slot
+            params.append(MIXER_PARAM_STRUCT.pack(b"\0" * 4, 0, 31, channel_data, 1))
+            mix = 9_600 if index == 7 and slot == 0 else 12_800
+            params.append(MIXER_PARAM_STRUCT.pack(b"\0" * 4, 1, 31, channel_data, mix))
+        for parameter_id, value in defaults.items():
+            if index == 7 and parameter_id == 192:
+                value = 11_200
+            if index == 7 and parameter_id == 193:
+                value = -640
+            if index == 7 and parameter_id == 194:
+                value = -3_200
+            if index == 7 and parameter_id == 208:
+                value = 1_500
+            if index == 7 and parameter_id == 216:
+                value = 6_000
+            params.append(
+                MIXER_PARAM_STRUCT.pack(
+                    b"\0" * 4, parameter_id, 31, key << 6, value
+                )
+            )
+    project.events.extend([*mixer_events, data_event(EVENT_MIXER_PARAMS, b"".join(params))])
 
 
 def playlist_item(
@@ -245,7 +365,275 @@ def make_legacy_capsule(capsule: Capsule) -> Capsule:
     return capsule
 
 
+class MixerInsertFLPTests(unittest.TestCase):
+    def test_fl25_and_fl26_use_the_supported_insert_parameter_mapping(self) -> None:
+        for version in ("25.2.5.5055", "26.1.0.5294"):
+            project = fixture_project()
+            version_event = next(
+                event for event in project.events if event.id == EVENT_FL_VERSION
+            )
+            project.events[project.events.index(version_event)] = text_event(
+                EVENT_FL_VERSION, version, unicode_text=False
+            )
+
+            parsed = FLPFile.from_bytes(project.to_bytes())
+            state = parsed.mixer_insert_state(7)
+
+            self.assertEqual(parsed._mixer_param_key(0), 64)
+            self.assertEqual(parsed._mixer_param_key(16), 80)
+            state.validate_mixer_insert_state()
+
+    def test_gapped_slots_bypass_mix_and_parameter_remapping_are_lossless(self) -> None:
+        source = fixture_project()
+        source_insert = {
+            section.index: section for section in source.mixer_insert_sections()
+        }[7]
+        slot_two = next(
+            event
+            for event in source_insert.events
+            if event.id == EVENT_EFFECT_SLOT_INDEX and event.scalar == 2
+        )
+        expanded_events = []
+        for event in source_insert.events:
+            if event is slot_two:
+                expanded_events.extend(
+                    [
+                        text_event(EVENT_PLUGIN_INTERNAL_NAME, "Fruity Delay 3"),
+                        data_event(
+                            EVENT_PLUGIN_LOCATION,
+                            struct.pack("<13I", 7, 2, 2, *([0] * 10)),
+                        ),
+                        data_event(213, b"gapped-slot-two-state"),
+                    ]
+                )
+            expanded_events.append(event)
+        source._replace_mixer_insert_events(source_insert, expanded_events)
+        params = source._mixer_params_event()
+        rebuilt_params = []
+        for record in MixerParamRecord.parse_many(params.payload):
+            prefix, parameter_id, marker, channel_data, value = record.values
+            if record.insert_key == 71 and record.slot_index == 2:
+                if parameter_id == 0:
+                    value = 0
+                elif parameter_id == 1:
+                    value = 5_000
+            rebuilt_params.append(
+                MIXER_PARAM_STRUCT.pack(
+                    prefix, parameter_id, marker, channel_data, value
+                )
+            )
+        params_at = source.events.index(params)
+        source.events[params_at] = params.with_payload(b"".join(rebuilt_params))
+
+        state = source.mixer_insert_state(7)
+        destination = fixture_project()
+        restored, allocated = destination.restore_mixer_insert_states([(state, [2])])
+
+        self.assertEqual(allocated, [1])
+        insert = {
+            section.index: section for section in restored.mixer_insert_sections()
+        }[1]
+        self.assertEqual(
+            [slot.index for slot in insert.effect_slots], list(range(10))
+        )
+        self.assertEqual(
+            [slot.index for slot in insert.effect_slots if slot.occupied], [0, 2]
+        )
+        raw_events = b"".join(event.raw for event in insert.events)
+        self.assertLess(
+            raw_events.index(b"fixture-effect-state-\x07"),
+            raw_events.index(b"gapped-slot-two-state"),
+        )
+        values = {
+            (record.parameter_id, record.slot_index): record.value
+            for record in insert.params
+        }
+        self.assertEqual(values[(0, 2)], 0)
+        self.assertEqual(values[(1, 2)], 5_000)
+        self.assertTrue(all(record.insert_key == 65 for record in insert.params))
+        locations = [
+            (slot.index, struct.unpack_from("<III", event.payload))
+            for slot in insert.effect_slots
+            for event in slot.events
+            if event.id == EVENT_PLUGIN_LOCATION
+        ]
+        self.assertEqual(locations, [(0, (1, 0, 2)), (2, (1, 2, 2))])
+
+    def test_extracts_portable_insert_state_with_effects_and_parameters(self) -> None:
+        state = fixture_project().mixer_insert_state(7)
+
+        state.validate_mixer_insert_state()
+        self.assertEqual(
+            [slot.plugin_name for slot in state.mixer_effect_slots() if slot.occupied],
+            ["Fruity Parametric EQ 2"],
+        )
+        self.assertFalse(
+            any(
+                event.id in {
+                    EVENT_INSERT_INPUT,
+                    EVENT_INSERT_OUTPUT,
+                    EVENT_INSERT_ROUTING,
+                }
+                for event in state.events
+            )
+        )
+        self.assertIn(b"fixture-effect-state-\x07", state.to_bytes())
+        state_ids = [event.id for event in state.events]
+        self.assertIn(EVENT_INSERT_NAME, state_ids)
+        self.assertIn(EVENT_INSERT_COLOR, state_ids)
+        self.assertIn(EVENT_INSERT_ICON, state_ids)
+        records = MixerParamRecord.parse_many(state.events[-1].payload)
+        values = {(record.parameter_id, record.slot_index): record.value for record in records}
+        self.assertEqual(values[(192, 0)], 11_200)
+        self.assertEqual(values[(193, 0)], -640)
+        self.assertEqual(values[(194, 0)], -3_200)
+        self.assertEqual(values[(208, 0)], 1_500)
+        self.assertEqual(values[(216, 0)], 6_000)
+        self.assertEqual(values[(1, 0)], 9_600)
+        flags = next(event for event in state.events if event.id == EVENT_INSERT_FLAGS)
+        self.assertEqual(int.from_bytes(flags.payload[4:8], "little"), 13)
+
+    def test_preview_keeps_selected_insert_processing_and_removes_sends(self) -> None:
+        project = fixture_project()
+
+        wet = project.isolated_preview_project(
+            [2], 3, preserve_mixer_inserts=True
+        )
+        dry = project.isolated_preview_project(
+            [2], 3, preserve_mixer_inserts=False
+        )
+
+        self.assertEqual(wet.channel_sections()[0].mixer_insert, 7)
+        self.assertEqual(dry.channel_sections()[0].mixer_insert, 0)
+        restored = {section.index: section for section in wet.mixer_insert_sections()}[7]
+        self.assertEqual(restored.routes_to(), {0})
+        self.assertTrue(
+            all(
+                event.scalar == 0xFFFFFFFF
+                for event in restored.events
+                if event.id in {EVENT_INSERT_INPUT, EVENT_INSERT_OUTPUT}
+            )
+        )
+
+    def test_restore_allocates_one_fresh_insert_and_preserves_sharing(self) -> None:
+        source = fixture_project()
+        destination = fixture_project()
+        state = source.mixer_insert_state(7)
+        original_insert_seven = {
+            section.index: section for section in destination.mixer_insert_sections()
+        }[7]
+
+        merged, allocated = destination.restore_mixer_insert_states(
+            [(state, [2, 5])]
+        )
+
+        self.assertEqual(allocated, [1])
+        channels = {section.iid: section for section in merged.channel_sections()}
+        self.assertEqual(channels[2].mixer_insert, 1)
+        self.assertEqual(channels[5].mixer_insert, 1)
+        sections = {section.index: section for section in merged.mixer_insert_sections()}
+        self.assertIn(b"fixture-effect-state-\x07", b"".join(e.raw for e in sections[1].events))
+        location = next(
+            event for event in sections[1].effect_slots[0].events
+            if event.id == EVENT_PLUGIN_LOCATION
+        )
+        self.assertEqual(struct.unpack_from("<III", location.payload), (1, 0, 2))
+        self.assertEqual(sections[7].events, original_insert_seven.events)
+        values = {
+            (record.parameter_id, record.slot_index): record.value
+            for record in sections[1].params
+        }
+        self.assertEqual(values[(192, 0)], 11_200)
+        self.assertEqual(values[(193, 0)], -640)
+        self.assertEqual(values[(1, 0)], 9_600)
+
+    def test_restore_preserves_unrelated_raw_events(self) -> None:
+        destination = fixture_project()
+        opaque = data_event(252, b"unrelated-future-project-state\x00\xff")
+        destination.events.insert(0, opaque)
+
+        restored, _ = destination.restore_mixer_insert_states(
+            [(destination.mixer_insert_state(7), [2])]
+        )
+
+        self.assertIn(opaque.raw, [event.raw for event in restored.events])
+
+    def test_restore_preserves_destination_layout_flags(self) -> None:
+        source = fixture_project()
+        source_section = {
+            section.index: section for section in source.mixer_insert_sections()
+        }[7]
+        source_flags = source_section.flags_event
+        source_payload = bytearray(source_flags.payload)
+        source_payload[4:8] = (0x1003).to_bytes(4, "little")
+        source._replace_mixer_insert_events(
+            source_section,
+            [
+                source_flags.with_payload(bytes(source_payload))
+                if event is source_flags
+                else event
+                for event in source_section.events
+            ],
+        )
+        state = source.mixer_insert_state(7)
+
+        destination = fixture_project()
+        target_section = {
+            section.index: section for section in destination.mixer_insert_sections()
+        }[1]
+        target_flags = target_section.flags_event
+        target_payload = bytearray(target_flags.payload)
+        target_payload[4:8] = (0x400C).to_bytes(4, "little")
+        destination._replace_mixer_insert_events(
+            target_section,
+            [
+                target_flags.with_payload(bytes(target_payload))
+                if event is target_flags
+                else event
+                for event in target_section.events
+            ],
+        )
+
+        merged, _ = destination.restore_mixer_insert_states([(state, [2])])
+        restored_flags = {
+            section.index: section for section in merged.mixer_insert_sections()
+        }[1].flags_event
+        self.assertEqual(int.from_bytes(restored_flags.payload[4:8], "little"), 0x4003)
+
+    def test_restore_fails_without_mutating_when_pristine_inserts_are_insufficient(self) -> None:
+        destination = fixture_project()
+        before = destination.to_bytes()
+        state = destination.mixer_insert_state(7)
+
+        with self.assertRaisesRegex(RuntimeError, "15 pristine mixer inserts"):
+            destination.restore_mixer_insert_states([(state, [2])] * 15)
+
+        self.assertEqual(destination.to_bytes(), before)
+
+    def test_master_insert_is_never_exported(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "Master mixer state"):
+            fixture_project().mixer_insert_state(0)
+
+
 class FLPRoundTripTests(unittest.TestCase):
+    def test_channel_mixer_route_uses_fl_event_104_without_an_index_offset(self) -> None:
+        project = fixture_project()
+        routes = [
+            next(
+                event for event in section.events
+                if event.id == EVENT_CHANNEL_ROUTED_TO
+            )
+            for section in project.channel_sections()
+        ]
+
+        self.assertEqual(EVENT_CHANNEL_ROUTED_TO, 104)
+        self.assertEqual([event.id for event in routes], [104, 104])
+        self.assertEqual([event.scalar for event in routes], [7, 12])
+        self.assertEqual(
+            [section.mixer_insert for section in FLPFile.from_bytes(project.to_bytes()).channel_sections()],
+            [7, 12],
+        )
+
     def test_tempo_and_user_channel_rename_preserve_plugin_identity(self) -> None:
         project = fixture_project()
         original = project.channel_sections()[0]
@@ -656,6 +1044,162 @@ class AutomationClipFLPTests(unittest.TestCase):
 
 
 class CapsuleTests(unittest.TestCase):
+    def test_schema_four_embeds_each_distinct_selected_insert_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Mixed.flcapsule",
+                name="Mixed",
+                project=fixture_project(),
+                channel_ids=[2, 5],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+
+            capsule.verify()
+            inserts = capsule.manifest.mixer_inserts
+            self.assertEqual([insert.source_index for insert in inserts], [7, 12])
+            self.assertEqual(
+                [insert.channel_source_iids for insert in inserts], [[2], [5]]
+            )
+            for insert in inserts:
+                capsule.read_mixer_insert_state(insert).validate_mixer_insert_state()
+
+    def test_schema_four_preserves_shared_insert_associations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            project = fixture_project()
+            channel = {section.iid: section for section in project.channel_sections()}[5]
+            project._replace_channel_events(
+                channel, channel.with_mixer_insert(7).events
+            )
+
+            capsule = Capsule.build(
+                root / "Shared.flcapsule",
+                name="Shared",
+                project=project,
+                channel_ids=[2, 5],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+
+            self.assertEqual(len(capsule.manifest.mixer_inserts), 1)
+            insert = capsule.manifest.mixer_inserts[0]
+            self.assertEqual(insert.source_index, 7)
+            self.assertEqual(insert.channel_source_iids, [2, 5])
+
+    def test_mixer_capture_can_be_disabled_and_never_embeds_master(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            project = fixture_project()
+            channel = {section.iid: section for section in project.channel_sections()}[2]
+            project._replace_channel_events(
+                channel, channel.with_mixer_insert(0).events
+            )
+
+            disabled = Capsule.build(
+                root / "Disabled.flcapsule",
+                name="Disabled",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=False,
+            )
+            master = Capsule.build(
+                root / "Master.flcapsule",
+                name="Master",
+                project=project,
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+
+            self.assertFalse(disabled.manifest.mixer_inserts)
+            self.assertFalse(master.manifest.mixer_inserts)
+
+    def test_verification_rejects_missing_mixer_insert_member(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Broken.flcapsule",
+                name="Broken",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+            make_legacy_capsule(capsule)
+            missing = capsule.manifest.mixer_inserts[0].state_path
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist()
+                    if name != missing
+                }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+
+            with self.assertRaisesRegex(ValueError, "missing required members"):
+                capsule.verify()
+
+    def test_verification_rejects_structurally_corrupt_mixer_insert_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Corrupt.flcapsule",
+                name="Corrupt",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+            make_legacy_capsule(capsule)
+            state_path = capsule.manifest.mixer_inserts[0].state_path
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist()
+                    if name != "checksums.json"
+                }
+            state = FLPFile.from_bytes(members[state_path])
+            flags = next(
+                event for event in state.events if event.id == EVENT_INSERT_FLAGS
+            )
+            payload = bytearray(flags.payload)
+            payload[4:8] = (
+                int.from_bytes(payload[4:8], "little") | 0x40
+            ).to_bytes(4, "little")
+            state.events[state.events.index(flags)] = flags.with_payload(bytes(payload))
+            members[state_path] = state.to_bytes()
+            checksums = {
+                name: hashlib.sha256(data).hexdigest()
+                for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+                target.writestr("checksums.json", json.dumps(checksums))
+
+            with self.assertRaisesRegex(ValueError, "non-portable flags"):
+                capsule.verify()
+
     def test_capsule_preserves_selected_automation_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -671,7 +1215,7 @@ class CapsuleTests(unittest.TestCase):
             )
 
             capsule.verify()
-            self.assertEqual(capsule.manifest.schema_version, 3)
+            self.assertEqual(capsule.manifest.schema_version, 4)
             self.assertEqual(len(capsule.manifest.automations), 1)
             automation = capsule.manifest.automations[0]
             self.assertEqual((automation.source_iid, automation.target_source_iid), (9, 2))
@@ -750,7 +1294,7 @@ class CapsuleTests(unittest.TestCase):
             capsule.verify()
             manifest = capsule.manifest
             self.assertEqual(manifest.name, "Lead")
-            self.assertEqual(manifest.schema_version, 3)
+            self.assertEqual(manifest.schema_version, 4)
             self.assertEqual(manifest.source_tempo_bpm, 130.0)
             self.assertEqual(manifest.tags, ["dark", "lead"])
             self.assertEqual([channel.source_iid for channel in manifest.channels], [2, 5])
@@ -864,7 +1408,7 @@ class CapsuleTests(unittest.TestCase):
             self.assertEqual(converted.export_preview(root / "converted.wav").read_bytes(), preview.read_bytes())
             self.assertTrue(legacy.path.exists())
 
-    def test_schema_one_capsule_remains_readable_without_tempo(self) -> None:
+    def test_schemas_one_through_three_remain_readable_without_mixer_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             preview = root / "preview.wav"
@@ -879,21 +1423,28 @@ class CapsuleTests(unittest.TestCase):
                     name: source.read(name)
                     for name in source.namelist() if name != "checksums.json"
                 }
-            manifest = json.loads(members["manifest.json"])
-            manifest["schema_version"] = 1
-            manifest.pop("source_tempo_bpm", None)
-            members["manifest.json"] = json.dumps(manifest).encode()
-            checksums = {
-                name: hashlib.sha256(data).hexdigest() for name, data in members.items()
-            }
-            with zipfile.ZipFile(capsule.path, "w") as target:
-                for name, data in members.items():
-                    target.writestr(name, data)
-                target.writestr("checksums.json", json.dumps(checksums))
+            original_manifest = json.loads(members["manifest.json"])
+            for schema_version in (1, 2, 3):
+                manifest = dict(original_manifest)
+                manifest["schema_version"] = schema_version
+                manifest.pop("mixer_inserts", None)
+                if schema_version == 1:
+                    manifest.pop("source_tempo_bpm", None)
+                members["manifest.json"] = json.dumps(manifest).encode()
+                checksums = {
+                    name: hashlib.sha256(data).hexdigest()
+                    for name, data in members.items()
+                }
+                with zipfile.ZipFile(capsule.path, "w") as target:
+                    for name, data in members.items():
+                        target.writestr(name, data)
+                    target.writestr("checksums.json", json.dumps(checksums))
 
-            capsule.verify()
-            self.assertEqual(capsule.manifest.schema_version, 1)
-            self.assertIsNone(capsule.manifest.source_tempo_bpm)
+                capsule.verify()
+                self.assertEqual(capsule.manifest.schema_version, schema_version)
+                self.assertFalse(capsule.manifest.mixer_inserts)
+                if schema_version == 1:
+                    self.assertIsNone(capsule.manifest.source_tempo_bpm)
 
     def test_capsule_rejects_newer_schema_even_with_valid_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -908,7 +1459,7 @@ class CapsuleTests(unittest.TestCase):
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist() if name != "checksums.json"}
             manifest = json.loads(members["manifest.json"])
-            manifest["schema_version"] = 4
+            manifest["schema_version"] = 5
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
             with zipfile.ZipFile(capsule.path, "w") as target:

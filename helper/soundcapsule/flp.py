@@ -4,10 +4,10 @@ FL Studio files use a fixed 22-byte header followed by a typed event stream.
 Every event retains its original encoded bytes. Mutating code only re-encodes
 the exact events it changes, so unknown future events survive round trips.
 
-The merger handles generator and Automation Clip channel states, pattern notes,
-Channel Rack automation targets, and the selected automation instances in the
-current Playlist arrangement. Mixer/global automation, layers, and routing graph
-changes remain intentionally out of scope.
+The merger handles generator, Automation Clip, and portable mixer-insert states,
+pattern notes, Channel Rack automation targets, and the selected automation
+instances in the current Playlist arrangement. Mixer/global automation, layers,
+and non-portable mixer routing graphs remain intentionally out of scope.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ MAGIC_DATA = b"FLdt"
 FORMAT_PROJECT = 0x00
 FORMAT_SCORE = 0x10
 FORMAT_CHANNEL_STATE = 0x20
+FORMAT_INSERT_STATE = 0x40
 
 EVENT_CHANNEL_NEW = 64
 EVENT_CHANNEL_ENABLED = 0
@@ -34,13 +35,16 @@ EVENT_PATTERN_NEW = 65
 EVENT_CURRENT_PATTERN = 67
 EVENT_TEMPO = 156
 EVENT_CHANNEL_TYPE = 21
-EVENT_CHANNEL_ROUTED_TO = 22
+# Channel Rack target mixer insert. The stored value matches FL's visible
+# insert number directly: 0 is Master, 1 is Insert 1, and so on.
+EVENT_CHANNEL_ROUTED_TO = 104
 EVENT_CHANNEL_NAME_LEGACY = 192
 EVENT_PATTERN_NAME = 193
 EVENT_FL_VERSION = 199
 EVENT_PROJECT_DATA_PATH = 202
 EVENT_PLUGIN_INTERNAL_NAME = 201
 EVENT_PLUGIN_NAME = 203
+EVENT_PLUGIN_LOCATION = 212
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
 EVENT_AUTOMATION_BINDINGS = 216
@@ -48,6 +52,85 @@ EVENT_AUTOMATION_POINTS = 234
 EVENT_PLAYLIST = 233
 EVENT_ARRANGEMENT_NEW = 99
 EVENT_CURRENT_ARRANGEMENT = 100
+
+# FL 24 through FL 26 mixer streams are a sequence of insert records followed
+# by one fixed-width parameter table. Insert 0 is Master and the final record is
+# FL's synthetic "Current" insert; neither is available for capsule imports.
+EVENT_INSERT_ACTIVE = 42
+EVENT_INSERT_ICON = 95
+EVENT_EFFECT_SLOT_INDEX = 98
+EVENT_INSERT_OUTPUT = 147
+EVENT_INSERT_COLOR = 149
+EVENT_INSERT_INPUT = 154
+EVENT_INSERT_NAME = 204
+EVENT_MIXER_PARAMS = 225
+EVENT_INSERT_ROUTING = 235
+EVENT_INSERT_FLAGS = 236
+
+MIXER_PARAM_STRUCT = struct.Struct("<4sBBHi")
+MIXER_PARAM_SLOT_ENABLED = 0
+MIXER_PARAM_SLOT_MIX = 1
+MIXER_PARAM_ROUTE_START = 64
+MIXER_PARAM_ROUTE_END = 191
+MIXER_PARAM_VOLUME = 192
+MIXER_PARAM_PAN = 193
+MIXER_PARAM_STEREO_SEPARATION = 194
+MIXER_PARAM_LOW_GAIN = 208
+MIXER_PARAM_MID_GAIN = 209
+MIXER_PARAM_HIGH_GAIN = 210
+MIXER_PARAM_LOW_FREQ = 216
+MIXER_PARAM_MID_FREQ = 217
+MIXER_PARAM_HIGH_FREQ = 218
+MIXER_PARAM_LOW_Q = 224
+MIXER_PARAM_MID_Q = 225
+MIXER_PARAM_HIGH_Q = 226
+PORTABLE_MIXER_PARAM_IDS = frozenset(
+    {
+        MIXER_PARAM_SLOT_ENABLED,
+        MIXER_PARAM_SLOT_MIX,
+        MIXER_PARAM_VOLUME,
+        MIXER_PARAM_PAN,
+        MIXER_PARAM_STEREO_SEPARATION,
+        MIXER_PARAM_LOW_GAIN,
+        MIXER_PARAM_MID_GAIN,
+        MIXER_PARAM_HIGH_GAIN,
+        MIXER_PARAM_LOW_FREQ,
+        MIXER_PARAM_MID_FREQ,
+        MIXER_PARAM_HIGH_FREQ,
+        MIXER_PARAM_LOW_Q,
+        MIXER_PARAM_MID_Q,
+        MIXER_PARAM_HIGH_Q,
+    }
+)
+REQUIRED_PORTABLE_MIXER_PARAM_KEYS = frozenset(
+    {
+        *((MIXER_PARAM_SLOT_ENABLED, slot) for slot in range(10)),
+        *((MIXER_PARAM_SLOT_MIX, slot) for slot in range(10)),
+        *((parameter_id, 0) for parameter_id in PORTABLE_MIXER_PARAM_IDS if parameter_id > 1),
+    }
+)
+DEFAULT_MIXER_PARAMS = {
+    MIXER_PARAM_VOLUME: 12_800,
+    MIXER_PARAM_PAN: 0,
+    MIXER_PARAM_STEREO_SEPARATION: 0,
+    MIXER_PARAM_LOW_GAIN: 0,
+    MIXER_PARAM_MID_GAIN: 0,
+    MIXER_PARAM_HIGH_GAIN: 0,
+    MIXER_PARAM_LOW_FREQ: 5_777,
+    MIXER_PARAM_MID_FREQ: 33_145,
+    MIXER_PARAM_HIGH_FREQ: 55_825,
+    MIXER_PARAM_LOW_Q: 17_500,
+    MIXER_PARAM_MID_Q: 17_500,
+    MIXER_PARAM_HIGH_Q: 17_500,
+}
+PORTABLE_INSERT_PREFIX_IDS = frozenset(
+    {EVENT_INSERT_ACTIVE, EVENT_INSERT_ICON, EVENT_INSERT_COLOR, EVENT_INSERT_NAME}
+)
+# Audio-affecting flags: polarity, L/R swap, effect enable, insert enable, and
+# threaded-processing disable. Docking, separators, locking, solo, and Audio
+# Track links are deliberately stripped from portable insert states.
+PORTABLE_INSERT_FLAGS_MASK = 0x001F
+DEFAULT_PORTABLE_INSERT_FLAGS = 0x000C
 
 # Although event IDs 128-191 normally carry four-byte scalar payloads, current
 # FL 25/26 projects write event 172 with three bytes. Treating its following
@@ -70,6 +153,7 @@ CHANNEL_EVENT_IDS = frozenset(
     {
         0, 2, 3, 15, 20, 21, 22, 32,
         64, 69, 70, 71, 72, 73, 74, 75, 76, 83, 85, 86, 89, 94, 97,
+        EVENT_CHANNEL_ROUTED_TO,
         131, 132, 135, 138, 139, 140, 142, 143, 144, 145, 153,
         192, 196,
         225, 231, 234, 235, 237, 244, 245, 250,
@@ -77,7 +161,7 @@ CHANNEL_EVENT_IDS = frozenset(
 )
 PLUGIN_EVENT_IDS = frozenset({128, 155, 201, 203, 228, 229})
 FL25_CHANNEL_EVENT_IDS = frozenset(
-    {41, 48, 50, 51, 104, 170, 209, 212, 213, 215, 218, 219, 221, 251}
+    {41, 48, 50, 51, 170, 209, 212, 213, 215, 218, 219, 221, 251}
 )
 CHANNEL_OWNED_EVENT_IDS = CHANNEL_EVENT_IDS | PLUGIN_EVENT_IDS | FL25_CHANNEL_EVENT_IDS
 RACK_GLOBAL_EVENT_IDS = frozenset({11, 13, 133})
@@ -451,6 +535,221 @@ class PlaylistItem:
         return PlaylistItem(self.raw + extension)
 
 
+@dataclass(frozen=True, slots=True)
+class MixerParamRecord:
+    raw: bytes
+
+    @classmethod
+    def parse_many(cls, payload: bytes) -> list["MixerParamRecord"]:
+        if len(payload) % MIXER_PARAM_STRUCT.size:
+            raise FLPFormatError(
+                "mixer parameter payload is not a sequence of 12-byte records"
+            )
+        return [
+            cls(payload[offset : offset + MIXER_PARAM_STRUCT.size])
+            for offset in range(0, len(payload), MIXER_PARAM_STRUCT.size)
+        ]
+
+    @property
+    def values(self) -> tuple[bytes, int, int, int, int]:
+        return MIXER_PARAM_STRUCT.unpack(self.raw)
+
+    @property
+    def parameter_id(self) -> int:
+        return self.values[1]
+
+    @property
+    def marker(self) -> int:
+        return self.values[2]
+
+    @property
+    def channel_data(self) -> int:
+        return self.values[3]
+
+    @property
+    def slot_index(self) -> int:
+        return self.channel_data & 0x3F
+
+    @property
+    def insert_key(self) -> int:
+        return (self.channel_data >> 6) & 0x7F
+
+    @property
+    def value(self) -> int:
+        return self.values[4]
+
+    def remap_insert_key(self, insert_key: int) -> "MixerParamRecord":
+        if not 0 <= insert_key <= 0x7F:
+            raise ValueError("mixer parameter insert key is outside the supported range")
+        prefix, parameter_id, marker, channel_data, value = self.values
+        channel_data = (channel_data & ~0x1FC0) | (insert_key << 6)
+        return MixerParamRecord(
+            MIXER_PARAM_STRUCT.pack(
+                prefix, parameter_id, marker, channel_data, value
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MixerEffectSlot:
+    index: int
+    events: tuple[Event, ...]
+
+    @property
+    def occupied(self) -> bool:
+        return bool(self.events)
+
+    @property
+    def plugin_name(self) -> str:
+        internal = next(
+            (
+                parse_text(event.payload)
+                for event in self.events
+                if event.id == EVENT_PLUGIN_INTERNAL_NAME and parse_text(event.payload)
+            ),
+            "",
+        )
+        display = next(
+            (
+                parse_text(event.payload)
+                for event in self.events
+                if event.id == EVENT_PLUGIN_NAME and parse_text(event.payload)
+            ),
+            "",
+        )
+        if internal.casefold() in {
+            "fruity wrapper", "wrapper", "vst wrapper", "vst3 wrapper", "clap wrapper"
+        } and display:
+            return display
+        return internal or display or ("Unknown effect" if self.occupied else "")
+
+    def remap_insert(self, insert_index: int) -> "MixerEffectSlot":
+        if not 0 <= insert_index <= 125:
+            raise ValueError("mixer insert index must be between 0 and 125")
+        remapped: list[Event] = []
+        for event in self.events:
+            if event.id != EVENT_PLUGIN_LOCATION:
+                remapped.append(event)
+                continue
+            if len(event.payload) < 4:
+                raise FLPUnsupportedError(
+                    f"effect slot {self.index} has an unsupported plugin-location record"
+                )
+            payload = bytearray(event.payload)
+            payload[:4] = insert_index.to_bytes(4, "little")
+            remapped.append(event.with_payload(bytes(payload)))
+        return MixerEffectSlot(self.index, tuple(remapped))
+
+
+@dataclass(frozen=True, slots=True)
+class MixerInsertSection:
+    index: int
+    events: tuple[Event, ...]
+    params: tuple[MixerParamRecord, ...]
+
+    @property
+    def flags_event(self) -> Event:
+        event = next(
+            (candidate for candidate in self.events if candidate.id == EVENT_INSERT_FLAGS),
+            None,
+        )
+        if event is None:
+            raise FLPFormatError(f"mixer insert {self.index} is missing its flags event")
+        return event
+
+    @property
+    def routing_event(self) -> Event | None:
+        return next(
+            (candidate for candidate in self.events if candidate.id == EVENT_INSERT_ROUTING),
+            None,
+        )
+
+    @property
+    def effect_slots(self) -> tuple[MixerEffectSlot, ...]:
+        flags_at = self.events.index(self.flags_event)
+        route_at = next(
+            (
+                index
+                for index, event in enumerate(self.events[flags_at + 1 :], flags_at + 1)
+                if event.id == EVENT_INSERT_ROUTING
+            ),
+            len(self.events),
+        )
+        pending: list[Event] = []
+        slots: list[MixerEffectSlot] = []
+        for event in self.events[flags_at + 1 : route_at]:
+            if event.id == EVENT_EFFECT_SLOT_INDEX:
+                slots.append(MixerEffectSlot(event.scalar, tuple(pending)))
+                pending = []
+            else:
+                pending.append(event)
+        if pending:
+            raise FLPFormatError(
+                f"mixer insert {self.index} has unterminated effect-slot state"
+            )
+        return tuple(slots)
+
+    @property
+    def occupied_slot_count(self) -> int:
+        return sum(slot.occupied for slot in self.effect_slots)
+
+    def routes_to(self) -> set[int]:
+        route = self.routing_event
+        if route is None:
+            return set()
+        return {
+            index for index, enabled in enumerate(route.payload) if enabled != 0
+        }
+
+    def is_pristine(self) -> bool:
+        active = next(
+            (event.scalar for event in self.events if event.id == EVENT_INSERT_ACTIVE),
+            0,
+        )
+        if active != 0 or self.occupied_slot_count != 0:
+            return False
+        if any(
+            event.id in {EVENT_INSERT_NAME, EVENT_INSERT_COLOR, EVENT_INSERT_ICON}
+            for event in self.events
+        ):
+            return False
+        external_io = {
+            event.id: event.scalar
+            for event in self.events
+            if event.id in {EVENT_INSERT_INPUT, EVENT_INSERT_OUTPUT}
+        }
+        if external_io != {
+            EVENT_INSERT_INPUT: 0xFFFFFFFF,
+            EVENT_INSERT_OUTPUT: 0xFFFFFFFF,
+        }:
+            return False
+        if self.routes_to() != {0}:
+            return False
+        if len(self.flags_event.payload) < 8:
+            return False
+        flags = int.from_bytes(self.flags_event.payload[4:8], "little")
+        if flags & PORTABLE_INSERT_FLAGS_MASK != DEFAULT_PORTABLE_INSERT_FLAGS:
+            return False
+        portable = [
+            record
+            for record in self.params
+            if record.marker == 31
+            and record.parameter_id in PORTABLE_MIXER_PARAM_IDS
+        ]
+        keys = [(record.parameter_id, record.slot_index) for record in portable]
+        if len(keys) != len(set(keys)) or set(keys) != REQUIRED_PORTABLE_MIXER_PARAM_KEYS:
+            return False
+        for record in portable:
+            if record.parameter_id == MIXER_PARAM_SLOT_ENABLED and record.value != 1:
+                return False
+            if record.parameter_id == MIXER_PARAM_SLOT_MIX and record.value != 12_800:
+                return False
+            expected = DEFAULT_MIXER_PARAMS.get(record.parameter_id)
+            if expected is not None and record.value != expected:
+                return False
+        return True
+
+
 def _normalized_note_payload(notes: Sequence[NoteRecord]) -> bytes:
     # FL builds playback and Piano Roll redraw indexes from event order. Keep
     # equal-position notes stable while ensuring time never moves backwards.
@@ -515,6 +814,13 @@ class ChannelSection:
                 return parse_text(event.payload)
         return None
 
+    @property
+    def mixer_insert(self) -> int:
+        for event in self.events:
+            if event.id == EVENT_CHANNEL_ROUTED_TO:
+                return event.scalar
+        return 0
+
     def automation_points(self) -> list[AutomationPoint]:
         event = next((event for event in self.events if event.id == EVENT_AUTOMATION_POINTS), None)
         return AutomationPoint.parse_many(event.payload) if event is not None else []
@@ -529,6 +835,25 @@ class ChannelSection:
             else:
                 remapped.append(event)
         return ChannelSection(iid, tuple(remapped))
+
+    def with_mixer_insert(self, insert_index: int) -> "ChannelSection":
+        if not 0 <= insert_index <= 125:
+            raise ValueError("mixer insert index must be between 0 and 125")
+        events = list(self.events)
+        for index, event in enumerate(events):
+            if event.id == EVENT_CHANNEL_ROUTED_TO:
+                events[index] = event.with_scalar(insert_index)
+                return ChannelSection(self.iid, tuple(events))
+        insert_at = next(
+            (
+                index + 1
+                for index, event in enumerate(events)
+                if event.id == EVENT_CHANNEL_NEW
+            ),
+            0,
+        )
+        events.insert(insert_at, scalar_event(EVENT_CHANNEL_ROUTED_TO, insert_index))
+        return ChannelSection(self.iid, tuple(events))
 
     def with_sample_path(self, path: str, *, unicode_text: bool = True) -> "ChannelSection":
         replacement = text_event(EVENT_CHANNEL_SAMPLE_PATH, path, unicode_text=unicode_text)
@@ -614,6 +939,8 @@ class FLPFile:
             )
         for _, event in self._pattern_note_events():
             NoteRecord.parse_many(event.payload)
+        if self.format == FORMAT_INSERT_STATE:
+            self.validate_mixer_insert_state()
 
     @property
     def fl_version(self) -> str:
@@ -788,7 +1115,440 @@ class FLPFile:
             [version, *normalized.events],
         )
 
-    def isolated_preview_project(self, channel_ids: Sequence[int], pattern_id: int) -> "FLPFile":
+    def _mixer_params_event(self) -> Event:
+        flags = [
+            index for index, event in enumerate(self.events)
+            if event.id == EVENT_INSERT_FLAGS
+        ]
+        if not flags:
+            raise FLPUnsupportedError("the project has no supported mixer insert state")
+        event = next(
+            (
+                candidate
+                for candidate in reversed(self.events[flags[-1] + 1 :])
+                if candidate.id == EVENT_MIXER_PARAMS
+                and len(candidate.payload) % MIXER_PARAM_STRUCT.size == 0
+            ),
+            None,
+        )
+        if event is None:
+            raise FLPUnsupportedError("the project has no supported mixer parameter table")
+        return event
+
+    def _mixer_param_base(self) -> int:
+        try:
+            major = int(self.fl_version.split(".", 1)[0])
+        except (ValueError, TypeError):
+            major = 0
+        # FL 25 moved real insert parameter keys to 64..80 and reserves a
+        # separate synthetic key for the Current insert.
+        return 64 if major >= 25 else 0
+
+    def _mixer_param_key(self, insert_index: int) -> int:
+        base = self._mixer_param_base()
+        if base:
+            return base + insert_index
+        # FL 24 reserves parameter selector keys 62 and 63.
+        return insert_index if insert_index < 62 else insert_index + 2
+
+    def mixer_insert_sections(self) -> list[MixerInsertSection]:
+        params_event = self._mixer_params_event()
+        params_at = next(
+            index for index, event in enumerate(self.events) if event is params_event
+        )
+        flag_indices = [
+            index for index, event in enumerate(self.events[:params_at])
+            if event.id == EVENT_INSERT_FLAGS
+        ]
+        if len(flag_indices) < 2:
+            raise FLPUnsupportedError(
+                "the project does not contain assignable mixer inserts"
+            )
+
+        starts: list[int] = []
+        for position, flags_at in enumerate(flag_indices):
+            if position == 0:
+                starts.append(flags_at)
+                continue
+            previous_flags = flag_indices[position - 1]
+            inputs = [
+                index
+                for index in range(previous_flags + 1, flags_at)
+                if self.events[index].id == EVENT_INSERT_INPUT
+            ]
+            starts.append(inputs[-1] if inputs else flags_at)
+
+        records = MixerParamRecord.parse_many(params_event.payload)
+        sections: list[MixerInsertSection] = []
+        # The last flagged record is FL's synthetic Current insert.
+        for insert_index, start in enumerate(starts[:-1]):
+            end = starts[insert_index + 1]
+            key = self._mixer_param_key(insert_index)
+            section_params = tuple(
+                record
+                for record in records
+                if record.marker == 31 and record.insert_key == key
+            )
+            if not section_params:
+                raise FLPUnsupportedError(
+                    f"mixer insert {insert_index} is missing parameter state"
+                )
+            sections.append(
+                MixerInsertSection(
+                    insert_index,
+                    tuple(self.events[start:end]),
+                    section_params,
+                )
+            )
+        return sections
+
+    @staticmethod
+    def _portable_flags_event(event: Event) -> Event:
+        if event.id != EVENT_INSERT_FLAGS or len(event.payload) < 8:
+            raise FLPUnsupportedError("the mixer insert flags format is not supported")
+        payload = bytearray(event.payload)
+        flags = int.from_bytes(payload[4:8], "little") & PORTABLE_INSERT_FLAGS_MASK
+        payload[4:8] = flags.to_bytes(4, "little")
+        return event.with_payload(bytes(payload))
+
+    @staticmethod
+    def _merge_portable_flags(source: Event, destination: Event) -> Event:
+        """Apply audio flags while retaining destination-only layout metadata."""
+        if (
+            source.id != EVENT_INSERT_FLAGS
+            or destination.id != EVENT_INSERT_FLAGS
+            or len(source.payload) < 8
+            or len(destination.payload) < 8
+        ):
+            raise FLPUnsupportedError("the mixer insert flags format is not supported")
+        source_flags = int.from_bytes(source.payload[4:8], "little")
+        payload = bytearray(destination.payload)
+        destination_flags = int.from_bytes(payload[4:8], "little")
+        combined = (
+            destination_flags & ~PORTABLE_INSERT_FLAGS_MASK
+        ) | (source_flags & PORTABLE_INSERT_FLAGS_MASK)
+        payload[4:8] = combined.to_bytes(4, "little")
+        return destination.with_payload(bytes(payload))
+
+    def mixer_insert_state(self, insert_index: int) -> "FLPFile":
+        if insert_index == 0:
+            raise FLPUnsupportedError("Master mixer state cannot be saved in a capsule")
+        sections = {section.index: section for section in self.mixer_insert_sections()}
+        section = sections.get(insert_index)
+        if section is None:
+            raise FLPUnsupportedError(
+                f"mixer insert {insert_index} is outside the saved project"
+            )
+        flags_at = section.events.index(section.flags_event)
+        routing_at = next(
+            (
+                index
+                for index, event in enumerate(section.events[flags_at + 1 :], flags_at + 1)
+                if event.id == EVENT_INSERT_ROUTING
+            ),
+            None,
+        )
+        if routing_at is None:
+            raise FLPUnsupportedError(
+                f"mixer insert {insert_index} has no supported routing boundary"
+            )
+        unknown_prefix = sorted(
+            {
+                event.id
+                for event in section.events[:flags_at]
+                if event.id not in PORTABLE_INSERT_PREFIX_IDS
+                and event.id not in {EVENT_INSERT_INPUT, EVENT_INSERT_OUTPUT}
+            }
+        )
+        if unknown_prefix:
+            raise FLPUnsupportedError(
+                f"mixer insert {insert_index} contains unprofiled header events: "
+                + ", ".join(map(str, unknown_prefix))
+            )
+        portable_events = [
+            *(
+                event
+                for event in section.events[:flags_at]
+                if event.id in PORTABLE_INSERT_PREFIX_IDS
+            ),
+            self._portable_flags_event(section.flags_event),
+            *section.events[flags_at + 1 : routing_at],
+        ]
+        slot_indices = [slot.index for slot in section.effect_slots]
+        if slot_indices != list(range(10)):
+            raise FLPUnsupportedError(
+                f"mixer insert {insert_index} does not contain the supported 10-slot layout"
+            )
+        version = next(
+            (event for event in self.events if event.id == EVENT_FL_VERSION),
+            None,
+        )
+        if version is None:
+            raise FLPUnsupportedError("project has no FL version event for insert-state export")
+        portable_params = [
+            record.raw
+            for record in section.params
+            if record.parameter_id in PORTABLE_MIXER_PARAM_IDS
+        ]
+        if not portable_params:
+            raise FLPUnsupportedError(
+                f"mixer insert {insert_index} has no portable parameter state"
+            )
+        state = FLPFile(
+            FORMAT_INSERT_STATE,
+            0,
+            self.ppq,
+            [
+                version,
+                *portable_events,
+                data_event(EVENT_MIXER_PARAMS, b"".join(portable_params)),
+            ],
+        )
+        state.validate()
+        return state
+
+    def mixer_effect_slots(self) -> tuple[MixerEffectSlot, ...]:
+        """Return the ordered effect slots from a portable Insert-State preset."""
+        self.validate_mixer_insert_state()
+        flags_at = next(
+            index for index, event in enumerate(self.events)
+            if event.id == EVENT_INSERT_FLAGS
+        )
+        params_at = next(
+            index for index, event in enumerate(self.events)
+            if event.id == EVENT_MIXER_PARAMS
+        )
+        section = MixerInsertSection(
+            0, tuple(self.events[flags_at:params_at]), tuple()
+        )
+        return section.effect_slots
+
+    def validate_mixer_insert_state(self) -> None:
+        if self.format != FORMAT_INSERT_STATE:
+            raise FLPFormatError("file is not a mixer Insert-State preset")
+        if any(
+            event.id in {EVENT_INSERT_INPUT, EVENT_INSERT_OUTPUT, EVENT_INSERT_ROUTING}
+            for event in self.events
+        ):
+            raise FLPFormatError("mixer Insert-State preset contains non-portable routing")
+        flags = [event for event in self.events if event.id == EVENT_INSERT_FLAGS]
+        if len(flags) != 1:
+            raise FLPFormatError("mixer Insert-State preset must contain one flags event")
+        self._portable_flags_event(flags[0])
+        if int.from_bytes(flags[0].payload[4:8], "little") & ~PORTABLE_INSERT_FLAGS_MASK:
+            raise FLPFormatError("mixer Insert-State preset contains non-portable flags")
+        versions = [event for event in self.events if event.id == EVENT_FL_VERSION]
+        if len(versions) != 1 or versions[0] is not self.events[0]:
+            raise FLPFormatError("mixer Insert-State preset has an invalid FL version event")
+        slots = [
+            event.scalar for event in self.events if event.id == EVENT_EFFECT_SLOT_INDEX
+        ]
+        if slots != list(range(10)):
+            raise FLPFormatError("mixer Insert-State preset must contain slots 0 through 9")
+        params = [
+            event
+            for event in self.events
+            if event.id == EVENT_MIXER_PARAMS
+            and len(event.payload) % MIXER_PARAM_STRUCT.size == 0
+        ]
+        if len(params) != 1 or params[0] is not self.events[-1]:
+            raise FLPFormatError("mixer Insert-State preset has an invalid parameter table")
+        records = MixerParamRecord.parse_many(params[0].payload)
+        if not records or any(
+            record.marker != 31
+            or record.parameter_id not in PORTABLE_MIXER_PARAM_IDS
+            for record in records
+        ):
+            raise FLPFormatError("mixer Insert-State preset has non-portable parameters")
+        keys = [(record.parameter_id, record.slot_index) for record in records]
+        if (
+            len(keys) != len(set(keys))
+            or set(keys) != REQUIRED_PORTABLE_MIXER_PARAM_KEYS
+        ):
+            raise FLPFormatError(
+                "mixer Insert-State preset has incomplete or duplicate parameters"
+            )
+
+    def _replace_mixer_insert_events(
+        self, old: MixerInsertSection, replacement_events: Sequence[Event]
+    ) -> None:
+        old_ids = {id(event) for event in old.events}
+        start = next(index for index, event in enumerate(self.events) if id(event) in old_ids)
+        rebuilt = self.events[:start] + list(replacement_events)
+        rebuilt.extend(event for event in self.events[start:] if id(event) not in old_ids)
+        self.events = rebuilt
+
+    def _replace_mixer_params(
+        self,
+        target_index: int,
+        state: "FLPFile",
+    ) -> None:
+        params_event = self._mixer_params_event()
+        params_at = next(
+            index for index, event in enumerate(self.events) if event is params_event
+        )
+        records = MixerParamRecord.parse_many(params_event.payload)
+        target_key = self._mixer_param_key(target_index)
+        source_event = state.events[-1]
+        source_records = MixerParamRecord.parse_many(source_event.payload)
+        replacement = [record.remap_insert_key(target_key) for record in source_records]
+        result: list[MixerParamRecord] = []
+        inserted = False
+        for record in records:
+            is_target = (
+                record.marker == 31
+                and record.insert_key == target_key
+                and record.parameter_id in PORTABLE_MIXER_PARAM_IDS
+            )
+            if is_target:
+                if not inserted:
+                    result.extend(replacement)
+                    inserted = True
+                continue
+            result.append(record)
+        if not inserted:
+            raise FLPUnsupportedError(
+                f"destination mixer insert {target_index} has no replaceable parameter state"
+            )
+        self.events[params_at] = params_event.with_payload(
+            b"".join(record.raw for record in result)
+        )
+
+    def restore_mixer_insert_states(
+        self,
+        requests: Sequence[tuple["FLPFile", Sequence[int]]],
+    ) -> tuple["FLPFile", list[int]]:
+        if not requests:
+            return self.clone(), []
+        for state, channel_ids in requests:
+            state.validate_mixer_insert_state()
+            if not channel_ids:
+                raise FLPUnsupportedError("mixer Insert-State has no destination channels")
+
+        sections = self.mixer_insert_sections()
+        channel_sections = self.channel_sections()
+        reserved = {
+            section.mixer_insert
+            for section in channel_sections
+            if section.mixer_insert > 0
+        }
+        for section in sections[1:]:
+            reserved.update(index for index in section.routes_to() if index > 0)
+        available = sorted(
+            (
+                section
+                for section in sections[1:]
+                if section.index not in reserved and section.is_pristine()
+            ),
+            key=lambda section: section.index,
+        )
+        if len(available) < len(requests):
+            raise FLPUnsupportedError(
+                f"import needs {len(requests)} pristine mixer insert"
+                f"{'s' if len(requests) != 1 else ''}, but only {len(available)} "
+                f"{'are' if len(available) != 1 else 'is'} available"
+            )
+
+        target = self.clone()
+        destinations: list[int] = []
+        for (state, channel_ids), chosen in zip(
+            requests, available[: len(requests)], strict=True
+        ):
+            current = {
+                section.index: section for section in target.mixer_insert_sections()
+            }[chosen.index]
+            flags_at = current.events.index(current.flags_event)
+            routing_at = next(
+                (
+                    index
+                    for index, event in enumerate(
+                        current.events[flags_at + 1 :], flags_at + 1
+                    )
+                    if event.id == EVENT_INSERT_ROUTING
+                ),
+                None,
+            )
+            if routing_at is None:
+                raise FLPUnsupportedError(
+                    f"destination mixer insert {chosen.index} has no routing boundary"
+                )
+            destination_prefix = [
+                event
+                for event in current.events[:flags_at]
+                if event.id not in PORTABLE_INSERT_PREFIX_IDS
+            ]
+            destination_suffix = list(current.events[routing_at:])
+            state_events = [
+                event
+                for event in state.events[1:-1]
+                if event.id != EVENT_FL_VERSION
+            ]
+            remapped_effect_events = {
+                id(original): replacement
+                for slot in state.mixer_effect_slots()
+                for original, replacement in zip(
+                    slot.events,
+                    slot.remap_insert(chosen.index).events,
+                    strict=True,
+                )
+            }
+            state_events = [
+                self._merge_portable_flags(event, current.flags_event)
+                if event.id == EVENT_INSERT_FLAGS
+                else remapped_effect_events.get(id(event), event)
+                for event in state_events
+            ]
+            target._replace_mixer_insert_events(
+                current,
+                [*destination_prefix, *state_events, *destination_suffix],
+            )
+            target._replace_mixer_params(chosen.index, state)
+            destination_channels = {
+                section.iid: section for section in target.channel_sections()
+            }
+            for channel_id in channel_ids:
+                channel = destination_channels.get(channel_id)
+                if channel is None:
+                    raise FLPUnsupportedError(
+                        f"destination channel {channel_id} does not exist"
+                    )
+                target._replace_channel_events(
+                    channel,
+                    channel.with_mixer_insert(chosen.index).events,
+                )
+                destination_channels = {
+                    section.iid: section for section in target.channel_sections()
+                }
+            destinations.append(chosen.index)
+        target.validate()
+        return target, destinations
+
+    def _sanitize_preview_insert_routing(self, insert_indices: set[int]) -> None:
+        sections = {section.index: section for section in self.mixer_insert_sections()}
+        for insert_index in sorted(insert_indices):
+            section = sections.get(insert_index)
+            if section is None:
+                raise FLPUnsupportedError(
+                    f"mixer insert {insert_index} is outside the saved project"
+                )
+            replacement: list[Event] = []
+            for event in section.events:
+                if event.id in {EVENT_INSERT_INPUT, EVENT_INSERT_OUTPUT}:
+                    replacement.append(event.with_scalar(0xFFFFFFFF))
+                elif event.id == EVENT_INSERT_ROUTING:
+                    replacement.append(event.with_payload(b"\x01"))
+                else:
+                    replacement.append(event)
+            self._replace_mixer_insert_events(section, replacement)
+            sections = {item.index: item for item in self.mixer_insert_sections()}
+
+    def isolated_preview_project(
+        self,
+        channel_ids: Sequence[int],
+        pattern_id: int,
+        *,
+        preserve_mixer_inserts: bool = False,
+    ) -> "FLPFile":
         selected = set(channel_ids)
         if not selected:
             raise FLPUnsupportedError("select at least one Channel Rack channel")
@@ -801,12 +1561,25 @@ class FLPFile:
         if missing:
             raise FLPUnsupportedError(f"channel ids not found: {sorted(missing)}")
 
+        preview_inserts: set[int] = set()
         for section in sections:
             if section.iid in selected:
-                replacement = section.with_enabled(True).remap(section.iid, route_to_master=True)
+                keep_insert = (
+                    preserve_mixer_inserts
+                    and section.channel_type != 5
+                    and section.mixer_insert > 0
+                )
+                if keep_insert:
+                    preview_inserts.add(section.mixer_insert)
+                replacement = section.with_enabled(True).remap(
+                    section.iid, route_to_master=not keep_insert
+                )
             else:
                 replacement = section.with_enabled(False)
             target._replace_channel_events(section, replacement.events)
+
+        if preview_inserts:
+            target._sanitize_preview_insert_routing(preview_inserts)
 
         target._filter_pattern_notes(pattern_id, selected)
         target._set_current_pattern(pattern_id)

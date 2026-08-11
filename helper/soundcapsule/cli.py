@@ -30,6 +30,11 @@ def parser() -> argparse.ArgumentParser:
     capture.add_argument("--project", type=Path)
     capture.add_argument("--preview", type=Path)
     capture.add_argument("--individual", action="store_true")
+    capture.add_argument(
+        "--no-mixer-insert",
+        action="store_true",
+        help="save channels without their non-Master mixer insert state",
+    )
     import_cmd = commands.add_parser("import")
     import_cmd.add_argument("id")
     import_cmd.add_argument("--mode", choices=("append", "override"), default="append")
@@ -103,7 +108,11 @@ def main(argv: list[str] | None = None) -> int:
                 })
         elif args.command == "capture":
             capsules = service.capture(
-                args.name, project_path=args.project, preview_wav=args.preview, individually=args.individual
+                args.name,
+                project_path=args.project,
+                preview_wav=args.preview,
+                individually=args.individual,
+                include_mixer_insert=not args.no_mixer_insert,
             )
             _print({"created": [str(item.path) for item in capsules]})
         elif args.command == "import":

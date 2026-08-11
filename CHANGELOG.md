@@ -6,6 +6,31 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-10
+
+### Added
+
+- Capsules can now save each distinct non-Master mixer insert shared by the
+  selected generators, including portable insert controls, EQ, effect slots,
+  per-slot enable state, and mix level. The bottom capture-row option is enabled
+  by default and remembered immediately.
+- Library rows show the number of saved effects, with the ordered effect names
+  available by hovering over the effect metadata.
+
+### Changed
+
+- Capsule schema 4 stores sanitized mixer Insert-State members while continuing
+  to accept schemas 1–3. Imports allocate pristine inserts, preserve saved
+  generator sharing, and leave Master, sends, external I/O, routing graphs, and
+  unrelated mixer state untouched.
+
+### Fixed
+
+- Channel-to-mixer assignments now use FL Studio event 104, so a generator on
+  Insert 2 captures Insert 2 directly instead of being mistaken for Master.
+- Restored effect records remap their embedded mixer-insert identity to the
+  newly allocated destination, preventing FL Studio from discarding the chain.
+
 ## [0.3.6] - 2026-07-26
 
 ### Added

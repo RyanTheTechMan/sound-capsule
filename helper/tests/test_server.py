@@ -905,6 +905,7 @@ class ServerTests(unittest.TestCase):
                 persisted = server.dispatch({"command": "setup_status", "args": {}})
 
             self.assertFalse(initial["setup_complete"])
+            self.assertTrue(initial["save_mixer_insert"])
             self.assertTrue(initial["check_updates_on_startup"])
             self.assertTrue(initial["start_preview_at_first_audio"])
             self.assertFalse(initial["normalize_waveform_display"])
@@ -933,6 +934,25 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(persisted["show_single_channel_name_in_rename"])
             self.assertFalse(runtime_update_check)
             self.assertFalse(persisted["check_updates_on_startup"])
+
+    def test_save_mixer_insert_preference_is_persisted_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data", server_port=0)
+            settings.save()
+
+            with SoundCapsuleServer(settings) as server:
+                changed = server.dispatch(
+                    {
+                        "command": "set_capture_preferences",
+                        "args": {"save_mixer_insert": False},
+                    }
+                )
+                status = server.dispatch({"command": "setup_status", "args": {}})
+
+            self.assertEqual(changed, {"save_mixer_insert": False})
+            self.assertFalse(status["save_mixer_insert"])
+            self.assertFalse(Settings.load(root / "data").save_mixer_insert)
 
     def test_library_location_switches_without_moving_existing_capsules(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

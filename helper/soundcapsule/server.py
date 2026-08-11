@@ -635,6 +635,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "normalize_waveform_display": current.normalize_waveform_display,
                 "show_automation_curves": current.show_automation_curves,
                 "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
+                "save_mixer_insert": current.save_mixer_insert,
                 "check_updates_on_startup": current.check_updates_on_startup,
                 "library_dir": str(current.library_dir),
                 "app_path": str(current.app_path) if current.app_path else None,
@@ -728,6 +729,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.settings.normalize_waveform_display = current.normalize_waveform_display
                 self.settings.show_automation_curves = current.show_automation_curves
                 self.settings.show_single_channel_name_in_rename = current.show_single_channel_name_in_rename
+                self.settings.save_mixer_insert = current.save_mixer_insert
                 self.settings.check_updates_on_startup = current.check_updates_on_startup
                 self.settings.auto_open_with_fl = current.auto_open_with_fl
             return {
@@ -742,8 +744,18 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "normalize_waveform_display": current.normalize_waveform_display,
                 "show_automation_curves": current.show_automation_curves,
                 "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
+                "save_mixer_insert": current.save_mixer_insert,
                 "check_updates_on_startup": current.check_updates_on_startup,
             }
+        if command == "set_capture_preferences":
+            if "save_mixer_insert" not in args:
+                raise ValueError("save_mixer_insert is required")
+            with self.operation_lock:
+                current = Settings.load(self.settings.data_dir)
+                current.save_mixer_insert = bool(args["save_mixer_insert"])
+                current.save()
+                self.settings.save_mixer_insert = current.save_mixer_insert
+            return {"save_mixer_insert": current.save_mixer_insert}
         if command in {"operation_status", "import_status"}:
             requested_id = str(args.get("operation_id", ""))
             with self.progress_lock:
@@ -902,6 +914,12 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                         project_path=Path(args["project"]) if args.get("project") else None,
                         preview_wav=Path(args["preview"]) if args.get("preview") else None,
                         individually=bool(args.get("individually", False)),
+                        include_mixer_insert=bool(
+                            args.get(
+                                "include_mixer_insert",
+                                self.settings.save_mixer_insert,
+                            )
+                        ),
                         tags=[str(tag)[:100] for tag in raw_tags][:100],
                         progress_callback=capture_progress,
                         cancel_requested=cancel_event.is_set,

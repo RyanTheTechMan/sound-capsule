@@ -13,8 +13,10 @@ from soundcapsule.bridge import BridgeSession
 from soundcapsule.config import Settings
 from soundcapsule.flp import (
     EVENT_ARRANGEMENT_NEW,
+    EVENT_CHANNEL_ENABLED,
     EVENT_CURRENT_ARRANGEMENT,
     EVENT_FL_VERSION,
+    EVENT_INSERT_ACTIVE,
     EVENT_PLAYLIST,
     EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PROJECT_DATA_PATH,
@@ -717,6 +719,7 @@ class ProjectServiceTests(unittest.TestCase):
             capsule = Capsule.build(
                 settings.library_dir / "Lead.flcapsule",
                 name="Lead", project=fixture_project(), channel_ids=[2], pattern_id=3, preview_wav=preview,
+                include_mixer_insert=False,
             )
             service = CapsuleService(settings)
             service.library.reindex()
@@ -732,7 +735,183 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(merged.channel_count, 3)
             self.assertEqual(result.channel_mapping, {2: 6})
             self.assertEqual(merged.channel_sections()[-1].name, "Lead")
+            self.assertEqual(merged.channel_sections()[-1].mixer_insert, 0)
             self.assertFalse(list(settings.staging_dir.glob("import-*.flp")))
+
+    def test_append_and_override_restore_saved_shared_insert_to_a_fresh_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            source_project = fixture_project()
+            kick = {
+                section.iid: section for section in source_project.channel_sections()
+            }[5]
+            source_project._replace_channel_events(
+                kick, kick.with_mixer_insert(7).events
+            )
+            capsule = Capsule.build(
+                settings.library_dir / "Shared.flcapsule",
+                name="Shared",
+                project=source_project,
+                channel_ids=[2, 5],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+            service = CapsuleService(settings)
+            service.library.reindex()
+
+            append_target = root / "Append.flp"
+            append_target.write_bytes(fixture_project().to_bytes())
+            appended = service.import_capsule(
+                capsule.manifest.id,
+                mode="append",
+                project_path=append_target,
+                open_project=False,
+            )
+            appended_project = FLPFile.read(appended.merged_project)
+            appended_channels = {
+                section.iid: section for section in appended_project.channel_sections()
+            }
+            self.assertEqual(
+                {
+                    appended_channels[destination].mixer_insert
+                    for destination in appended.channel_mapping.values()
+                },
+                {1},
+            )
+            restored_insert = {
+                section.index: section
+                for section in appended_project.mixer_insert_sections()
+            }[1]
+            self.assertIn(
+                b"fixture-effect-state-\x07",
+                b"".join(event.raw for event in restored_insert.events),
+            )
+
+            override_project = fixture_project()
+            original_inserts = {
+                section.index: [event.raw for event in section.events]
+                for section in override_project.mixer_insert_sections()
+                if section.index in {7, 12}
+            }
+            override_target = root / "Override.flp"
+            override_target.write_bytes(override_project.to_bytes())
+            overridden = service.import_capsule(
+                capsule.manifest.id,
+                mode="override",
+                project_path=override_target,
+                target_channels=[2, 5],
+                pattern_id=3,
+                open_project=False,
+            )
+            overridden_project = FLPFile.read(overridden.merged_project)
+            overridden_channels = {
+                section.iid: section for section in overridden_project.channel_sections()
+            }
+            self.assertEqual(overridden_channels[2].mixer_insert, 1)
+            self.assertEqual(overridden_channels[5].mixer_insert, 1)
+            overridden_inserts = {
+                section.index: section
+                for section in overridden_project.mixer_insert_sections()
+            }
+            self.assertEqual(
+                [event.raw for event in overridden_inserts[7].events],
+                original_inserts[7],
+            )
+            self.assertEqual(
+                [event.raw for event in overridden_inserts[12].events],
+                original_inserts[12],
+            )
+
+    def test_insufficient_pristine_inserts_fail_before_in_place_project_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Lead.flcapsule",
+                name="Lead",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+            destination = fixture_project()
+            for insert_index in range(1, 17):
+                section = {
+                    item.index: item for item in destination.mixer_insert_sections()
+                }[insert_index]
+                active = next(
+                    event
+                    for event in section.events
+                    if event.id == EVENT_INSERT_ACTIVE
+                )
+                destination._replace_mixer_insert_events(
+                    section,
+                    [
+                        active.with_scalar(1) if event is active else event
+                        for event in section.events
+                    ],
+                )
+            project_path = root / "No-room.flp"
+            project_path.write_bytes(destination.to_bytes())
+            original = project_path.read_bytes()
+            service = CapsuleService(settings)
+            service.library.reindex()
+
+            with self.assertRaisesRegex(
+                FLPUnsupportedError, "only 0 are available"
+            ):
+                service.import_capsule(
+                    capsule.manifest.id,
+                    mode="append",
+                    project_path=project_path,
+                    open_project=False,
+                    in_place=True,
+                )
+
+            self.assertEqual(project_path.read_bytes(), original)
+            self.assertFalse((root / "Backup").exists())
+
+    def test_toggle_off_override_retains_the_destination_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Dry.flcapsule",
+                name="Dry",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=False,
+            )
+            project_path = root / "Override.flp"
+            project_path.write_bytes(fixture_project().to_bytes())
+            service = CapsuleService(settings)
+            service.library.reindex()
+
+            result = service.import_capsule(
+                capsule.manifest.id,
+                mode="override",
+                project_path=project_path,
+                target_channels=[2],
+                pattern_id=3,
+                open_project=False,
+            )
+
+            channel = FLPFile.read(result.merged_project).channel_sections()[0]
+            self.assertEqual(channel.mixer_insert, 7)
 
     def test_failed_import_always_deletes_its_staged_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1184,7 +1363,10 @@ class ProjectServiceTests(unittest.TestCase):
                 write_silence(preview)
 
                 capsules = CapsuleService(Settings(data_dir=root / "data")).capture(
-                    "Any FL", project_path=source, preview_wav=preview
+                    "Any FL",
+                    project_path=source,
+                    preview_wav=preview,
+                    include_mixer_insert=False,
                 )
 
                 self.assertEqual(len(capsules), 1)
@@ -1254,10 +1436,26 @@ class ProjectServiceTests(unittest.TestCase):
             settings = Settings(data_dir=root / "data")
             service = CapsuleService(settings)
             generated: list[Path] = []
+            rendered_routes: list[list[int]] = []
 
             def fake_render(project, output, *, fl_executable):
                 self.assertTrue(all(not path.exists() for path in generated))
                 generated.extend((project, output))
+                rendered = FLPFile.read(project)
+                rendered_routes.append(
+                    [
+                        section.mixer_insert
+                        for section in rendered.channel_sections()
+                        if next(
+                            (
+                                event.scalar
+                                for event in section.events
+                                if event.id == EVENT_CHANNEL_ENABLED
+                            ),
+                            1,
+                        )
+                    ]
+                )
                 write_silence(output)
                 return output
 
@@ -1271,7 +1469,19 @@ class ProjectServiceTests(unittest.TestCase):
 
             self.assertEqual(len(grouped), 1)
             self.assertEqual(len(individual), 2)
+            self.assertEqual(
+                [insert.source_index for insert in grouped[0].manifest.mixer_inserts],
+                [7, 12],
+            )
+            self.assertEqual(
+                [
+                    [insert.source_index for insert in capsule.manifest.mixer_inserts]
+                    for capsule in individual
+                ],
+                [[7], [12]],
+            )
             self.assertEqual(len(generated), 6)
+            self.assertEqual(rendered_routes, [[7, 12], [7], [12]])
             self.assertTrue(all(not path.exists() for path in generated))
             self.assertEqual(list(settings.staging_dir.iterdir()), [])
 

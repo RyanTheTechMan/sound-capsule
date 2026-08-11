@@ -16,6 +16,21 @@ from soundcapsule.config import (
 
 
 class ConfigTests(unittest.TestCase):
+    def test_mixer_insert_capture_defaults_on_and_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            data.mkdir()
+            (data / "settings.json").write_text(
+                json.dumps({"data_dir": str(data)}), encoding="utf-8"
+            )
+
+            settings = Settings.load(data)
+            self.assertTrue(settings.save_mixer_insert)
+            settings.save_mixer_insert = False
+            settings.save()
+
+            self.assertFalse(Settings.load(data).save_mixer_insert)
+
     def test_helper_token_is_private_and_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"

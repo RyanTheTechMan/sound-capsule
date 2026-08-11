@@ -76,7 +76,7 @@ public:
 
 private:
     enum class WaveformChannels { mono = 1, stereo = 2 };
-    enum class RowHoverTarget { none, play, seek, versionWarning, favorite, append, menu };
+    enum class RowHoverTarget { none, play, seek, versionWarning, effects, favorite, append, menu };
     enum class ImportMode { currentPattern, newPattern, overrideSelection };
 
     struct NotePreview
@@ -109,6 +109,7 @@ private:
         juce::String sourceFlVersion;
         juce::StringArray tagItems;
         juce::StringArray channelNames;
+        juce::StringArray effectNames;
         bool favorite = false;
         int channelCount = 0;
         int useCount = 0;
@@ -188,7 +189,7 @@ private:
     std::vector<std::pair<juce::Rectangle<int>, juce::String>>
         tagHitAreas(const CapsuleRow&, int rowWidth) const;
     static RowHoverTarget hitTestRow(juce::Point<int> rowPosition, int rowWidth,
-                                     bool versionWarningVisible);
+                                     bool versionWarningVisible, bool effectsVisible);
     void sendCommand(const juce::String& command,
                      const juce::var& arguments,
                      std::function<void(juce::var)> onSuccess = {},
@@ -279,6 +280,7 @@ private:
     IconToggleButton loopToggle{IconToggleButton::Icon::loop};
     juce::ListBox list{"Capsule library", this};
     juce::Label libraryEmptyState;
+    juce::ToggleButton saveMixerInsert{"Save mixer insert"};
     juce::TextButton saveGroup{"Save selected"};
     juce::TextButton saveIndividual{"Save individually"};
     juce::TextButton undoImport{"Undo import"};

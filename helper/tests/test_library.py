@@ -274,6 +274,33 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(details[0]["id"], summary["id"])
             self.assertEqual(json.loads(details[0]["note_preview"]), note_preview)
             self.assertEqual(json.loads(row["channel_names"]), ["Lead"])
+            self.assertEqual(
+                json.loads(row["effect_names"]), ["Fruity Parametric EQ 2"]
+            )
+
+    def test_index_exposes_saved_effect_names_in_slot_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "library" / "Wet Lead.flcapsule",
+                name="Wet Lead",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=True,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+
+            self.assertEqual(library.reindex(), 1)
+
+            row = library.list(include_previews=False)[0]
+            self.assertEqual(
+                json.loads(row["effect_names"]), ["Fruity Parametric EQ 2"]
+            )
+            self.assertEqual(library.list("Parametric")[0]["id"], capsule.manifest.id)
 
     def test_v2_midi_preview_uses_tempo_and_audio_tail_duration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -366,6 +393,7 @@ class LibraryTests(unittest.TestCase):
             manifest = json.loads(members["manifest.json"])
             manifest["schema_version"] = 1
             manifest.pop("source_tempo_bpm", None)
+            manifest.pop("mixer_inserts", None)
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {
                 name: hashlib.sha256(data).hexdigest() for name, data in members.items()

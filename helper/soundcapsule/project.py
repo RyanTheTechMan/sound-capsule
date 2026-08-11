@@ -171,6 +171,7 @@ class CapsuleService:
         project_path: Path | None = None,
         preview_wav: Path | None = None,
         individually: bool = False,
+        include_mixer_insert: bool = True,
         tags: list[str] | None = None,
         progress_callback: Callable[[int, str], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
@@ -303,7 +304,11 @@ class CapsuleService:
                     if selected_preview is None:
                         progress(start, f"Preparing preview for {selected_name}")
                         staged = self._build_preview_project(
-                            project, selected, pattern_id, selected_name
+                            project,
+                            selected,
+                            pattern_id,
+                            selected_name,
+                            include_mixer_insert=include_mixer_insert,
                         )
                         generated_files.append(staged)
                         output = self.settings.staging_dir / f"{slugify(selected_name)}.wav"
@@ -342,6 +347,7 @@ class CapsuleService:
                             preview_wav=selected_preview,
                             save_mode="individual" if individually else "group",
                             tags=tags,
+                            include_mixer_insert=include_mixer_insert,
                         )
                     )
                     if preview_wav is None:
@@ -358,8 +364,20 @@ class CapsuleService:
             for generated in reversed(generated_files):
                 self._delete_staged_file(generated)
 
-    def _build_preview_project(self, source: FLPFile, channel_ids: list[int], pattern_id: int, name: str) -> Path:
-        preview = source.isolated_preview_project(channel_ids, pattern_id)
+    def _build_preview_project(
+        self,
+        source: FLPFile,
+        channel_ids: list[int],
+        pattern_id: int,
+        name: str,
+        *,
+        include_mixer_insert: bool,
+    ) -> Path:
+        preview = source.isolated_preview_project(
+            channel_ids,
+            pattern_id,
+            preserve_mixer_inserts=include_mixer_insert,
+        )
         path = self.settings.staging_dir / f"preview-{slugify(name)}-{int(time.time() * 1000)}.flp"
         self._atomic_write(path, preview.to_bytes())
         return path
@@ -553,6 +571,17 @@ class CapsuleService:
             new_pattern = active_pattern
         else:
             raise ValueError("mode must be 'append' or 'override'")
+
+        if manifest.mixer_inserts:
+            progress(56, "Restoring mixer inserts and effects")
+            mixer_requests = [
+                (
+                    capsule.read_mixer_insert_state(insert),
+                    [mapping[source_iid] for source_iid in insert.channel_source_iids],
+                )
+                for insert in manifest.mixer_inserts
+            ]
+            merged, _ = merged.restore_mixer_insert_states(mixer_requests)
 
         progress(62, "Creating the safety backup")
         merged_bytes = merged.to_bytes()

@@ -18,7 +18,7 @@ import zipfile
 from .flp import AutomationBinding, FLPFile, FLPUnsupportedError, NoteRecord, PlaylistItem
 
 
-CAPSULE_SCHEMA_VERSION = 3
+CAPSULE_SCHEMA_VERSION = 4
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
@@ -26,6 +26,7 @@ MAX_PREVIEW_BYTES = 512 * 1024 * 1024
 MAX_CHANNEL_STATE_BYTES = 512 * 1024 * 1024
 MAX_NOTES_BYTES = 256 * 1024 * 1024
 MAX_AUTOMATION_METADATA_BYTES = 64 * 1024 * 1024
+MAX_MIXER_INSERT_STATE_BYTES = 512 * 1024 * 1024
 CAPSULE_EXTENSION = ".flcapsule.wav"
 LEGACY_CAPSULE_EXTENSION = ".flcapsule"
 SCAP_CHUNK_ID = b"SCAP"
@@ -146,6 +147,13 @@ class AutomationManifest:
 
 
 @dataclass(slots=True)
+class MixerInsertManifest:
+    source_index: int
+    channel_source_iids: list[int]
+    state_path: str
+
+
+@dataclass(slots=True)
 class CapsuleManifest:
     id: str
     schema_version: int
@@ -157,6 +165,7 @@ class CapsuleManifest:
     save_mode: str
     channels: list[ChannelManifest]
     automations: list[AutomationManifest] = field(default_factory=list)
+    mixer_inserts: list[MixerInsertManifest] = field(default_factory=list)
     source_pattern_length_steps: int | None = None
     source_tempo_bpm: float | None = None
     preview_path: str = "preview.wav"
@@ -175,6 +184,7 @@ class CapsuleManifest:
         save_mode: str,
         channels: list[ChannelManifest],
         automations: list[AutomationManifest] | None = None,
+        mixer_inserts: list[MixerInsertManifest] | None = None,
     ) -> "CapsuleManifest":
         return cls(
             id=str(uuid.uuid4()),
@@ -187,6 +197,7 @@ class CapsuleManifest:
             save_mode=save_mode,
             channels=channels,
             automations=list(automations or []),
+            mixer_inserts=list(mixer_inserts or []),
             source_pattern_length_steps=pattern_length_steps,
             source_tempo_bpm=project.tempo_bpm,
         )
@@ -209,14 +220,25 @@ class CapsuleManifest:
         automations_payload = values.pop("automations", [])
         if not isinstance(automations_payload, list):
             raise ValueError("capsule manifest automations must be a list")
+        mixer_inserts_payload = values.pop("mixer_inserts", [])
+        if not isinstance(mixer_inserts_payload, list):
+            raise ValueError("capsule manifest mixer_inserts must be a list")
         channels = [ChannelManifest(**item) for item in channels_payload]
         automations = [AutomationManifest(**item) for item in automations_payload]
-        manifest = cls(channels=channels, automations=automations, **values)
+        mixer_inserts = [
+            MixerInsertManifest(**item) for item in mixer_inserts_payload
+        ]
+        manifest = cls(
+            channels=channels,
+            automations=automations,
+            mixer_inserts=mixer_inserts,
+            **values,
+        )
         manifest.validate()
         return manifest
 
     def validate(self) -> None:
-        if self.schema_version not in {1, 2, CAPSULE_SCHEMA_VERSION}:
+        if self.schema_version not in {1, 2, 3, CAPSULE_SCHEMA_VERSION}:
             relation = "newer" if self.schema_version > CAPSULE_SCHEMA_VERSION else "unsupported legacy"
             raise ValueError(f"{relation} capsule schema {self.schema_version}; supported schema is {CAPSULE_SCHEMA_VERSION}")
         try:
@@ -263,6 +285,33 @@ class CapsuleManifest:
             channel.source_iid for channel in self.channels if channel.channel_type == 5
         }:
             raise ValueError("capsule automation channels require matching automation metadata")
+        mixer_indices = [insert.source_index for insert in self.mixer_inserts]
+        if len(mixer_indices) != len(set(mixer_indices)):
+            raise ValueError("capsule contains duplicate source mixer inserts")
+        if mixer_indices != sorted(mixer_indices):
+            raise ValueError("capsule mixer inserts must be ordered by source index")
+        associated_channels: list[int] = []
+        for insert in self.mixer_inserts:
+            if insert.source_index <= 0:
+                raise ValueError("capsule mixer inserts cannot include Master")
+            if not insert.channel_source_iids:
+                raise ValueError("capsule mixer insert has no associated channels")
+            if not re.fullmatch(r"mixer/[A-Za-z0-9._-]+\.fst", insert.state_path):
+                raise ValueError("capsule mixer insert has an invalid state path")
+            if len(insert.channel_source_iids) != len(set(insert.channel_source_iids)):
+                raise ValueError("capsule mixer insert contains duplicate channel associations")
+            for source_iid in insert.channel_source_iids:
+                channel = channels_by_id.get(source_iid)
+                if channel is None:
+                    raise ValueError("capsule mixer insert references a missing channel")
+                if channel.channel_type == 5:
+                    raise ValueError("capsule mixer insert cannot target an automation channel")
+            associated_channels.extend(insert.channel_source_iids)
+            paths.append(insert.state_path)
+        if len(associated_channels) != len(set(associated_channels)):
+            raise ValueError("capsule channel is associated with multiple mixer inserts")
+        if self.schema_version < 4 and self.mixer_inserts:
+            raise ValueError("legacy capsule schemas cannot contain mixer insert state")
         if len(paths) != len(set(paths)):
             raise ValueError("capsule manifest reuses a member path")
 
@@ -309,6 +358,8 @@ class Capsule:
                     required.add(channel.sample_asset)
             for automation in manifest.automations:
                 required.update({automation.binding_path, automation.playlist_path})
+            for insert in manifest.mixer_inserts:
+                required.add(insert.state_path)
             missing = required - names
             if missing:
                 raise ValueError("capsule is missing required members: " + ", ".join(sorted(missing)))
@@ -364,6 +415,15 @@ class Capsule:
                     item.item_index != automation.source_iid for item in playlist
                 ):
                     raise ValueError("automation Playlist metadata does not match its channel")
+            for insert in manifest.mixer_inserts:
+                state = FLPFile.from_bytes(
+                    _read_limited(
+                        archive,
+                        insert.state_path,
+                        MAX_MIXER_INSERT_STATE_BYTES,
+                    )
+                )
+                state.validate_mixer_insert_state()
             if container_format == "legacy":
                 _validate_wave_member(archive, manifest.preview_path)
             elif container_info is None or container_info.scap_offset > MAX_PREVIEW_BYTES:
@@ -426,6 +486,15 @@ class Capsule:
         with _open_capsule_archive(self.path) as archive:
             raw = _read_limited(archive, channel.notes_path, MAX_NOTES_BYTES)
         return NoteRecord.parse_many(raw)
+
+    def read_mixer_insert_state(self, insert: MixerInsertManifest) -> FLPFile:
+        with _open_capsule_archive(self.path) as archive:
+            raw = _read_limited(
+                archive, insert.state_path, MAX_MIXER_INSERT_STATE_BYTES
+            )
+        state = FLPFile.from_bytes(raw)
+        state.validate_mixer_insert_state()
+        return state
 
     def read_automation_binding(
         self, automation: AutomationManifest
@@ -559,12 +628,14 @@ class Capsule:
         save_mode: str = "group",
         tags: list[str] | None = None,
         embed_sampler_assets: bool = True,
+        include_mixer_insert: bool = True,
     ) -> "Capsule":
         sections = project.extract_channels(channel_ids)
         all_notes = project.pattern_notes().get(pattern_id, [])
         notes_by_channel = {iid: [note for note in all_notes if note.rack_channel == iid] for iid in channel_ids}
         channel_manifests: list[ChannelManifest] = []
         automation_manifests: list[AutomationManifest] = []
+        mixer_insert_manifests: list[MixerInsertManifest] = []
         files: dict[str, bytes | Path] = {}
 
         selected_automation_ids = [
@@ -632,6 +703,27 @@ class Capsule:
                     )
                 )
 
+        if include_mixer_insert:
+            channels_by_insert: dict[int, list[int]] = {}
+            for section in sections:
+                if section.channel_type == 5 or section.mixer_insert == 0:
+                    continue
+                channels_by_insert.setdefault(section.mixer_insert, []).append(
+                    section.iid
+                )
+            for mixer_index, (source_index, source_channels) in enumerate(
+                sorted(channels_by_insert.items())
+            ):
+                state_path = f"mixer/{mixer_index:03d}.fst"
+                files[state_path] = project.mixer_insert_state(source_index).to_bytes()
+                mixer_insert_manifests.append(
+                    MixerInsertManifest(
+                        source_index=source_index,
+                        channel_source_iids=source_channels,
+                        state_path=state_path,
+                    )
+                )
+
         if len(channel_manifests) == 1:
             channel_manifests[0].name = name
 
@@ -643,6 +735,7 @@ class Capsule:
             save_mode=save_mode,
             channels=channel_manifests,
             automations=automation_manifests,
+            mixer_inserts=mixer_insert_manifests,
         )
         manifest.tags = sorted(
             {tag.strip() for tag in (tags or []) if tag.strip()}, key=str.casefold

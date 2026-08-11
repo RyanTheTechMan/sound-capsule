@@ -21,7 +21,7 @@ from .capsule import (
     unique_legacy_capsule_path,
 )
 
-INDEX_VERSION = 12
+INDEX_VERSION = 13
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS capsules (
     favorite INTEGER NOT NULL DEFAULT 0,
     channel_count INTEGER NOT NULL,
     channel_names TEXT NOT NULL DEFAULT '[]',
+    effect_names TEXT NOT NULL DEFAULT '[]',
     note_preview TEXT NOT NULL DEFAULT '[]',
     automation_preview TEXT NOT NULL DEFAULT '[]',
     midi_playback_end REAL NOT NULL DEFAULT 1.0,
@@ -74,6 +75,9 @@ class CapsuleLibrary:
                 database.execute("UPDATE capsules SET modified_ns = -1")
             if "channel_names" not in columns:
                 database.execute("ALTER TABLE capsules ADD COLUMN channel_names TEXT NOT NULL DEFAULT '[]'")
+                database.execute("UPDATE capsules SET modified_ns = -1")
+            if "effect_names" not in columns:
+                database.execute("ALTER TABLE capsules ADD COLUMN effect_names TEXT NOT NULL DEFAULT '[]'")
                 database.execute("UPDATE capsules SET modified_ns = -1")
             if "midi_playback_end" not in columns:
                 database.execute(
@@ -155,12 +159,18 @@ class CapsuleLibrary:
                     note_preview, automation_preview, midi_playback_end = self._preview_data(
                         capsule, manifest
                     )
+                    effect_names = [
+                        slot.plugin_name
+                        for insert in manifest.mixer_inserts
+                        for slot in capsule.read_mixer_insert_state(insert).mixer_effect_slots()
+                        if slot.occupied
+                    ]
                     database.execute(
                         """INSERT INTO capsules
                         (id, path, name, created_at, source_fl_version, plugin_names,
-                         tags, favorite, channel_count, channel_names, note_preview,
-                         automation_preview, midi_playback_end, modified_ns)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         tags, favorite, channel_count, channel_names, effect_names,
+                         note_preview, automation_preview, midi_playback_end, modified_ns)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET path=excluded.path, name=excluded.name,
                         created_at=excluded.created_at,
                         source_fl_version=excluded.source_fl_version,
@@ -168,6 +178,7 @@ class CapsuleLibrary:
                         favorite=excluded.favorite,
                         channel_count=excluded.channel_count,
                         channel_names=excluded.channel_names,
+                        effect_names=excluded.effect_names,
                         note_preview=excluded.note_preview,
                         automation_preview=excluded.automation_preview,
                         midi_playback_end=excluded.midi_playback_end,
@@ -178,6 +189,7 @@ class CapsuleLibrary:
                             json.dumps(plugin_names),
                             json.dumps(manifest.tags), int(manifest.favorite), len(manifest.channels),
                             json.dumps([channel.name for channel in manifest.channels]),
+                            json.dumps(effect_names),
                             json.dumps(note_preview),
                             json.dumps(automation_preview),
                             midi_playback_end,
@@ -264,7 +276,8 @@ class CapsuleLibrary:
             raise ValueError("sort_by must be 'recent', 'name', or 'uses'")
         columns = "*" if include_previews else (
             "id, path, name, created_at, source_fl_version, plugin_names, tags, "
-            "favorite, channel_count, channel_names, midi_playback_end, use_count, modified_ns"
+            "favorite, channel_count, channel_names, effect_names, midi_playback_end, "
+            "use_count, modified_ns"
         )
         query = f"SELECT {columns} FROM capsules"
         conditions, args = self._list_conditions(search, favorites_only)
@@ -289,9 +302,11 @@ class CapsuleLibrary:
         for term in (item.strip() for item in search.split(",")):
             if not term:
                 continue
-            conditions.append("(name LIKE ? OR plugin_names LIKE ? OR tags LIKE ?)")
+            conditions.append(
+                "(name LIKE ? OR plugin_names LIKE ? OR effect_names LIKE ? OR tags LIKE ?)"
+            )
             wildcard = f"%{term}%"
-            args = (*args, wildcard, wildcard, wildcard)
+            args = (*args, wildcard, wildcard, wildcard, wildcard)
         if favorites_only:
             conditions.append("favorite = 1")
         return conditions, args

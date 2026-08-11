@@ -14,6 +14,7 @@ from soundcapsule.flp import (  # noqa: E402
     EVENT_CHANNEL_NEW,
     EVENT_PATTERN_NEW,
     FLPFile,
+    FLPUnsupportedError,
 )
 
 
@@ -26,7 +27,16 @@ def main() -> int:
         parser.error(f"no FLP files found under {args.root}")
 
     failures: list[dict[str, str]] = []
-    counters = {"files": 0, "channels": 0, "preview": 0, "append": 0, "override": 0}
+    counters = {
+        "files": 0,
+        "channels": 0,
+        "preview": 0,
+        "append": 0,
+        "override": 0,
+        "mixer_inserts": 0,
+        "mixer_preview": 0,
+        "mixer_restore": 0,
+    }
     versions: set[str] = set()
     for path in paths:
         try:
@@ -45,6 +55,52 @@ def main() -> int:
             )
             if unprofiled:
                 raise AssertionError(f"unprofiled channel event IDs: {unprofiled}")
+
+            channels_by_insert: dict[int, list[int]] = {}
+            for candidate in sections:
+                if candidate.channel_type in (3, 5) or candidate.mixer_insert == 0:
+                    continue
+                channels_by_insert.setdefault(candidate.mixer_insert, []).append(
+                    candidate.iid
+                )
+            mixer_requests = []
+            for insert_index, channel_ids in sorted(channels_by_insert.items()):
+                state = FLPFile.from_bytes(
+                    project.mixer_insert_state(insert_index).to_bytes()
+                )
+                state.validate_mixer_insert_state()
+                mixer_requests.append((state, channel_ids))
+                counters["mixer_inserts"] += 1
+            if mixer_requests:
+                try:
+                    restored, allocated = project.restore_mixer_insert_states(
+                        mixer_requests
+                    )
+                except FLPUnsupportedError as error:
+                    if "pristine mixer insert" not in str(error):
+                        raise
+                    if project.to_bytes() != source:
+                        raise AssertionError(
+                            "failed mixer allocation mutated the source project"
+                        )
+                else:
+                    reparsed_mixer = FLPFile.from_bytes(restored.to_bytes())
+                    if allocated != sorted(allocated):
+                        raise AssertionError(
+                            "mixer inserts were not allocated in ascending order"
+                        )
+                    routed = {
+                        item.iid: item.mixer_insert
+                        for item in reparsed_mixer.channel_sections()
+                    }
+                    for allocated_index, (_, channel_ids) in zip(
+                        allocated, mixer_requests, strict=True
+                    ):
+                        if any(routed[channel_id] != allocated_index for channel_id in channel_ids):
+                            raise AssertionError(
+                                "restored mixer insert did not preserve generator sharing"
+                            )
+                    counters["mixer_restore"] += len(allocated)
 
             section = next((item for item in sections if item.channel_type not in (3, 5)), None)
             if section is None:
@@ -86,6 +142,30 @@ def main() -> int:
                     elif enabled:
                         raise AssertionError("isolated preview retained an enabled unselected channel")
                 counters["preview"] += 1
+                if preview_source.mixer_insert > 0:
+                    wet_preview = FLPFile.from_bytes(
+                        project.isolated_preview_project(
+                            [preview_source.iid],
+                            pattern,
+                            preserve_mixer_inserts=True,
+                        ).to_bytes()
+                    )
+                    wet_channel = {
+                        item.iid: item for item in wet_preview.channel_sections()
+                    }[preview_source.iid]
+                    if wet_channel.mixer_insert != preview_source.mixer_insert:
+                        raise AssertionError(
+                            "effect-aware preview discarded the selected mixer insert"
+                        )
+                    wet_insert = {
+                        item.index: item
+                        for item in wet_preview.mixer_insert_sections()
+                    }[preview_source.mixer_insert]
+                    if wet_insert.routes_to() != {0}:
+                        raise AssertionError(
+                            "effect-aware preview retained non-Master sends"
+                        )
+                    counters["mixer_preview"] += 1
 
             appended, _, new_pattern = project.append_capsule(
                 [section], {section.iid: notes}, source_ppq=project.ppq, pattern_name="Corpus validation"

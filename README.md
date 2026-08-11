@@ -2,8 +2,9 @@
 
 Sound Capsule lets you save an FL Studio sound as a portable `.flcapsule.wav` file.
 Each capsule contains the selected generator channel or channels, their notes in
-the active pattern, and an audio preview—ready to play in Finder, Explorer, chat
-apps, and ordinary audio players, then reuse in another project.
+the active pattern, their optional non-Master mixer inserts and effects, and an
+audio preview—ready to play in Finder, Explorer, chat apps, and ordinary audio
+players, then reuse in another project.
 
 The standalone app is the main way to use Sound Capsule. The optional VST3 can
 also display the library inside FL Studio, but it is not required.
@@ -73,9 +74,12 @@ overwritten and can be revealed from the result message.
    choose the pattern to capture. You may also select Automation Clip channels
    in the Channel Rack; select each clip's target generator channel as well.
 2. In Sound Capsule, enter a name and optional comma-separated tags.
-3. Click **Save capsule** for one channel, **Save selected** for a grouped capsule,
+3. Leave **Save mixer insert** enabled to include each generator's non-Master
+   mixer insert and effect chain. The choice is remembered; disable it for the
+   earlier direct-to-Master capture behavior.
+4. Click **Save capsule** for one channel, **Save selected** for a grouped capsule,
    or **Save individually** to create one capsule per selected channel.
-4. Sound Capsule saves the capsule to its library and creates an audio preview.
+5. Sound Capsule saves the capsule to its library and creates an audio preview.
 
 ## Use a capsule
 
@@ -91,8 +95,9 @@ overwritten and can be revealed from the result message.
    - **Current pattern** adds the capsule’s channels and notes to the open
      pattern.
    - **New pattern** creates a pattern for the capsule.
-   - **Override selection** replaces matching selected channels while keeping
-     their mixer destinations.
+   - **Override selection** replaces matching selected channels. Saved mixer
+     chains are restored to fresh inserts and only the overridden channels are
+     rerouted; capsules without mixer state keep the existing destinations.
 
 Selected Automation Clips that target captured Channel Rack channels are saved
 with their current-arrangement Playlist instances. On import, those instances
@@ -126,10 +131,14 @@ or import its embedded contents.
 
 ## What’s included
 
-Sound Capsule captures generator channels, their active-pattern notes, and
-explicitly selected Automation Clips targeting those channels. Third-party
-plug-ins, sample libraries, and other dependencies must be installed on the
-computer where you import the capsule.
+Sound Capsule captures generator channels, their active-pattern notes, explicitly
+selected Automation Clips targeting those channels, and—when enabled—each distinct
+non-Master mixer insert shared by the selected generators. Insert identity and
+controls, EQ, effect-slot order and state, slot enable states, and mix levels are
+restored to pristine inserts in the destination project. Master state, external
+I/O, sends and routing graphs, solo/lock/layout state, and audio-track links are
+not embedded. Third-party plug-ins, sample libraries, and other dependencies must
+be installed on the computer where you import the capsule.
 
 ## Contributing
 

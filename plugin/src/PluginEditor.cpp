@@ -993,7 +993,8 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     updateAvailable.setVisible(false);
     updateAvailable.setColour(juce::TextButton::buttonColourId, accent.darker(0.55f));
     updateAvailable.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    search.setTextToShowWhenEmpty("Search names, plugins, or tags", juce::Colours::grey);
+    search.setTextToShowWhenEmpty(
+        "Search names, plugins, effects, or tags", juce::Colours::grey);
     capsuleName.setTextToShowWhenEmpty("Capsule name", juce::Colours::grey);
     tagsInput.setTextToShowWhenEmpty("Tags (comma-separated)", juce::Colours::grey);
     selectionSummary.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
@@ -1051,7 +1052,7 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
              &brandLogo, &title, &status, &search, &capsuleName, &capsuleNameClear,
              &tagsInput, &tagsInputClear, &selectionSummary, &favoritesOnly,
              &sortBy, &sortDirection, &waveformToggle, &midiToggle, &loopToggle,
-             &list, &saveGroup, &saveIndividual,
+             &list, &saveMixerInsert, &saveGroup, &saveIndividual,
              &connectionStatus, &projectStatus, &patternStatus,
              &connectionSetup, &updateAvailable, &setup, &volumeLabel, &previewVolume})
         addAndMakeVisible(component);
@@ -1066,8 +1067,13 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     undoImport.setVisible(false);
 
     saveGroup.setColour(juce::TextButton::buttonColourId, accent.darker(0.35f));
+    saveMixerInsert.setToggleState(true, juce::dontSendNotification);
+    saveMixerInsert.setTooltip(
+        "Save the routed non-Master mixer insert, including its controls and effect slots. "
+        "Mixer sends and external I/O are not included.");
     capsuleName.setVisible(false);
     tagsInput.setVisible(false);
+    saveMixerInsert.setVisible(false);
     saveGroup.setVisible(false);
     saveIndividual.setVisible(false);
     list.setRowHeight(84);
@@ -1133,6 +1139,22 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     };
     saveGroup.onClick = [this] { captureSelected(false); };
     saveIndividual.onClick = [this] { captureSelected(true); };
+    saveMixerInsert.onClick = [this] {
+        const auto requested = saveMixerInsert.getToggleState();
+        juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+        sendCommand(
+            "set_capture_preferences",
+            object({{"save_mixer_insert", requested}}),
+            [safe](juce::var) {}, 5000, true,
+            [safe, requested](const juce::String& error) {
+                if (safe == nullptr) return;
+                safe->saveMixerInsert.setToggleState(!requested,
+                                                     juce::dontSendNotification);
+                safe->status.setText(
+                    "Could not save mixer preference: " + error,
+                    juce::dontSendNotification);
+            });
+    };
     undoImport.onClick = [this] {
         juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
         juce::AlertWindow::showAsync(
@@ -1351,6 +1373,11 @@ void SoundCapsuleAudioProcessorEditor::resized()
             saveGroup.setBounds(importRow.removeFromRight(130).reduced(2, 0));
             importRow.removeFromRight(8);
         }
+        if (saveMixerInsert.isVisible())
+        {
+            saveMixerInsert.setBounds(importRow.removeFromRight(142).reduced(2, 0));
+            importRow.removeFromRight(6);
+        }
         const auto nameWidth = (importRow.getWidth() - 8) / 2;
         auto nameBounds = importRow.removeFromLeft(nameWidth).reduced(2, 0);
         capsuleName.setBounds(nameBounds);
@@ -1385,6 +1412,8 @@ juce::String SoundCapsuleAudioProcessorEditor::getNameForRow(int rowNumber)
         description << ", " << row.plugins;
     description << ", " << row.channelCount
                 << (row.channelCount == 1 ? " channel" : " channels")
+                << ", " << row.effectNames.size()
+                << (row.effectNames.size() == 1 ? " effect" : " effects")
                 << ", " << row.useCount << (row.useCount == 1 ? " use" : " uses");
     if (row.tags.isNotEmpty())
         description << ", tags " << row.tags;
@@ -1395,12 +1424,17 @@ juce::String SoundCapsuleAudioProcessorEditor::getNameForRow(int rowNumber)
 
 juce::String SoundCapsuleAudioProcessorEditor::getTooltipForRow(int rowNumber)
 {
-    if (rowNumber != hoveredRow || hoveredTarget != RowHoverTarget::versionWarning
+    if (rowNumber != hoveredRow
         || !juce::isPositiveAndBelow(rowNumber, static_cast<int>(rows.size())))
         return {};
     const auto& row = rows[static_cast<size_t>(rowNumber)];
-    return compatibilityTooltip(
-        row.sourceFlVersion, currentProjectFlVersion, currentHostName);
+    if (hoveredTarget == RowHoverTarget::versionWarning)
+        return compatibilityTooltip(
+            row.sourceFlVersion, currentProjectFlVersion, currentHostName);
+    if (hoveredTarget == RowHoverTarget::effects)
+        return "Saved effects (" + juce::String(row.effectNames.size()) + "):\n"
+             + row.effectNames.joinIntoString("\n");
+    return {};
 }
 
 void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Graphics& graphics,
@@ -1497,6 +1531,8 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
     }
     const auto countText = juce::String(row.channelCount)
                          + (row.channelCount == 1 ? " channel" : " channels")
+                         + "  |  " + juce::String(row.effectNames.size())
+                         + (row.effectNames.size() == 1 ? " effect" : " effects")
                          + "  |  " + juce::String(row.useCount)
                          + (row.useCount == 1 ? " use" : " uses");
     graphics.drawText(countText, actionsX - 205, 2, 195, 20,
@@ -1974,13 +2010,17 @@ void SoundCapsuleAudioProcessorEditor::timerCallback()
 
 SoundCapsuleAudioProcessorEditor::RowHoverTarget
 SoundCapsuleAudioProcessorEditor::hitTestRow(juce::Point<int> position, int rowWidth,
-                                             bool versionWarningVisible)
+                                             bool versionWarningVisible,
+                                             bool effectsVisible)
 {
     if (position.x < 42)
         return RowHoverTarget::play;
     if (versionWarningVisible && compatibilityWarningBounds().contains(position))
         return RowHoverTarget::versionWarning;
     const auto actionsX = rowWidth - 108;
+    if (effectsVisible
+        && juce::Rectangle<int>(actionsX - 205, 2, 195, 20).contains(position))
+        return RowHoverTarget::effects;
     if (position.y >= 39 && position.x >= 46 && position.x < actionsX - 8)
         return RowHoverTarget::seek;
     if (position.x >= actionsX && position.x < actionsX + 36)
@@ -2006,7 +2046,8 @@ void SoundCapsuleAudioProcessorEditor::updateRowHover(juce::Point<int> position)
             nextTarget = hitTestRow(
                 {position.x, position.y - rowBounds.getY()}, rowBounds.getWidth(),
                 soundcapsule::flversion::sourceIsNewer(
-                    row.sourceFlVersion, currentProjectFlVersion, currentHostName));
+                    row.sourceFlVersion, currentProjectFlVersion, currentHostName),
+                !row.effectNames.isEmpty());
         }
         else
             nextRow = -1;
@@ -2041,7 +2082,8 @@ void SoundCapsuleAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
     if (hitTestRow(
             rowPosition, rowBounds.getWidth(),
             soundcapsule::flversion::sourceIsNewer(
-                row.sourceFlVersion, currentProjectFlVersion, currentHostName))
+                row.sourceFlVersion, currentProjectFlVersion, currentHostName),
+            !row.effectNames.isEmpty())
         != RowHoverTarget::none)
         return;
     for (const auto& [chip, tag] : tagHitAreas(
@@ -2233,6 +2275,8 @@ SoundCapsuleAudioProcessorEditor::capsuleRowFromValue(const juce::var& value)
         value.getProperty("tags", "[]").toString());
     const auto channelValues = juce::JSON::parse(
         value.getProperty("channel_names", "[]").toString());
+    const auto effectValues = juce::JSON::parse(
+        value.getProperty("effect_names", "[]").toString());
     juce::StringArray pluginNames, tagNames;
     if (auto* array = plugins.getArray())
         for (const auto& item : *array)
@@ -2243,6 +2287,10 @@ SoundCapsuleAudioProcessorEditor::capsuleRowFromValue(const juce::var& value)
     if (auto* array = channelValues.getArray())
         for (const auto& item : *array)
             row.channelNames.add(item.toString());
+    if (auto* array = effectValues.getArray())
+        for (const auto& item : *array)
+            if (item.toString().trim().isNotEmpty())
+                row.effectNames.add(item.toString().trim());
     row.plugins = pluginNames.joinIntoString(", ");
     row.tags = tagNames.joinIntoString(", ");
     row.tagItems = tagNames;
@@ -2652,10 +2700,12 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         const auto dirty = static_cast<int>(response.getProperty("changed", 0)) != 0;
         const auto connectionWarningWasVisible = safe->connectionStatus.isVisible();
         const auto importFieldsWereVisible = safe->capsuleName.isVisible();
+        const auto mixerInsertWasVisible = safe->saveMixerInsert.isVisible();
         safe->connectionStatus.setVisible(false);
         safe->connectionSetup.setVisible(false);
         safe->capsuleName.setVisible(true);
         safe->tagsInput.setVisible(true);
+        safe->saveMixerInsert.setVisible(true);
         safe->capsuleNameClear.setVisible(safe->capsuleNameCustom);
         safe->tagsInputClear.setVisible(safe->tagsInput.getText().trim().isNotEmpty());
         if (safe->status.getText() == "Waiting for FL Studio"
@@ -2669,6 +2719,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->patternStatus.setColour(juce::Label::textColourId, juce::Colours::white);
         const auto saveVisibilityChanged = safe->saveGroup.isVisible() != (selectedCount > 0)
                                         || safe->saveIndividual.isVisible() != (selectedCount > 1)
+                                        || !mixerInsertWasVisible
                                         || !safe->selectionSummary.isVisible();
         safe->saveGroup.setButtonText(selectedCount > 1 ? "Save selected" : "Save capsule");
         safe->saveGroup.setVisible(selectedCount > 0);
@@ -2734,6 +2785,7 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
     juce::Array<juce::var> tags;
     for (auto tag : juce::StringArray::fromTokens(tagsInput.getText(), ",", ""))
         if (tag.trim().isNotEmpty()) tags.add(tag.trim());
+    const auto includeMixerInsert = saveMixerInsert.getToggleState();
 
     operationId = juce::Uuid().toString();
     const auto captureOperationId = operationId;
@@ -2755,12 +2807,14 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
         safe->operationId.clear();
         safe->operationProgressPollInFlight.store(false);
     };
-    runAfterProjectSaved([safe, captureOperationId, name, individually, tags, showFailure] {
+    runAfterProjectSaved([safe, captureOperationId, name, individually, tags,
+                          includeMixerInsert, showFailure] {
         if (safe == nullptr) return;
         safe->operationPollingEnabled = true;
         safe->lastOperationProgressPollAt = 0;
         safe->sendCommand(
             "capture", object({{"name", name}, {"individually", individually},
+                               {"include_mixer_insert", includeMixerInsert},
                                {"tags", tags}, {"operation_id", captureOperationId}}),
             [safe, captureOperationId](juce::var) {
                 if (safe == nullptr || safe->operationId != captureOperationId) return;
@@ -2805,6 +2859,9 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
             response.getProperty("show_automation_curves", true));
         safe->showSingleChannelNameInRename = static_cast<bool>(
             response.getProperty("show_single_channel_name_in_rename", false));
+        safe->saveMixerInsert.setToggleState(
+            static_cast<bool>(response.getProperty("save_mixer_insert", true)),
+            juce::dontSendNotification);
         safe->updateVolumeDisplay();
         safe->waveformToggle.setWaveformStereo(safe->waveformChannels == WaveformChannels::stereo);
         safe->midiToggle.setMidiAutomationVisible(safe->showAutomationCurves);
@@ -4357,6 +4414,7 @@ void SoundCapsuleAudioProcessorEditor::sendCommand(const juce::String& command,
                     safe->capsuleNameClear.setVisible(false);
                     safe->tagsInput.setVisible(false);
                     safe->tagsInputClear.setVisible(false);
+                    safe->saveMixerInsert.setVisible(false);
                     safe->selectionSummary.setVisible(false);
                     safe->saveGroup.setVisible(false);
                     safe->saveIndividual.setVisible(false);

@@ -17,7 +17,9 @@ uv run --python 3.12 --project helper python -m unittest discover -s helper/test
 
 It covers lossless parsing, opaque events, exact note properties, grouped and
 individual capsule packaging, selected Automation Clip target remapping and
-playhead placement, automation-aware Song-mode previews, embedded Sampler assets, ZIP/checksum attacks,
+playhead placement, automation-aware Song-mode previews, mixer insert and gapped
+effect-slot extraction, shared-chain restoration, bypass/mix parameters, pristine
+insert allocation, embedded Sampler assets, ZIP/checksum attacks,
 new-pattern and current-pattern append, override, PPQ scaling, isolated preview construction, project lookup,
 dirty-state rejection, in-place backup/restore, configurable time-limited Undo,
 post-import-change safety backups, expired-restore rejection, library indexing,
@@ -39,7 +41,9 @@ uv run --python 3.12 scripts/validate_fl_corpus.py "/Applications/FL Studio 2025
 For each supported generator fixture the audit requires byte-identical
 unmodified serialization, exact channel counts, fully profiled channel event
 ownership, an isolated preview project, structurally valid append, and
-structurally valid override.
+structurally valid override. Routed generators additionally exercise portable
+insert-state extraction, effect-aware preview sanitization, shared-chain
+restoration, ascending pristine allocation, and clean insufficient-space failure.
 
 Build the JUCE targets and validate the VST3 at pluginval strictness 10,
 including GUI tests, 44.1/48/96 kHz, and block sizes 64–1024. Verify both app
@@ -70,6 +74,14 @@ Pattern 4 FLEX channel from a byte-exact project containing its single zero
 event-stream padding byte. The generated 48 kHz stereo WAV was non-silent and
 passed the helper's RIFF/WAVE validation.
 
+Mixer-insert development also restored a real one-slot Fruity Parametric EQ 2
+Insert-State extracted from Image-Line's bundled `NewStuff.flp` into disposable
+FL 25.2.5.5055- and FL 26.1.0.5294-layout projects. FL Studio 2025 and 2026 each
+loaded the generated project, processed the generator through fresh insert 2,
+and produced a non-silent WAV. Wrapped third-party effects, shared chains,
+disabled/mixed slots, and Master-effect interaction remain part of the explicit
+interactive acceptance list below rather than being claimed from that smoke test.
+
 FL Studio 25.2.5.5319 on Windows byte-exactly parsed and rewrote the live
 `sound-capsule-2025-test2.flp`, then captured its selected Pattern 1 channel
 through the isolated renderer. The original project remained open and the
@@ -89,20 +101,27 @@ release is claimed as host-tested:
    3xOsc, FLEX, Sytrus, wrapped VST2/VST3, CLAP, Serum, Kontakt, Unicode names,
    unusual wrapper flags, missing samples, and trial placeholders.
 3. Reopen every isolated preview FLP in FL, render it, and confirm only selected
-   channels and current-pattern notes sound. Test generators with long release,
-   tempo sync, sidechain assumptions, and missing dependencies.
+   channels and current-pattern notes sound. With **Save mixer insert** enabled,
+   confirm native and wrapped effects remain audible while unscoped sends and
+   external I/O are absent; repeat with the option disabled. Test generators with
+   long release, tempo sync, sidechain assumptions, and missing dependencies.
 4. Append to both the active pattern and a new pattern at matching and different
    PPQ. Verify plugin state, pattern selection/naming, all note properties,
-   preserved active-pattern notes, direct-to-Master routing, and unchanged existing
-   channels, mixer, Playlist, and arrangement state.
+   preserved active-pattern notes, fresh restored inserts for saved mixer state,
+   direct-to-Master routing for capsules without mixer state, and unchanged
+   existing channels, Master, unrelated mixer inserts, Playlist, and arrangement
+   state. Include shared inserts, gapped native and wrapped effects, disabled and
+   partially mixed slots, and projects with no remaining pristine inserts.
 5. Select generator-targeted Automation Clips in the Channel Rack alongside
    their target generators. Capture grouped and individually, verify the audible
    preview follows automation, then import at several playhead positions and
    confirm every selected Playlist instance and relative offset is preserved.
    Confirm unselected automation is excluded and mixer/global automation reports
    the documented unsupported-target error.
-6. Override an equal-size destination selection. Verify target routing and
-   unrelated notes remain unchanged. Reject count mismatches.
+6. Override an equal-size destination selection. Verify saved chains use fresh
+   inserts and reroute only the overridden channels; legacy and toggle-off
+   capsules retain target routing. Confirm former inserts and unrelated channels
+   using them remain unchanged. Reject count mismatches.
 7. Exercise the in-place transaction on disposable projects. Verify the backup
    before replacement, atomic main-file write, OS reopen, `PL_LoadOk` reload
    acknowledgment, reopen in the same FL Studio major version that initiated
