@@ -547,6 +547,81 @@ class MixerInsertFLPTests(unittest.TestCase):
         self.assertEqual(values[(193, 0)], -640)
         self.assertEqual(values[(1, 0)], 9_600)
 
+    def test_restore_accepts_windows_generated_default_insert_name(self) -> None:
+        source = fixture_project()
+        destination = fixture_project()
+        target = {
+            section.index: section for section in destination.mixer_insert_sections()
+        }[1]
+        replacement = []
+        for event in target.events:
+            if event is target.flags_event:
+                replacement.append(text_event(EVENT_INSERT_NAME, "Insert 11"))
+            replacement.append(event)
+        destination._replace_mixer_insert_events(
+            target,
+            replacement,
+        )
+
+        restored, allocated = destination.restore_mixer_insert_states(
+            [(source.mixer_insert_state(7), [2])]
+        )
+
+        self.assertEqual(allocated, [1])
+        self.assertEqual(
+            {
+                section.iid: section for section in restored.channel_sections()
+            }[2].mixer_insert,
+            1,
+        )
+
+    def test_restore_never_overwrites_effect_under_default_insert_name(self) -> None:
+        source = fixture_project()
+        destination = fixture_project()
+        target = {
+            section.index: section for section in destination.mixer_insert_sections()
+        }[1]
+        slot_zero = next(
+            event
+            for event in target.events
+            if event.id == EVENT_EFFECT_SLOT_INDEX and event.scalar == 0
+        )
+        replacement = []
+        for event in target.events:
+            if event is target.flags_event:
+                replacement.append(text_event(EVENT_INSERT_NAME, "Insert 11"))
+            if event is slot_zero:
+                replacement.extend(
+                    [
+                        text_event(EVENT_PLUGIN_INTERNAL_NAME, "Fruity Reeverb 2"),
+                        data_event(
+                            EVENT_PLUGIN_LOCATION,
+                            struct.pack("<13I", 1, 0, 2, *([0] * 10)),
+                        ),
+                        data_event(213, b"windows-effect-state"),
+                    ]
+                )
+            replacement.append(event)
+        destination._replace_mixer_insert_events(target, replacement)
+        protected = {
+            section.index: section for section in destination.mixer_insert_sections()
+        }[1]
+        self.assertFalse(protected.is_pristine())
+        protected_events = tuple(event.raw for event in protected.events)
+        protected_params = tuple(record.raw for record in protected.params)
+
+        restored, allocated = destination.restore_mixer_insert_states(
+            [(source.mixer_insert_state(7), [2])]
+        )
+
+        self.assertEqual(allocated, [2])
+        after = {
+            section.index: section for section in restored.mixer_insert_sections()
+        }[1]
+        self.assertEqual(tuple(event.raw for event in after.events), protected_events)
+        self.assertEqual(tuple(record.raw for record in after.params), protected_params)
+        self.assertIn(b"windows-effect-state", b"".join(event.raw for event in after.events))
+
     def test_restore_preserves_unrelated_raw_events(self) -> None:
         destination = fixture_project()
         opaque = data_event(252, b"unrelated-future-project-state\x00\xff")

@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import re
 import struct
 from typing import Iterator, Sequence
 
@@ -131,6 +132,7 @@ PORTABLE_INSERT_PREFIX_IDS = frozenset(
 # Track links are deliberately stripped from portable insert states.
 PORTABLE_INSERT_FLAGS_MASK = 0x001F
 DEFAULT_PORTABLE_INSERT_FLAGS = 0x000C
+DEFAULT_INSERT_NAME_PATTERN = re.compile(r"Insert [1-9][0-9]*")
 
 # Although event IDs 128-191 normally carry four-byte scalar payloads, current
 # FL 25/26 projects write event 172 with three bytes. Treating its following
@@ -709,8 +711,17 @@ class MixerInsertSection:
         if active != 0 or self.occupied_slot_count != 0:
             return False
         if any(
-            event.id in {EVENT_INSERT_NAME, EVENT_INSERT_COLOR, EVENT_INSERT_ICON}
+            event.id in {EVENT_INSERT_COLOR, EVENT_INSERT_ICON}
             for event in self.events
+        ):
+            return False
+        # Windows FL Studio persists generated names such as "Insert 11" on
+        # otherwise untouched inserts. Those names are not user mixer state,
+        # but every custom name remains protected from allocation.
+        if any(
+            DEFAULT_INSERT_NAME_PATTERN.fullmatch(parse_text(event.payload)) is None
+            for event in self.events
+            if event.id == EVENT_INSERT_NAME
         ):
             return False
         external_io = {
