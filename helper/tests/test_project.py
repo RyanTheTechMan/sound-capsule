@@ -373,7 +373,10 @@ class ProjectServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "Different Song.flp").write_bytes(fixture_project().to_bytes())
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "Save the project in FL Studio, or if it is already saved",
+            ):
                 ProjectLocator(
                     [root], recent_provider=lambda: [], indexed_provider=lambda _: []
                 ).find_recent("Unsaved Idea")
@@ -509,6 +512,42 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(
                 _windows_indexed_projects("Custom", user_folders=[user_folder]),
                 [project],
+            )
+
+    def test_windows_project_search_infers_library_from_stale_recent_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library = root / "Synced Music Projects" / "FL Studio"
+            previous = [
+                library / "566" / "566.flp",
+                library / "567" / "567.flp",
+            ]
+            for path in previous:
+                path.parent.mkdir(parents=True)
+                path.write_bytes(fixture_project().to_bytes())
+            current = library / "568" / "568_3.flp"
+            current.parent.mkdir()
+            current.write_bytes(fixture_project().to_bytes())
+            standard = root / "FL Data" / "Projects" / "568_3.flp"
+            standard.parent.mkdir(parents=True)
+            standard.write_bytes(fixture_project().to_bytes())
+
+            candidates = _windows_indexed_projects(
+                "568_3",
+                user_folders=[root / "FL Data"],
+                recent_projects=previous,
+            )
+            self.assertEqual(candidates, [standard, current])
+            self.assertEqual(
+                ProjectLocator(
+                    [],
+                    recent_provider=lambda: [],
+                    indexed_provider=lambda _title: candidates,
+                ).find_current(
+                    "568_3",
+                    candidate_validator=lambda path: path == current.resolve(),
+                ),
+                current.resolve(),
             )
 
     def test_project_locator_filters_blank_title_recent_files_by_live_session(self) -> None:

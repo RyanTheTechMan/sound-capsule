@@ -177,12 +177,20 @@ class CapsuleService:
         changed_after = session.last_save_requested_at
         if changed_after <= 0 or time.time() - changed_after > 5 * 60:
             changed_after = None
+        recent_cache: list[Path] | None = None
+
+        def recent() -> list[Path]:
+            nonlocal recent_cache
+            if recent_cache is None:
+                recent_cache = recent_project_paths(self.settings.fl_user_folder)
+            return recent_cache
+
         return ProjectLocator(
             self.settings.fl_project_roots,
             cache_path=self.settings.data_dir / "project-paths.json",
-            recent_provider=lambda: recent_project_paths(self.settings.fl_user_folder),
+            recent_provider=recent,
             indexed_provider=lambda title: indexed_project_paths(
-                title, self.settings.fl_user_folder
+                title, self.settings.fl_user_folder, recent_paths=recent()
             ),
         ).find_current(
             session.project_title,

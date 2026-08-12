@@ -7,6 +7,7 @@ import platform
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Callable
 import xml.etree.ElementTree as ET
 
@@ -178,10 +179,21 @@ def recent_project_paths(fl_user_folder: Path | None = None) -> list[Path]:
     return []
 
 
-def indexed_project_paths(title: str, fl_user_folder: Path | None = None) -> list[Path]:
+def indexed_project_paths(
+    title: str,
+    fl_user_folder: Path | None = None,
+    *,
+    recent_paths: list[Path] | None = None,
+) -> list[Path]:
     if platform.system() == "Windows":
         return _windows_indexed_projects(
-            title, user_folders=[fl_user_folder] if fl_user_folder is not None else None
+            title,
+            user_folders=[fl_user_folder] if fl_user_folder is not None else None,
+            recent_projects=(
+                recent_paths
+                if recent_paths is not None
+                else _windows_recent_projects(fl_user_folder)
+            ),
         )
     if platform.system() != "Darwin":
         return []
@@ -261,8 +273,9 @@ def _windows_indexed_projects(
     document_roots: list[Path] | None = None,
     *,
     user_folders: list[Path] | None = None,
+    recent_projects: list[Path] | None = None,
 ) -> list[Path]:
-    """Find an exact project filename in FL's standard Windows project roots."""
+    """Find an exact project filename in known Windows FL project libraries."""
     filename = title.strip()
     if not filename:
         return []
@@ -280,8 +293,87 @@ def _windows_indexed_projects(
 
     result: list[Path] = []
     seen: set[str] = set()
-    for user_folder in user_folders:
-        projects = user_folder / "Projects"
+    search_roots = [user_folder / "Projects" for user_folder in user_folders]
+    recent_directories: list[Path] = []
+    directory_counts: Counter[str] = Counter()
+    directories_by_key: dict[str, Path] = {}
+    directory_order: list[str] = []
+    parent_children: dict[str, set[str]] = {}
+    parents_by_key: dict[str, Path] = {}
+    parent_order: list[str] = []
+    local_app_data = Path(
+        os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+    ).resolve()
+    staging_root = (local_app_data / "SoundCapsule" / "Staging").resolve()
+    broad_paths = (Path.home(), local_app_data, Path(tempfile.gettempdir()))
+    broad_roots = {os.path.normcase(str(path.resolve())) for path in broad_paths}
+    broad_roots.update(
+        os.path.normcase(str(Path(path.anchor)))
+        for path in broad_paths
+        if path.anchor
+    )
+    recent_seen: set[str] = set()
+    for recent in recent_projects or []:
+        path = recent.expanduser()
+        if path.suffix.casefold() != ".flp":
+            continue
+        recent_key = os.path.normcase(str(path))
+        if recent_key in recent_seen:
+            continue
+        recent_seen.add(recent_key)
+        try:
+            if path.resolve().is_relative_to(staging_root):
+                continue
+        except OSError:
+            pass
+        directory = path.parent
+        directory_key = os.path.normcase(str(directory))
+        if directory_key not in directories_by_key:
+            directories_by_key[directory_key] = directory
+            directory_order.append(directory_key)
+            recent_directories.append(directory)
+        directory_counts[directory_key] += 1
+        parent = directory.parent
+        parent_key = os.path.normcase(str(parent))
+        if parent_key not in parents_by_key:
+            parents_by_key[parent_key] = parent
+            parent_order.append(parent_key)
+        parent_children.setdefault(parent_key, set()).add(directory_key)
+
+    # Two prior projects in one directory, or in two sibling directories,
+    # establish a bounded project library even when FL has not flushed the new
+    # file to Recent files.scr yet. Distinct-child counting is important: many
+    # projects directly in Documents infer Documents, never the whole profile.
+    inferred_roots = (
+        [
+            directories_by_key[key]
+            for key in directory_order
+            if directory_counts[key] >= 2
+        ]
+        + [
+            parents_by_key[key]
+            for key in parent_order
+            if len(parent_children[key]) >= 2 and key not in broad_roots
+        ]
+    )
+    for path in [
+        *(directory / filename for directory in recent_directories),
+        *(root / filename for root in search_roots),
+        *(root / Path(filename).stem / filename for root in search_roots),
+    ]:
+        key = os.path.normcase(str(path))
+        if key not in seen and path.is_file():
+            seen.add(key)
+            result.append(path)
+
+    recursive_roots: list[Path] = []
+    recursive_seen: set[str] = set()
+    for root in search_roots + inferred_roots:
+        key = os.path.normcase(str(root))
+        if key not in recursive_seen:
+            recursive_seen.add(key)
+            recursive_roots.append(root)
+    for projects in recursive_roots:
         likely = (
             projects / filename,
             projects / Path(filename).stem / filename,
@@ -291,8 +383,6 @@ def _windows_indexed_projects(
             if key not in seen and path.is_file():
                 seen.add(key)
                 result.append(path)
-        if result:
-            continue
         try:
             for directory, _children, files in os.walk(projects):
                 for candidate in files:
@@ -441,7 +531,9 @@ class ProjectLocator:
             return matching[0]
         if not matching:
             raise FileNotFoundError(
-                f"could not locate the open FLP for {title!r}; save it once in FL Studio and retry"
+                "Sound Capsule could not identify the saved file for the open FL Studio "
+                f"project {title!r}. Save the project in FL Studio, or if it is already "
+                "saved, restart FL Studio and reopen the project, then retry."
             )
         names = ", ".join(str(path) for path in matching[:4])
         raise FLPUnsupportedError(

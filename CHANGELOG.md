@@ -6,6 +6,13 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-12
+
+### Fixed
+
+- Windows can locate a newly saved project in an external project library before
+  FL Studio flushes that project to its on-disk recent-files list.
+
 ## [0.4.2] - 2026-08-12
 
 ### Added
