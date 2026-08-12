@@ -219,6 +219,7 @@ class CapsuleService:
         *,
         individually: bool,
         include_mixer_insert: bool,
+        include_related_automation: bool,
         playlist_window: PlaylistCaptureWindow,
     ) -> str:
         payload = json.dumps(
@@ -227,6 +228,7 @@ class CapsuleService:
                 "channel_ids": channel_ids,
                 "individually": individually,
                 "include_mixer_insert": include_mixer_insert,
+                "include_related_automation": include_related_automation,
                 "playlist_window": {
                     "start": playlist_window.start,
                     "end": playlist_window.end,
@@ -238,6 +240,133 @@ class CapsuleService:
         ).encode()
         return hashlib.sha256(payload).hexdigest()
 
+    @staticmethod
+    def _related_automation_ids(
+        project: FLPFile,
+        channel_ids: list[int],
+        *,
+        include_mixer_insert: bool,
+        playlist_window: PlaylistCaptureWindow | tuple[int, int] | None,
+    ) -> list[int]:
+        sections = project.channel_sections()
+        sections_by_id = {section.iid: section for section in sections}
+        selected_generator_ids = {
+            iid
+            for iid in channel_ids
+            if iid in sections_by_id and sections_by_id[iid].channel_type != 5
+        }
+        selected_insert_ids = {
+            sections_by_id[iid].mixer_insert
+            for iid in selected_generator_ids
+            if include_mixer_insert and sections_by_id[iid].mixer_insert > 0
+        }
+        automation_ids = [
+            section.iid for section in sections if section.channel_type == 5
+        ]
+        if isinstance(playlist_window, PlaylistCaptureWindow):
+            placements = project.playlist_items_for_channels_in_window(
+                automation_ids, playlist_window
+            )
+        else:
+            placements = project.playlist_items_for_channels(automation_ids)
+            if playlist_window is not None:
+                start, end = playlist_window
+                placements = {
+                    iid: [
+                        item
+                        for item in items
+                        if item.crop_to_window(start, end, ppq=project.ppq)
+                        is not None
+                    ]
+                    for iid, items in placements.items()
+                }
+        discovered: list[int] = []
+        for automation_iid in automation_ids:
+            if not placements.get(automation_iid):
+                continue
+            for _, binding, remote_link in project.automation_connection_records(
+                automation_iid
+            ):
+                event_id = (
+                    binding.target_event_id
+                    if binding is not None
+                    else remote_link.target_event_id
+                    if remote_link is not None
+                    else -1
+                )
+                target = project.classify_automation_event_id(event_id)
+                if target is None:
+                    continue
+                if (
+                    target.kind == "generator_parameter"
+                    and target.source_channel_iid in selected_generator_ids
+                ) or (
+                    target.kind != "generator_parameter"
+                    and target.source_insert_index in selected_insert_ids
+                ):
+                    discovered.append(automation_iid)
+                    break
+        return discovered
+
+    def _resolve_related_automation_capture(
+        self,
+        project: FLPFile,
+        channel_ids: list[int],
+        pattern_id: int,
+        session: BridgeSession | None,
+        *,
+        include_mixer_insert: bool,
+    ) -> tuple[list[int], PlaylistCaptureWindow]:
+        related_anywhere = self._related_automation_ids(
+            project,
+            channel_ids,
+            include_mixer_insert=include_mixer_insert,
+            playlist_window=None,
+        )
+        selection = self._capture_playlist_selection(project, session)
+        if selection is None:
+            if related_anywhere:
+                raise FLPUnsupportedError(
+                    "Select a Playlist range in FL Studio because Find related "
+                    "automation found placed clips for the selected generators"
+                )
+            return channel_ids, self._resolve_capture_window(
+                project,
+                session,
+                pattern_id,
+                ignore_selection=True,
+            )
+
+        related_in_selection = self._related_automation_ids(
+            project,
+            channel_ids,
+            include_mixer_insert=include_mixer_insert,
+            playlist_window=selection,
+        )
+        if related_in_selection:
+            selected = set(channel_ids)
+            return [
+                *channel_ids,
+                *(iid for iid in related_in_selection if iid not in selected),
+            ], self._resolve_capture_window(project, session, pattern_id)
+        return channel_ids, self._resolve_capture_window(
+            project,
+            session,
+            pattern_id,
+            ignore_selection=True,
+        )
+
+    @staticmethod
+    def _capture_playlist_selection(
+        project: FLPFile,
+        session: BridgeSession | None,
+    ) -> tuple[int, int] | None:
+        if session is None:
+            return project.playlist_selection()
+        start = session.playlist_selection_start_ticks
+        end = session.playlist_selection_end_ticks
+        return (start, end) if start >= 0 and end > start else None
+
     def _analyze_capture(
         self,
         project: FLPFile,
@@ -246,6 +375,7 @@ class CapsuleService:
         *,
         individually: bool,
         include_mixer_insert: bool,
+        include_related_automation: bool,
         playlist_window: PlaylistCaptureWindow,
     ) -> CapturePreflight:
         sections_by_id = {
@@ -375,6 +505,7 @@ class CapsuleService:
                 channel_ids,
                 individually=individually,
                 include_mixer_insert=include_mixer_insert,
+                include_related_automation=include_related_automation,
                 playlist_window=playlist_window,
             ),
             selected_channel_ids=channel_ids,
@@ -394,23 +525,31 @@ class CapsuleService:
         project: FLPFile,
         session: BridgeSession | None,
         pattern_id: int,
+        *,
+        ignore_selection: bool = False,
     ) -> PlaylistCaptureWindow:
+        selection_start = (
+            -1
+            if ignore_selection
+            else session.playlist_selection_start_ticks
+            if session is not None
+            else None
+        )
+        selection_end = (
+            -1
+            if ignore_selection
+            else session.playlist_selection_end_ticks
+            if session is not None
+            else None
+        )
         return project.resolve_playlist_capture_window(
             pattern_id,
             playhead=session.song_position_ticks if session is not None else 0,
             pattern_length_steps=(
                 session.pattern_length_steps if session is not None else None
             ),
-            selection_start=(
-                session.playlist_selection_start_ticks
-                if session is not None
-                else None
-            ),
-            selection_end=(
-                session.playlist_selection_end_ticks
-                if session is not None
-                else None
-            ),
+            selection_start=selection_start,
+            selection_end=selection_end,
         )
 
     def capture_preflight(
@@ -419,6 +558,7 @@ class CapsuleService:
         project_path: Path | None = None,
         individually: bool = False,
         include_mixer_insert: bool = True,
+        include_related_automation: bool = False,
     ) -> CapturePreflight:
         session = self.bridge.session() if project_path is None else None
         resolved = self._resolve_project(project_path, session)
@@ -432,13 +572,25 @@ class CapsuleService:
         if not channel_ids:
             raise FLPUnsupportedError("select at least one Channel Rack channel")
         pattern_id = session.current_pattern if session else project.current_pattern
-        playlist_window = self._resolve_capture_window(project, session, pattern_id)
+        if include_related_automation:
+            channel_ids, playlist_window = self._resolve_related_automation_capture(
+                project,
+                channel_ids,
+                pattern_id,
+                session,
+                include_mixer_insert=include_mixer_insert,
+            )
+        else:
+            playlist_window = self._resolve_capture_window(
+                project, session, pattern_id
+            )
         return self._analyze_capture(
             project,
             channel_ids,
             hashlib.sha256(raw).hexdigest(),
             individually=individually,
             include_mixer_insert=include_mixer_insert,
+            include_related_automation=include_related_automation,
             playlist_window=playlist_window,
         )
 
@@ -450,6 +602,7 @@ class CapsuleService:
         preview_wav: Path | None = None,
         individually: bool = False,
         include_mixer_insert: bool = True,
+        include_related_automation: bool = False,
         omit_unsupported_automation: bool = False,
         preflight_token: str | None = None,
         tags: list[str] | None = None,
@@ -485,15 +638,25 @@ class CapsuleService:
             sections_by_id = {
                 section.iid: section for section in project.channel_sections()
             }
-            playlist_window = self._resolve_capture_window(
-                project, session, pattern_id
-            )
+            if include_related_automation:
+                channel_ids, playlist_window = self._resolve_related_automation_capture(
+                    project,
+                    channel_ids,
+                    pattern_id,
+                    session,
+                    include_mixer_insert=include_mixer_insert,
+                )
+            else:
+                playlist_window = self._resolve_capture_window(
+                    project, session, pattern_id
+                )
             preflight = self._analyze_capture(
                 project,
                 channel_ids,
                 source_hash,
                 individually=individually,
                 include_mixer_insert=include_mixer_insert,
+                include_related_automation=include_related_automation,
                 playlist_window=playlist_window,
             )
             if preflight_token is not None and preflight_token != preflight.token:

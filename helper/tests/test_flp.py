@@ -14,6 +14,7 @@ from soundcapsule.flp import (
     AUTOMATION_BINDING_STRUCT,
     REMOTE_CONTROLLER_STRUCT,
     AutomationBinding,
+    AutomationConnection,
     EVENT_ARRANGEMENT_NEW,
     EVENT_AUTOMATION_BINDINGS,
     EVENT_AUTOMATION_POINTS,
@@ -1309,6 +1310,97 @@ class AutomationClipFLPTests(unittest.TestCase):
                          + connections[1].remote_link.raw[4:8]
                          + connections[1].remote_link.raw[12:])
 
+    def test_missing_secondary_binding_is_still_classified_and_filtered(self) -> None:
+        project = fixture_project_with_automation()
+        primary = (2 << 16) | 0x80D5
+        master = 0x70001FC0
+        project.events.extend(
+            [
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, primary, marker=1),
+                ),
+                # FL does not always duplicate secondary Master/global links
+                # in event 216. Event 227 still identifies them completely.
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, master, marker=2),
+                ),
+            ]
+        )
+
+        records = project.automation_connection_records(9)
+        connections = project.automation_connections(9)
+
+        self.assertEqual([item[0] for item in records], ["primary", "linked"])
+        self.assertIsNone(records[1][1])
+        self.assertEqual(records[1][2].target_event_id, master)
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(connections[0].target.kind, "generator_parameter")
+
+    def test_binding_resolution_skips_unbound_secondary_link_before_primary(self) -> None:
+        project = fixture_project_with_automation()
+        primary = (2 << 16) | 0x80D5
+        master = 0x70001FC0
+        project.events.extend(
+            [
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, master, marker=1),
+                ),
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, primary, marker=2),
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            project.automation_bindings()[9].target_event_id,
+            primary,
+        )
+        records = project.automation_connection_records(9)
+        self.assertEqual([item[0] for item in records], ["primary", "linked"])
+        self.assertIsNone(records[1][1])
+
+    def test_arbitrarily_many_links_are_filtered_independently(self) -> None:
+        project = fixture_project_with_automation()
+        primary = (2 << 16) | 0x80D5
+        effect = 0x71C0802A
+        add_automation_target_binding(project, effect, initial_value=42)
+        unsupported = [
+            0x70001FC0 + index for index in range(2, 22)
+        ]
+        targets = [primary, *unsupported[:10], effect, *unsupported[10:]]
+        project.events.extend(
+            data_event(
+                EVENT_REMOTE_CONTROLLER,
+                remote_controller_link(9, target, marker=index + 1),
+            )
+            for index, target in enumerate(targets)
+        )
+
+        records = project.automation_connection_records(9)
+        connections = project.automation_connections(9)
+
+        self.assertEqual(len(records), len(targets))
+        self.assertEqual(
+            [connection.target.kind for connection in connections],
+            ["generator_parameter", "effect_parameter"],
+        )
+        self.assertTrue(all(connection.binding is not None for connection in connections))
+        self.assertEqual(
+            [
+                AutomationConnection.from_bytes(
+                    connection.to_bytes(),
+                    role=connection.role,
+                    target=connection.target,
+                ).target_event_id
+                for connection in connections
+            ],
+            [primary, effect],
+        )
+
     def test_event_216_targets_are_deduplicated_across_controller_links(self) -> None:
         project = fixture_project_with_automation()
         primary = (2 << 16) | 0x80D5
@@ -1373,6 +1465,50 @@ class AutomationClipFLPTests(unittest.TestCase):
         self.assertEqual(preview.automation_bindings()[9].target_event_id, effect)
         links = preview.remote_controller_links()[9]
         self.assertEqual([link.target_event_id for link in links], [effect])
+
+    def test_preview_retargets_binding_when_only_retained_link_has_no_table_row(
+        self,
+    ) -> None:
+        project = fixture_project_with_automation()
+        master = 0x70001FC0
+        effect = 0x71C0802A
+        binding_event = next(
+            event for event in project.events
+            if event.id == EVENT_AUTOMATION_BINDINGS
+        )
+        project.events[project.events.index(binding_event)] = (
+            binding_event.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, master, 0)
+            )
+        )
+        project.events.extend(
+            [
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, master, marker=1),
+                ),
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, effect, marker=2),
+                ),
+            ]
+        )
+
+        preview = project.isolated_preview_project(
+            [2, 9],
+            3,
+            preserve_mixer_inserts=True,
+            automation_target_event_ids={9: [effect]},
+        )
+
+        self.assertEqual(preview.automation_bindings()[9].target_event_id, effect)
+        self.assertEqual(
+            [
+                link.target_event_id
+                for link in preview.remote_controller_links()[9]
+            ],
+            [effect],
+        )
 
     def test_classifies_and_remaps_portable_mixer_automation_targets(self) -> None:
         project = fixture_project()

@@ -638,6 +638,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "show_automation_curves": current.show_automation_curves,
                 "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
                 "save_mixer_insert": current.save_mixer_insert,
+                "include_related_automation": current.include_related_automation,
                 "check_updates_on_startup": current.check_updates_on_startup,
                 "library_dir": str(current.library_dir),
                 "app_path": str(current.app_path) if current.app_path else None,
@@ -732,6 +733,7 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 self.settings.show_automation_curves = current.show_automation_curves
                 self.settings.show_single_channel_name_in_rename = current.show_single_channel_name_in_rename
                 self.settings.save_mixer_insert = current.save_mixer_insert
+                self.settings.include_related_automation = current.include_related_automation
                 self.settings.check_updates_on_startup = current.check_updates_on_startup
                 self.settings.auto_open_with_fl = current.auto_open_with_fl
             return {
@@ -747,17 +749,25 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 "show_automation_curves": current.show_automation_curves,
                 "show_single_channel_name_in_rename": current.show_single_channel_name_in_rename,
                 "save_mixer_insert": current.save_mixer_insert,
+                "include_related_automation": current.include_related_automation,
                 "check_updates_on_startup": current.check_updates_on_startup,
             }
         if command == "set_capture_preferences":
-            if "save_mixer_insert" not in args:
-                raise ValueError("save_mixer_insert is required")
+            preference_names = (
+                "save_mixer_insert",
+                "include_related_automation",
+            )
+            requested = [name for name in preference_names if name in args]
+            if not requested:
+                raise ValueError("a capture preference is required")
             with self.operation_lock:
                 current = Settings.load(self.settings.data_dir)
-                current.save_mixer_insert = bool(args["save_mixer_insert"])
+                for name in requested:
+                    setattr(current, name, bool(args[name]))
                 current.save()
                 self.settings.save_mixer_insert = current.save_mixer_insert
-            return {"save_mixer_insert": current.save_mixer_insert}
+                self.settings.include_related_automation = current.include_related_automation
+            return {name: getattr(current, name) for name in requested}
         if command in {"operation_status", "import_status"}:
             requested_id = str(args.get("operation_id", ""))
             with self.progress_lock:
@@ -899,6 +909,12 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                             self.settings.save_mixer_insert,
                         )
                     ),
+                    include_related_automation=bool(
+                        args.get(
+                            "include_related_automation",
+                            self.settings.include_related_automation,
+                        )
+                    ),
                 )
             return result.to_dict()
         if command == "capture":
@@ -933,6 +949,12 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                             args.get(
                                 "include_mixer_insert",
                                 self.settings.save_mixer_insert,
+                            )
+                        ),
+                        include_related_automation=bool(
+                            args.get(
+                                "include_related_automation",
+                                self.settings.include_related_automation,
                             )
                         ),
                         omit_unsupported_automation=bool(

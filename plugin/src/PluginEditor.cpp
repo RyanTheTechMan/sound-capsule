@@ -1052,7 +1052,8 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
              &brandLogo, &title, &status, &search, &capsuleName, &capsuleNameClear,
              &tagsInput, &tagsInputClear, &selectionSummary, &favoritesOnly,
              &sortBy, &sortDirection, &waveformToggle, &midiToggle, &loopToggle,
-             &list, &saveMixerInsert, &saveGroup, &saveIndividual,
+             &list, &saveMixerInsert, &findRelatedAutomation,
+             &saveGroup, &saveIndividual,
              &connectionStatus, &projectStatus, &patternStatus,
              &connectionSetup, &updateAvailable, &setup, &volumeLabel, &previewVolume})
         addAndMakeVisible(component);
@@ -1071,9 +1072,16 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
     saveMixerInsert.setTooltip(
         "Save the routed non-Master mixer insert, including its controls and effect slots. "
         "Mixer sends and external I/O are not included.");
+    findRelatedAutomation.setToggleState(false, juce::dontSendNotification);
+    findRelatedAutomation.setTooltip(
+        "Automatically include every Automation Clip in the selected Playlist range that "
+        "controls a selected generator or its saved mixer insert and effects. If related "
+        "placed clips exist, Sound Capsule will ask for a Playlist range; otherwise it "
+        "uses the normal playhead capture.");
     capsuleName.setVisible(false);
     tagsInput.setVisible(false);
     saveMixerInsert.setVisible(false);
+    findRelatedAutomation.setVisible(false);
     saveGroup.setVisible(false);
     saveIndividual.setVisible(false);
     list.setRowHeight(84);
@@ -1152,6 +1160,22 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
                                                      juce::dontSendNotification);
                 safe->status.setText(
                     "Could not save mixer preference: " + error,
+                    juce::dontSendNotification);
+            });
+    };
+    findRelatedAutomation.onClick = [this] {
+        const auto requested = findRelatedAutomation.getToggleState();
+        juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
+        sendCommand(
+            "set_capture_preferences",
+            object({{"include_related_automation", requested}}),
+            [safe](juce::var) {}, 5000, true,
+            [safe, requested](const juce::String& error) {
+                if (safe == nullptr) return;
+                safe->findRelatedAutomation.setToggleState(
+                    !requested, juce::dontSendNotification);
+                safe->status.setText(
+                    "Could not save automation preference: " + error,
                     juce::dontSendNotification);
             });
     };
@@ -1373,11 +1397,6 @@ void SoundCapsuleAudioProcessorEditor::resized()
             saveGroup.setBounds(importRow.removeFromRight(130).reduced(2, 0));
             importRow.removeFromRight(8);
         }
-        if (saveMixerInsert.isVisible())
-        {
-            saveMixerInsert.setBounds(importRow.removeFromRight(142).reduced(2, 0));
-            importRow.removeFromRight(6);
-        }
         const auto nameWidth = (importRow.getWidth() - 8) / 2;
         auto nameBounds = importRow.removeFromLeft(nameWidth).reduced(2, 0);
         capsuleName.setBounds(nameBounds);
@@ -1386,6 +1405,16 @@ void SoundCapsuleAudioProcessorEditor::resized()
         auto tagsBounds = importRow.reduced(2, 0);
         tagsInput.setBounds(tagsBounds);
         tagsInputClear.setBounds(tagsBounds.removeFromRight(26).reduced(3, 5));
+        bounds.removeFromBottom(4);
+        auto optionsRow = bounds.removeFromBottom(28);
+        if (saveMixerInsert.isVisible())
+        {
+            saveMixerInsert.setBounds(optionsRow.removeFromLeft(150).reduced(2, 0));
+            optionsRow.removeFromLeft(8);
+        }
+        if (findRelatedAutomation.isVisible())
+            findRelatedAutomation.setBounds(
+                optionsRow.removeFromLeft(190).reduced(2, 0));
         bounds.removeFromBottom(8);
     }
     if (selectionSummary.isVisible())
@@ -2701,11 +2730,14 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         const auto connectionWarningWasVisible = safe->connectionStatus.isVisible();
         const auto importFieldsWereVisible = safe->capsuleName.isVisible();
         const auto mixerInsertWasVisible = safe->saveMixerInsert.isVisible();
+        const auto relatedAutomationWasVisible =
+            safe->findRelatedAutomation.isVisible();
         safe->connectionStatus.setVisible(false);
         safe->connectionSetup.setVisible(false);
         safe->capsuleName.setVisible(true);
         safe->tagsInput.setVisible(true);
         safe->saveMixerInsert.setVisible(true);
+        safe->findRelatedAutomation.setVisible(true);
         safe->capsuleNameClear.setVisible(safe->capsuleNameCustom);
         safe->tagsInputClear.setVisible(safe->tagsInput.getText().trim().isNotEmpty());
         if (safe->status.getText() == "Waiting for FL Studio"
@@ -2720,6 +2752,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         const auto saveVisibilityChanged = safe->saveGroup.isVisible() != (selectedCount > 0)
                                         || safe->saveIndividual.isVisible() != (selectedCount > 1)
                                         || !mixerInsertWasVisible
+                                        || !relatedAutomationWasVisible
                                         || !safe->selectionSummary.isVisible();
         safe->saveGroup.setButtonText(selectedCount > 1 ? "Save selected" : "Save capsule");
         safe->saveGroup.setVisible(selectedCount > 0);
@@ -2786,6 +2819,7 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
     for (auto tag : juce::StringArray::fromTokens(tagsInput.getText(), ",", ""))
         if (tag.trim().isNotEmpty()) tags.add(tag.trim());
     const auto includeMixerInsert = saveMixerInsert.getToggleState();
+    const auto includeRelatedAutomation = findRelatedAutomation.getToggleState();
 
     operationId = juce::Uuid().toString();
     const auto captureOperationId = operationId;
@@ -2806,16 +2840,22 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
         safe->operationOverlayHideAt = 0;
         safe->operationId.clear();
         safe->operationProgressPollInFlight.store(false);
+        if (error.containsIgnoreCase("Select a Playlist range"))
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon,
+                "Select a Playlist range", error, "OK", safe.getComponent());
     };
     const std::function<void(juce::String, bool)> startCapture =
         [safe, captureOperationId, name, individually, tags, includeMixerInsert,
-         showFailure](juce::String preflightToken, bool omitUnsupported) {
+         includeRelatedAutomation, showFailure](juce::String preflightToken,
+                                                 bool omitUnsupported) {
             if (safe == nullptr || safe->operationId != captureOperationId) return;
             safe->operationPollingEnabled = true;
             safe->lastOperationProgressPollAt = 0;
             safe->sendCommand(
                 "capture", object({{"name", name}, {"individually", individually},
                                    {"include_mixer_insert", includeMixerInsert},
+                                   {"include_related_automation", includeRelatedAutomation},
                                    {"omit_unsupported_automation", omitUnsupported},
                                    {"preflight_token", preflightToken},
                                    {"tags", tags}, {"operation_id", captureOperationId}}),
@@ -2835,12 +2875,14 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
                 300000, false, showFailure);
         };
     runAfterProjectSaved([safe, captureOperationId, individually,
-                          includeMixerInsert, showFailure, startCapture] {
+                          includeMixerInsert, includeRelatedAutomation,
+                          showFailure, startCapture] {
         if (safe == nullptr) return;
         safe->sendCommand(
             "capture_preflight",
             object({{"individually", individually},
-                    {"include_mixer_insert", includeMixerInsert}}),
+                    {"include_mixer_insert", includeMixerInsert},
+                    {"include_related_automation", includeRelatedAutomation}}),
             [safe, captureOperationId, showFailure, startCapture](juce::var response) {
                 if (safe == nullptr || safe->operationId != captureOperationId) return;
                 const auto blocking = response.getProperty(
@@ -2921,6 +2963,10 @@ void SoundCapsuleAudioProcessorEditor::checkInitialSetup()
             response.getProperty("show_single_channel_name_in_rename", false));
         safe->saveMixerInsert.setToggleState(
             static_cast<bool>(response.getProperty("save_mixer_insert", true)),
+            juce::dontSendNotification);
+        safe->findRelatedAutomation.setToggleState(
+            static_cast<bool>(response.getProperty(
+                "include_related_automation", false)),
             juce::dontSendNotification);
         safe->updateVolumeDisplay();
         safe->waveformToggle.setWaveformStereo(safe->waveformChannels == WaveformChannels::stereo);
@@ -4485,6 +4531,7 @@ void SoundCapsuleAudioProcessorEditor::sendCommand(const juce::String& command,
                     safe->tagsInput.setVisible(false);
                     safe->tagsInputClear.setVisible(false);
                     safe->saveMixerInsert.setVisible(false);
+                    safe->findRelatedAutomation.setVisible(false);
                     safe->selectionSummary.setVisible(false);
                     safe->saveGroup.setVisible(false);
                     safe->saveIndividual.setVisible(false);

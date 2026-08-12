@@ -26,10 +26,13 @@ class ConfigTests(unittest.TestCase):
 
             settings = Settings.load(data)
             self.assertTrue(settings.save_mixer_insert)
+            self.assertFalse(settings.include_related_automation)
             settings.save_mixer_insert = False
+            settings.include_related_automation = True
             settings.save()
 
             self.assertFalse(Settings.load(data).save_mixer_insert)
+            self.assertTrue(Settings.load(data).include_related_automation)
 
     def test_helper_token_is_private_and_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

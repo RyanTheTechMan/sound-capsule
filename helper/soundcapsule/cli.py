@@ -36,6 +36,11 @@ def parser() -> argparse.ArgumentParser:
         help="save channels without their non-Master mixer insert state",
     )
     capture.add_argument(
+        "--include-related-automation",
+        action="store_true",
+        help="find related Automation Clips inside an explicit Playlist selection",
+    )
+    capture.add_argument(
         "--omit-unsupported-automation",
         action="store_true",
         help="omit unsupported connections and clips with no portable target",
@@ -118,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
                 preview_wav=args.preview,
                 individually=args.individual,
                 include_mixer_insert=not args.no_mixer_insert,
+                include_related_automation=args.include_related_automation,
                 omit_unsupported_automation=args.omit_unsupported_automation,
             )
             _print({"created": [str(item.path) for item in capsules]})

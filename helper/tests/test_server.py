@@ -495,6 +495,7 @@ class ServerTests(unittest.TestCase):
                 project_path=None,
                 individually=True,
                 include_mixer_insert=False,
+                include_related_automation=False,
             )
             self.assertTrue(response["requires_confirmation"])
             self.assertEqual(response["excluded"][0]["clip_name"], "Filter sweep")
@@ -940,6 +941,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertFalse(initial["setup_complete"])
             self.assertTrue(initial["save_mixer_insert"])
+            self.assertFalse(initial["include_related_automation"])
             self.assertTrue(initial["check_updates_on_startup"])
             self.assertTrue(initial["start_preview_at_first_audio"])
             self.assertFalse(initial["normalize_waveform_display"])
@@ -982,11 +984,24 @@ class ServerTests(unittest.TestCase):
                         "args": {"save_mixer_insert": False},
                     }
                 )
+                changed_automation = server.dispatch(
+                    {
+                        "command": "set_capture_preferences",
+                        "args": {"include_related_automation": True},
+                    }
+                )
                 status = server.dispatch({"command": "setup_status", "args": {}})
 
             self.assertEqual(changed, {"save_mixer_insert": False})
+            self.assertEqual(
+                changed_automation, {"include_related_automation": True}
+            )
             self.assertFalse(status["save_mixer_insert"])
+            self.assertTrue(status["include_related_automation"])
             self.assertFalse(Settings.load(root / "data").save_mixer_insert)
+            self.assertTrue(
+                Settings.load(root / "data").include_related_automation
+            )
 
     def test_library_location_switches_without_moving_existing_capsules(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

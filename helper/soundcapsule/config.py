@@ -144,6 +144,7 @@ class Settings:
     show_automation_curves: bool = True
     show_single_channel_name_in_rename: bool = False
     save_mixer_insert: bool = True
+    include_related_automation: bool = False
     check_updates_on_startup: bool = True
     server_host: str = "127.0.0.1"
     server_port: int = 51943

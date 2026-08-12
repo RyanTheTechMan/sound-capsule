@@ -1497,17 +1497,19 @@ class FLPFile:
         unlinked_channels: list[ChannelSection] = []
         for section in automation_channels:
             links = links_by_iid.get(section.iid, ())
-            if not links:
+            linked_target_ids.update(link.target_event_id for link in links)
+            binding = next(
+                (
+                    records_by_target[link.target_event_id]
+                    for link in links
+                    if link.target_event_id in records_by_target
+                ),
+                None,
+            )
+            if binding is None:
                 unlinked_channels.append(section)
                 continue
-            primary_target_id = links[0].target_event_id
-            binding = records_by_target.get(primary_target_id)
-            if binding is None:
-                raise FLPUnsupportedError(
-                    f'automation clip "{section.name}" references a missing target binding'
-                )
             result[section.iid] = binding
-            linked_target_ids.update(link.target_event_id for link in links)
 
         unlinked_records = [
             record
@@ -1578,6 +1580,8 @@ class FLPFile:
             target = self.classify_automation_event_id(event_id)
             if target is None:
                 continue
+            if candidate_binding is None:
+                candidate_binding = binding.with_target_event_id(event_id)
             connections.append(
                 AutomationConnection(
                     role=role,
@@ -1624,19 +1628,19 @@ class FLPFile:
             binding.target_event_id: binding
             for binding in AutomationBinding.parse_many(event.payload)
         }
-        candidates: list[
+        primary: tuple[
+            str, AutomationBinding | None, RemoteControllerLink | None
+        ] | None = None
+        linked: list[
             tuple[str, AutomationBinding | None, RemoteControllerLink | None]
         ] = []
-        for index, link in enumerate(remote_links):
+        for link in remote_links:
             binding = bindings_by_target.get(link.target_event_id)
-            if binding is None:
-                raise FLPUnsupportedError(
-                    f"automation channel {automation_iid} references a missing target binding"
-                )
-            candidates.append(
-                ("primary" if index == 0 else "linked", binding, link)
-            )
-        return candidates
+            if primary is None and link.target_event_id == primary_binding.target_event_id:
+                primary = ("primary", primary_binding, link)
+            else:
+                linked.append(("linked", binding, link))
+        return [primary or ("primary", primary_binding, None), *linked]
 
     def classify_automation_binding(
         self, binding: AutomationBinding
@@ -2593,6 +2597,7 @@ class FLPFile:
         }
         bindings = self.automation_bindings()
         links_by_iid = self.remote_controller_links()
+        allowed_sets: dict[int, set[int]] = {}
         for automation_iid, allowed in allowed_by_automation_iid.items():
             section = automation_sections.get(automation_iid)
             if section is None:
@@ -2603,13 +2608,60 @@ class FLPFile:
                 raise FLPUnsupportedError(
                     f'automation clip "{section.name}" has no retained preview target'
                 )
-            if (
-                not links_by_iid.get(automation_iid)
-                and bindings[automation_iid].target_event_id not in allowed
+            allowed_set = set(allowed)
+            allowed_sets[automation_iid] = allowed_set
+            if bindings[automation_iid].target_event_id in allowed_set:
+                continue
+            if not any(
+                link.target_event_id in allowed_set
+                for link in links_by_iid.get(automation_iid, ())
             ):
                 raise FLPUnsupportedError(
                     f'automation clip "{section.name}" cannot promote a target without an internal-controller link'
                 )
+
+        binding_index = next(
+            index
+            for index, event in enumerate(self.events)
+            if event.id == EVENT_AUTOMATION_BINDINGS
+        )
+        binding_event = self.events[binding_index]
+        binding_records = AutomationBinding.parse_many(binding_event.payload)
+        binding_targets = {
+            record.target_event_id for record in binding_records
+        }
+        binding_users: dict[int, int] = {}
+        for binding in bindings.values():
+            binding_users[binding.target_event_id] = (
+                binding_users.get(binding.target_event_id, 0) + 1
+            )
+        for automation_iid, allowed in allowed_by_automation_iid.items():
+            allowed_set = allowed_sets[automation_iid]
+            primary_binding = bindings[automation_iid]
+            if primary_binding.target_event_id in allowed_set:
+                continue
+            promoted_target = next(
+                link.target_event_id
+                for link in links_by_iid[automation_iid]
+                if link.target_event_id in allowed_set
+            )
+            if promoted_target in binding_targets:
+                continue
+            promoted_binding = primary_binding.with_target_event_id(promoted_target)
+            if binding_users[primary_binding.target_event_id] == 1:
+                record_index = next(
+                    index
+                    for index, record in enumerate(binding_records)
+                    if record.raw == primary_binding.raw
+                )
+                binding_records[record_index] = promoted_binding
+                binding_targets.discard(primary_binding.target_event_id)
+            else:
+                binding_records.append(promoted_binding)
+            binding_targets.add(promoted_target)
+        self.events[binding_index] = binding_event.with_payload(
+            b"".join(record.raw for record in binding_records)
+        )
 
         sanitized: list[Event] = []
         for event in self.events:
@@ -2617,7 +2669,7 @@ class FLPFile:
                 sanitized.append(event)
                 continue
             link = RemoteControllerLink.parse(event.payload)
-            allowed = allowed_by_automation_iid.get(link.source_automation_iid)
+            allowed = allowed_sets.get(link.source_automation_iid)
             if allowed is None or link.target_event_id in allowed:
                 sanitized.append(event)
         self.events = sanitized

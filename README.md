@@ -79,9 +79,14 @@ overwritten and can be revealed from the result message.
 3. Leave **Save mixer insert** enabled to include each generator's non-Master
    mixer insert and effect chain. The choice is remembered; disable it for the
    earlier direct-to-Master capture behavior.
-4. Click **Save capsule** for one channel, **Save selected** for a grouped capsule,
+4. Enable **Find related automation** to automatically include every related
+   Automation Clip placed inside the selected Playlist time range. This option
+   follows **Save mixer insert** for automation targeting insert controls or
+   effects. If related placed clips exist, Sound Capsule asks for an explicit
+   range; when none match the selected range, it uses the normal playhead export.
+5. Click **Save capsule** for one channel, **Save selected** for a grouped capsule,
    or **Save individually** to create one capsule per selected channel.
-5. Sound Capsule saves the capsule to its library and creates an audio preview.
+6. Sound Capsule saves the capsule to its library and creates an audio preview.
 
 ## Use a capsule
 
@@ -139,14 +144,14 @@ or import its embedded contents.
 ## What’s included
 
 Sound Capsule captures generator channels, their active-pattern notes and
-selection-aware Playlist phrase, explicitly selected Automation Clips targeting
-those channels, and—when enabled—each distinct non-Master mixer insert shared by
-the selected generators. Insert identity and controls, EQ, effect-slot order and
-state, slot enable states, and mix levels are restored to pristine inserts in the
-destination project. Master state, external I/O, sends and routing graphs,
-solo/lock/layout state, and audio-track links are not embedded. Third-party
-plug-ins, sample libraries, and other dependencies must be installed on the
-computer where you import the capsule.
+selection-aware Playlist phrase, explicitly selected Automation Clips—and,
+optionally, all related Automation Clips in the selected range—and each enabled
+non-Master mixer insert shared by the selected generators. Insert identity and
+controls, EQ, effect-slot order and state, slot enable states, and mix levels are
+restored to pristine inserts in the destination project. Master state, external
+I/O, sends and routing graphs, solo/lock/layout state, and audio-track links are
+not embedded. Third-party plug-ins, sample libraries, and other dependencies
+must be installed on the computer where you import the capsule.
 
 ## Contributing
 

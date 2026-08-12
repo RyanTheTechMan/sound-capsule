@@ -8,15 +8,6 @@ version's section is also used as its GitHub release notes.
 
 ## [0.4.3] - 2026-08-12
 
-### Fixed
-
-- Windows can locate a newly saved project in an external project library before
-  FL Studio flushes that project to its on-disk recent-files list.
-- Playlist-range previews rebase FL Studio's saved time selection together with
-  the selected clips, preventing command-line renders of an empty silent range.
-
-## [0.4.2] - 2026-08-12
-
 ### Added
 
 - Captures now save a Playlist phrase containing every current-Pattern
@@ -25,31 +16,11 @@ version's section is also used as its GitHub release notes.
 - Without a selection, capture uses the current Pattern occurrence at or
   nearest the playhead, or synthesizes a Pattern-length phrase when the Pattern
   has not been placed in the Playlist.
-
-### Changed
-
-- Capsule schema 6 stores normalized Pattern and Automation Clip placements;
-  imports rebuild the phrase at the destination playhead and scale timing for
-  the destination PPQ. Schemas 1–5 remain readable.
-- Normal schema-6 imports always use a new isolated pattern, even when the
-  current-pattern destination is selected, so phrase repetitions cannot replay
-  unrelated notes already present in the destination pattern. Override behavior
-  is unchanged.
-- Preview rendering now uses Song mode and the captured phrase range instead of
-  inheriting distant Automation Clip placements from the project.
-
-### Fixed
-
-- Saving a Pattern from the middle of a song no longer moves the preview phrase
-  to the beginning while leaving unrelated song-length automation in place.
-- Boundary-crossing Automation Clips retain their correct curve offset after
-  being cropped to the captured phrase.
-
-## [0.4.1] - 2026-08-12
-
-### Added
-
-- Selected Automation Clips can now preserve multiple destinations, including
+- The optional **Find related automation** capture setting automatically adds
+  every Automation Clip in a Playlist selection that controls a selected
+  generator or its included mixer insert and effects. When none match, capture
+  keeps the normal playhead/current-Pattern behavior.
+- Selected Automation Clips can preserve multiple destinations, including
   generator parameters/channel controls and portable controls or effect
   parameters on the generator's saved non-Master insert.
 - Capture preflight warns before dropping Master, global, routing, unrelated,
@@ -57,12 +28,32 @@ version's section is also used as its GitHub release notes.
 
 ### Changed
 
+- Capsule schema 6 stores normalized Pattern and Automation Clip placements;
+  imports rebuild the phrase at the destination playhead and scale timing for
+  the destination PPQ. Schemas 1–5 remain readable.
 - Capsule schema 5 stores semantic automation target identity so imports can
   rebuild mixer event IDs after allocating a fresh destination insert. Schemas
   1–4 remain readable.
+- Normal schema-6 imports always use a new isolated pattern, even when the
+  current-pattern destination is selected, so phrase repetitions cannot replay
+  unrelated notes already present in the destination pattern. Override behavior
+  is unchanged.
+- Preview rendering uses Song mode and the captured phrase range instead of
+  inheriting distant Automation Clip placements from the project.
 
 ### Fixed
 
+- Windows can locate a newly saved project in an external project library before
+  FL Studio flushes that project to its on-disk recent-files list.
+- Playlist-range previews rebase FL Studio's saved time selection together with
+  the selected clips, preventing command-line renders of an empty silent range.
+- Automation Clips with any number of linked targets now retain each portable
+  generator or saved-insert connection independently, discard unsupported
+  connections, and are omitted when no portable connections remain.
+- Saving a Pattern from the middle of a song no longer moves the preview phrase
+  to the beginning while leaving unrelated song-length automation in place.
+- Boundary-crossing Automation Clips retain their correct curve offset after
+  being cropped to the captured phrase.
 - Saving no longer fails merely because a selected Automation Clip targets an
   effect or portable control on the generator's saved mixer insert.
 - Effect automation is remapped to the restored destination slot instead of
