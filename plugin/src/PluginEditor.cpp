@@ -1074,10 +1074,10 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
         "Mixer sends and external I/O are not included.");
     findRelatedAutomation.setToggleState(false, juce::dontSendNotification);
     findRelatedAutomation.setTooltip(
-        "Automatically include every Automation Clip in the selected Playlist range that "
-        "controls a selected generator or its saved mixer insert and effects. If related "
-        "placed clips exist, Sound Capsule will ask for a Playlist range; otherwise it "
-        "uses the normal playhead capture.");
+        "Automatically find and include every Automation Clip in the selected Playlist "
+        "range that controls the selected Channel Rack generator(s), or their saved mixer "
+        "inserts and effects. If related placed clips exist, Sound Capsule will ask for a "
+        "Playlist range; otherwise it uses the normal playhead capture.");
     capsuleName.setVisible(false);
     tagsInput.setVisible(false);
     saveMixerInsert.setVisible(false);
@@ -2762,9 +2762,11 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
             auto selectionText = "Selected in FL: " + juce::String(selectedCount)
                                + (selectedCount == 1 ? " channel" : " channels");
             if (!selectedNames.isEmpty())
-                selectionText << "  —  " << selectedNames.joinIntoString(", ");
+                selectionText << "  " << juce::String::charToString(0x2014) << "  "
+                              << selectedNames.joinIntoString(", ");
             if (selectedAutomationCount > 0)
-                selectionText << "  •  " << selectedAutomationCount
+                selectionText << "  " << juce::String::charToString(0x2022) << "  "
+                              << selectedAutomationCount
                               << (selectedAutomationCount == 1
                                       ? " automation clip"
                                       : " automation clips");
@@ -2902,14 +2904,18 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
                 }
                 juce::StringArray details;
                 const auto shown = juce::jmin(8, excluded->size());
+                const auto bullet = juce::String::charToString(0x2022) + " ";
+                const auto dash = " " + juce::String::charToString(0x2014) + " ";
                 for (int index = 0; index < shown; ++index)
                 {
                     const auto item = (*excluded)[index];
-                    details.add("• " + item.getProperty("clip_name", "Automation Clip").toString()
-                                + " — " + item.getProperty("target", "unsupported target").toString());
+                    details.add(bullet
+                                + item.getProperty("clip_name", "Automation Clip").toString()
+                                + dash
+                                + item.getProperty("target", "unsupported target").toString());
                 }
                 if (excluded->size() > shown)
-                    details.add("• " + juce::String(excluded->size() - shown)
+                    details.add(bullet + juce::String(excluded->size() - shown)
                                 + " more excluded item(s)");
                 const auto message =
                     "Some selected automation content cannot be included in this Playlist phrase:\n\n"

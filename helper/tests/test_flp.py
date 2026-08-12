@@ -228,10 +228,14 @@ def _add_fixture_mixer(project: FLPFile) -> None:
 
 
 def playlist_item(
-    channel_iid: int, *, position: int, length: int, item_size: int = 60
+    channel_iid: int, *, position: int, length: int, item_size: int = 60,
+    track: int = 1,
 ) -> bytes:
     raw = bytearray(item_size)
-    struct.pack_into("<IHHIHH", raw, 0, position, 20_480, channel_iid, length, 499, 0)
+    struct.pack_into(
+        "<IHHIHH", raw, 0, position, 20_480, channel_iid, length,
+        500 - track, 0,
+    )
     raw[16:20] = bytes((120, 0, 64, 0))
     raw[20:24] = bytes((64, 100, 128, 128))
     struct.pack_into("<ff", raw, 24, 0.0, 0.0)
@@ -239,14 +243,15 @@ def playlist_item(
 
 
 def pattern_playlist_item(
-    pattern_id: int, *, position: int, length: int, item_size: int = 60
+    pattern_id: int, *, position: int, length: int, item_size: int = 60,
+    track: int = 1,
 ) -> bytes:
     return PlaylistItem.synthetic_pattern(
         pattern_id,
         position=position,
         length=length,
         item_size=item_size,
-    ).raw
+    ).with_playlist_track(track).raw
 
 
 def automation_points(*points: tuple[float, float, float]) -> bytes:
@@ -1231,6 +1236,35 @@ class PlaylistPhraseFLPTests(unittest.TestCase):
             [item.runtime_id for item in merged.playlist_items_for_pattern(3)],
             [0, 1],
         )
+
+    def test_append_phrase_uses_the_first_empty_playlist_track(self) -> None:
+        destination = fixture_project()
+        destination.events.extend(
+            [
+                scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+                data_event(
+                    EVENT_PLAYLIST,
+                    pattern_playlist_item(
+                        2, position=0, length=384, track=1
+                    )
+                    + playlist_item(
+                        5, position=0, length=384, track=3
+                    ),
+                ),
+                scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+            ]
+        )
+
+        merged = destination.append_playlist_phrase(
+            [PlaylistItem(pattern_playlist_item(3, position=0, length=192))],
+            source_pattern_id=3,
+            destination_pattern_id=4,
+            source_ppq=96,
+            playlist_anchor=480,
+        )
+
+        imported = merged.playlist_items_for_pattern(4)
+        self.assertEqual([item.playlist_track for item in imported], [2])
 
 
 class AutomationClipFLPTests(unittest.TestCase):

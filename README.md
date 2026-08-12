@@ -79,7 +79,7 @@ overwritten and can be revealed from the result message.
 3. Leave **Save mixer insert** enabled to include each generator's non-Master
    mixer insert and effect chain. The choice is remembered; disable it for the
    earlier direct-to-Master capture behavior.
-4. Enable **Find related automation** to automatically include every related
+4. Enable **Auto-find automation** to automatically include every related
    Automation Clip placed inside the selected Playlist time range. This option
    follows **Save mixer insert** for automation targeting insert controls or
    effects. If related placed clips exist, Sound Capsule asks for an explicit

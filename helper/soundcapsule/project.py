@@ -327,7 +327,7 @@ class CapsuleService:
         if selection is None:
             if related_anywhere:
                 raise FLPUnsupportedError(
-                    "Select a Playlist range in FL Studio because Find related "
+                    "Select a Playlist range in FL Studio because Auto-find "
                     "automation found placed clips for the selected generators"
                 )
             return channel_ids, self._resolve_capture_window(

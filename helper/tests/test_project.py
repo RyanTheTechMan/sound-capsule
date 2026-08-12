@@ -1734,7 +1734,7 @@ class ProjectServiceTests(unittest.TestCase):
                 return_value=source.resolve(),
             ), self.assertRaisesRegex(
                 FLPUnsupportedError,
-                "Select a Playlist range.*Find related automation",
+                "Select a Playlist range.*Auto-find automation",
             ):
                 service.capture_preflight(include_related_automation=True)
 
@@ -2516,11 +2516,13 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(result.channel_mapping, {2: 6, 9: 7})
             item = merged.playlist_items_for_channels([7])[7][0]
             self.assertEqual((item.position, item.length), (1440, 384))
+            self.assertEqual(item.playlist_track, 2)
             phrase = merged.playlist_items_for_pattern(result.pattern_id)
             self.assertEqual(
                 [(item.position, item.length) for item in phrase],
                 [(1440, 384)],
             )
+            self.assertEqual([item.playlist_track for item in phrase], [1])
 
     def test_import_restores_effect_automation_on_allocated_insert(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

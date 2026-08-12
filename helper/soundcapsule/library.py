@@ -21,7 +21,7 @@ from .capsule import (
     unique_legacy_capsule_path,
 )
 
-INDEX_VERSION = 13
+INDEX_VERSION = 14
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -360,20 +360,47 @@ class CapsuleLibrary:
         capsule: Capsule,
         manifest,
     ) -> tuple[list[list[float | int]], list[list], float]:
-        indexed_notes = [
+        source_notes = [
             (channel_index, note)
             for channel_index, channel in enumerate(manifest.channels)
             for note in capsule.read_notes(channel)
         ]
-        indexed_notes.sort(
+        source_notes.sort(
             key=lambda item: (item[1].position, item[1].key, item[1].length, item[0])
         )
+        indexed_notes: list[tuple[int, float, float, int]] = []
+        if manifest.playlist_phrase is not None:
+            for item in capsule.read_playlist_phrase():
+                content_start, content_end = item.pattern_content_window()
+                content_span = content_end - content_start
+                timeline_scale = item.length / content_span
+                for channel_index, note in source_notes:
+                    note_start = float(note.position)
+                    note_end = note_start + max(1, note.length)
+                    visible_start = max(note_start, content_start)
+                    visible_end = min(note_end, content_end)
+                    if visible_end <= visible_start:
+                        continue
+                    indexed_notes.append(
+                        (
+                            channel_index,
+                            item.position
+                            + (visible_start - content_start) * timeline_scale,
+                            (visible_end - visible_start) * timeline_scale,
+                            note.key,
+                        )
+                    )
+        else:
+            indexed_notes = [
+                (channel_index, float(note.position), float(max(1, note.length)), note.key)
+                for channel_index, note in source_notes
+            ]
+        indexed_notes.sort(key=lambda item: (item[1], item[3], item[2], item[0]))
         if len(indexed_notes) > 2048:
             stride = math.ceil(len(indexed_notes) / 2048)
             indexed_notes = indexed_notes[::stride]
-        notes = [note for _, note in indexed_notes]
         note_end = max(
-            (note.position + max(1, note.length) for note in notes), default=0
+            (position + length for _, position, length, _ in indexed_notes), default=0
         )
         raw_automation: list[tuple[int, list[tuple[float, float, float]]]] = []
         automation_end = 0.0
@@ -383,7 +410,11 @@ class CapsuleLibrary:
                 for automation in manifest.automations
                 for item in capsule.read_automation_playlist(automation)
             ]
-            anchor = min((item.position for item in all_items), default=0)
+            anchor = (
+                0
+                if manifest.playlist_phrase is not None
+                else min((item.position for item in all_items), default=0)
+            )
             channel_indexes = {
                 channel.source_iid: index
                 for index, channel in enumerate(manifest.channels)
@@ -438,7 +469,12 @@ class CapsuleLibrary:
             return [], [], 1.0
         exact_timing = manifest.schema_version >= 2 and manifest.source_tempo_bpm is not None
         if exact_timing:
-            end = max(1.0, note_end, automation_end)
+            phrase_end = (
+                float(manifest.playlist_phrase.duration_ticks)
+                if manifest.playlist_phrase is not None
+                else 0.0
+            )
+            end = max(1.0, phrase_end, note_end, automation_end)
             preview_duration = capsule.preview_duration_seconds()
             midi_duration = end * 60.0 / (
                 manifest.source_ppq * manifest.source_tempo_bpm
@@ -456,17 +492,17 @@ class CapsuleLibrary:
             ) if manifest.source_pattern_length_steps else 0
             end = max(1.0, note_end, pattern_end, automation_end)
             playback_end = max(note_end, automation_end) / end
-        low = min((note.key for note in notes), default=0)
-        high = max((note.key for note in notes), default=0)
+        low = min((key for _, _, _, key in indexed_notes), default=0)
+        high = max((key for _, _, _, key in indexed_notes), default=0)
         pitch_span = max(1, high - low)
         preview = [
             [
-                round(note.position / end, 6),
-                round(max(1, note.length) / end, 6),
-                round((note.key - low) / pitch_span, 6),
+                round(position / end, 6),
+                round(length / end, 6),
+                round((key - low) / pitch_span, 6),
                 channel_index,
             ]
-            for channel_index, note in indexed_notes
+            for channel_index, position, length, key in indexed_notes
         ]
         automation_preview = [
             [

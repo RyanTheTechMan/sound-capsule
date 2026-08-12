@@ -16,7 +16,7 @@ version's section is also used as its GitHub release notes.
 - Without a selection, capture uses the current Pattern occurrence at or
   nearest the playhead, or synthesizes a Pattern-length phrase when the Pattern
   has not been placed in the Playlist.
-- The optional **Find related automation** capture setting automatically adds
+- The optional **Auto-find automation** capture setting automatically adds
   every Automation Clip in a Playlist selection that controls a selected
   generator or its included mixer insert and effects. When none match, capture
   keeps the normal playhead/current-Pattern behavior.
@@ -61,6 +61,12 @@ version's section is also used as its GitHub release notes.
 - The app now requires an exact helper-version match and replaces a stale
   helper it launched, preventing new capture commands from reaching an older
   runtime that does not implement them.
+- MIDI previews expand every saved Pattern placement across the Playlist phrase,
+  including repetitions, gaps, and notes cropped by a cut Pattern clip.
+- Imported Pattern phrases and Automation Clips are assigned to separate empty
+  Playlist tracks instead of inheriting occupied source-project lanes.
+- Automation preflight lists use explicit Unicode code points, preventing a
+  malformed bullet prefix in Windows warning dialogs.
 
 ## [0.4.0] - 2026-08-10
 

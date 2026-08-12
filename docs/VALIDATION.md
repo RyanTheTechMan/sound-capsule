@@ -127,7 +127,7 @@ release is claimed as host-tested:
    inserts. Confirm unselected and out-of-window automation is excluded; Master,
    global, routing, send, and unrelated targets must produce the omission warning
    and must not appear in the imported project.
-   Then select only the generators, enable **Find related automation**, and
+   Then select only the generators, enable **Auto-find automation**, and
    confirm every related clip inside the range is added automatically. Verify
    effect-targeted clips follow **Save mixer insert**, out-of-range clips stay
    excluded and fall back to the playhead, unrelated generators need no range,

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from soundcapsule.capsule import Capsule
+from soundcapsule.flp import PlaylistCaptureWindow, PlaylistItem
 from soundcapsule.library import CapsuleLibrary
 from test_flp import (
     fixture_project,
@@ -264,8 +265,10 @@ class LibraryTests(unittest.TestCase):
                 (note for note in project.pattern_notes()[3] if note.rack_channel == 2),
                 key=lambda note: (note.position, note.key),
             )[0]
-            note_end = source_note.position + source_note.length
-            self.assertAlmostEqual(note_preview[0][0], source_note.position / note_end, places=6)
+            phrase_end = 16 * project.ppq / 4
+            self.assertAlmostEqual(
+                note_preview[0][0], source_note.position / phrase_end, places=6
+            )
 
             summary = library.list("dark", include_previews=False)[0]
             self.assertNotIn("note_preview", summary)
@@ -318,12 +321,55 @@ class LibraryTests(unittest.TestCase):
 
             row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
             notes = json.loads(row["note_preview"])
-            note_end = 24 + 96
-            midi_seconds = note_end * 60.0 / (project.ppq * project.tempo_bpm)
+            phrase_end = 16 * project.ppq / 4
+            midi_seconds = phrase_end * 60.0 / (project.ppq * project.tempo_bpm)
 
-            self.assertAlmostEqual(notes[0][0], 24 / note_end, places=6)
-            self.assertAlmostEqual(notes[0][1], 96 / note_end, places=6)
+            self.assertAlmostEqual(notes[0][0], 24 / phrase_end, places=6)
+            self.assertAlmostEqual(notes[0][1], 96 / phrase_end, places=6)
             self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
+
+    def test_phrase_midi_preview_repeats_and_crops_pattern_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview, duration_seconds=4.0)
+            project = fixture_project()
+            first = PlaylistItem.synthetic_pattern(
+                3, position=0, length=144, item_size=60
+            )
+            cropped = PlaylistItem.synthetic_pattern(
+                3, position=0, length=192, item_size=60
+            ).crop_to_window(48, 144, ppq=project.ppq, destination_anchor=192)
+            self.assertIsNotNone(cropped)
+            window = PlaylistCaptureWindow(
+                0, 384, "selection", (first, cropped)
+            )
+            capsule = Capsule.build(
+                root / "library" / "Phrase.flcapsule",
+                name="Phrase",
+                project=project,
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                playlist_window=window,
+            )
+            library = CapsuleLibrary(root / "library", root / "index.sqlite3")
+            library.reindex()
+
+            row = next(
+                item for item in library.list() if item["id"] == capsule.manifest.id
+            )
+            notes = json.loads(row["note_preview"])
+
+            self.assertEqual(len(notes), 2)
+            self.assertAlmostEqual(notes[0][0], 24 / 384, places=6)
+            self.assertAlmostEqual(notes[0][1], 96 / 384, places=6)
+            self.assertAlmostEqual(notes[1][0], 192 / 384, places=6)
+            self.assertAlmostEqual(notes[1][1], 72 / 384, places=6)
+            midi_seconds = 384 * 60.0 / (project.ppq * project.tempo_bpm)
+            self.assertAlmostEqual(
+                row["midi_playback_end"], midi_seconds / 4.0, places=6
+            )
 
     def test_automation_preview_overlays_the_shared_midi_timeline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -370,7 +416,7 @@ class LibraryTests(unittest.TestCase):
             library.reindex()
 
             row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
-            midi_seconds = 120 * 60.0 / (project.ppq * project.tempo_bpm)
+            midi_seconds = 384 * 60.0 / (project.ppq * project.tempo_bpm)
 
             self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
 

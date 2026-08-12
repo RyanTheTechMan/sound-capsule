@@ -281,7 +281,7 @@ private:
     juce::ListBox list{"Capsule library", this};
     juce::Label libraryEmptyState;
     juce::ToggleButton saveMixerInsert{"Save mixer insert"};
-    juce::ToggleButton findRelatedAutomation{"Find related automation"};
+    juce::ToggleButton findRelatedAutomation{"Auto-find automation"};
     juce::TextButton saveGroup{"Save selected"};
     juce::TextButton saveIndividual{"Save individually"};
     juce::TextButton undoImport{"Undo import"};

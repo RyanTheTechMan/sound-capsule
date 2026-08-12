@@ -205,6 +205,7 @@ AUTOMATION_CONNECTION_MAGIC = b"SCA5"
 AUTOMATION_POINT_STRUCT = struct.Struct("<ddf4s")
 AUTOMATION_POINT_HEADER_SIZE = 21
 PLAYLIST_ITEM_SIZES = (88, 60, 32)
+PLAYLIST_TRACK_COUNT = 500
 
 SUPPORTED_PROJECT_MAJOR = 26
 
@@ -734,6 +735,14 @@ class PlaylistItem:
         return struct.unpack_from("<I", self.raw, 8)[0]
 
     @property
+    def playlist_track(self) -> int:
+        """Return FL Studio's one-based visible Playlist track number."""
+        reverse_id = struct.unpack_from("<H", self.raw, 12)[0]
+        if reverse_id >= PLAYLIST_TRACK_COUNT:
+            raise FLPUnsupportedError("Playlist item has an invalid track number")
+        return PLAYLIST_TRACK_COUNT - reverse_id
+
+    @property
     def end_position(self) -> int:
         return self.position + self.length
 
@@ -746,6 +755,19 @@ class PlaylistItem:
         if not self.is_pattern:
             return None
         return self.item_index - self.pattern_base
+
+    def pattern_content_window(self) -> tuple[float, float]:
+        """Return the source Pattern-tick interval played by this placement."""
+        if not self.is_pattern:
+            raise FLPUnsupportedError(
+                "cannot read Pattern crop offsets from a channel clip"
+            )
+        start_offset, end_offset = struct.unpack_from("<II", self.raw, 24)
+        if start_offset == end_offset == 0xFFFFFFFF:
+            return 0.0, float(self.length)
+        if end_offset > start_offset:
+            return float(start_offset), float(end_offset)
+        raise FLPUnsupportedError("Pattern placement has unsupported crop offsets")
 
     @property
     def muted(self) -> bool:
@@ -771,6 +793,13 @@ class PlaylistItem:
         flags = struct.unpack_from("<H", raw, 18)[0]
         flags = flags | 0x2000 if muted else flags & ~0x2000
         struct.pack_into("<H", raw, 18, flags)
+        return PlaylistItem(bytes(raw))
+
+    def with_playlist_track(self, track: int) -> "PlaylistItem":
+        if not 1 <= track <= PLAYLIST_TRACK_COUNT:
+            raise FLPUnsupportedError("destination Playlist track is invalid")
+        raw = bytearray(self.raw)
+        struct.pack_into("<H", raw, 12, PLAYLIST_TRACK_COUNT - track)
         return PlaylistItem(bytes(raw))
 
     def crop_to_window(
@@ -807,17 +836,8 @@ class PlaylistItem:
             return PlaylistItem(bytes(raw))
 
         if self.is_pattern:
-            start_offset, end_offset = struct.unpack_from("<II", self.raw, 24)
-            if start_offset == end_offset == 0xFFFFFFFF:
-                content_start = 0.0
-                content_span = float(self.length)
-            elif end_offset > start_offset:
-                content_start = float(start_offset)
-                content_span = float(end_offset - start_offset)
-            else:
-                raise FLPUnsupportedError(
-                    "Pattern placement has unsupported crop offsets"
-                )
+            content_start, content_end = self.pattern_content_window()
+            content_span = content_end - content_start
             scale = content_span / self.length
             cropped_start = round(content_start + left * scale)
             cropped_end = round(content_start + right * scale)
@@ -1875,6 +1895,24 @@ class FLPFile:
         if next_id > 0xFFFFFFFF:
             raise FLPUnsupportedError("the Playlist has no available runtime IDs")
         return next_id
+
+    @staticmethod
+    def _empty_playlist_tracks(
+        items: Sequence[PlaylistItem], count: int
+    ) -> list[int]:
+        if count < 0:
+            raise ValueError("Playlist track count cannot be negative")
+        occupied = {item.playlist_track for item in items}
+        available = [
+            track
+            for track in range(1, PLAYLIST_TRACK_COUNT + 1)
+            if track not in occupied
+        ]
+        if len(available) < count:
+            raise FLPUnsupportedError(
+                "the destination Playlist has no empty tracks for this capsule"
+            )
+        return available[:count]
 
     def resolve_playlist_capture_window(
         self,
@@ -3025,6 +3063,7 @@ class FLPFile:
             if destination_template is not None
             else target._playlist_item_size()
         )
+        destination_track = target._empty_playlist_tracks(destination_items, 1)[0]
         remapped = [
             item.remap_pattern(
                 destination_pattern_id,
@@ -3032,7 +3071,9 @@ class FLPFile:
                 destination_anchor=playlist_anchor,
                 source_ppq=source_ppq,
                 destination_ppq=target.ppq,
-            ).adapt_size(destination_size, template=destination_template)
+            ).with_playlist_track(destination_track).adapt_size(
+                destination_size, template=destination_template
+            )
             for item in items
         ]
         next_runtime_id = target._next_playlist_runtime_id(destination_items)
@@ -3216,6 +3257,17 @@ class FLPFile:
         playlist_index = self._ensure_current_playlist_event()
         if source_anchor is None:
             source_anchor = min(item.position for item in source_items)
+        playlist = self.events[playlist_index]
+        destination_items = PlaylistItem.parse_many(playlist.payload)
+        destination_tracks = self._empty_playlist_tracks(
+            destination_items, len(automation_sections)
+        )
+        track_by_source_iid = {
+            section.iid: track
+            for section, track in zip(
+                automation_sections, destination_tracks, strict=True
+            )
+        }
         remapped_items = [
             item.remap_channel(
                 mapping[source_iid],
@@ -3223,12 +3275,10 @@ class FLPFile:
                 destination_anchor=destination_anchor,
                 source_ppq=source_ppq,
                 destination_ppq=self.ppq,
-            )
+            ).with_playlist_track(track_by_source_iid[source_iid])
             for source_iid in (section.iid for section in automation_sections)
             for item in playlist_items[source_iid]
         ]
-        playlist = self.events[playlist_index]
-        destination_items = PlaylistItem.parse_many(playlist.payload)
         destination_template = destination_items[0] if destination_items else None
         destination_size = (
             destination_template.record_size
