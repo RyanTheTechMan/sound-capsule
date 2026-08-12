@@ -25,11 +25,34 @@ juce::File soundCapsuleApplication()
     return current;
 }
 
+bool setupPayloadIsComplete(const juce::File& root)
+{
+    const auto helper = root.getChildFile("Helper").getChildFile(
+       #if JUCE_WINDOWS
+        "Sound Capsule Helper.exe"
+       #else
+        "Sound Capsule Helper"
+       #endif
+    );
+    const auto bridge = root.getChildFile("fl-studio")
+        .getChildFile("SoundCapsule").getChildFile("device_SoundCapsule.py");
+    return helper.existsAsFile() && bridge.existsAsFile();
+}
+
 juce::File installedSetupRoot()
 {
     const auto application = soundCapsuleApplication();
+   #if JUCE_MAC
+    // ZIP users commonly move only the .app into /Applications. Keep the
+    // helper truly self-contained so that move does not strand the adjacent
+    // Setup directory from the downloaded archive.
+    const auto embedded = application.getChildFile("Contents")
+        .getChildFile("Resources").getChildFile("Setup");
+    if (setupPayloadIsComplete(embedded))
+        return embedded;
+   #endif
     const auto adjacent = application.getParentDirectory().getChildFile("Setup");
-    if (adjacent.isDirectory())
+    if (setupPayloadIsComplete(adjacent))
         return adjacent;
    #if JUCE_MAC
     return juce::File("/Library/Application Support/SoundCapsule/Setup");

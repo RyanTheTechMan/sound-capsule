@@ -63,10 +63,15 @@ version's section is also used as its GitHub release notes.
   runtime that does not implement them.
 - MIDI previews expand every saved Pattern placement across the Playlist phrase,
   including repetitions, gaps, and notes cropped by a cut Pattern clip.
+- MIDI preview playback stays aligned with repeated and cut Pattern notes when
+  a captured Playlist phrase contains trailing empty time.
 - Imported Pattern phrases and Automation Clips are assigned to separate empty
   Playlist tracks instead of inheriting occupied source-project lanes.
 - Automation preflight lists use explicit Unicode code points, preventing a
   malformed bullet prefix in Windows warning dialogs.
+- The macOS application carries its helper and FL Studio bridge inside the app
+  bundle, so moving only `Sound Capsule.app` out of the release ZIP no longer
+  leaves the self-contained helper behind.
 
 ## [0.4.0] - 2026-08-10
 

@@ -35,6 +35,16 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSOUNDCAPSULE_UNIVERSAL_MACOS=OFF -DSOUNDCAPSULE_BUILD_PLUGIN=ON
       - name: Build VST3
         run: cmake --build build --config Release --parallel 4
+      - name: Stage self-contained macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          APP_PATH="build/plugin/SoundCapsule_artefacts/Release/Standalone/Sound Capsule.app"
+          HELPER_PATH="build/frozen-helper/Sound Capsule Helper"
+          python scripts/stage_macos_app.py --app "$APP_PATH" --helper "$HELPER_PATH"
+          codesign --force --deep --sign - "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          test -x "$APP_PATH/Contents/Resources/Setup/Helper/Sound Capsule Helper"
       - name: Test preview and FL version behavior
         run: ctest --test-dir build -C Release --output-on-failure
 

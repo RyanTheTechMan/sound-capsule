@@ -191,6 +191,9 @@ jobs:
             --output build/frozen-helper \
             --target-architecture universal2 \
             --codesign-identity "$IDENTITY_HASH"
+          python scripts/stage_macos_app.py \
+            --app "$APP_PATH" \
+            --helper "$HELPER_PATH"
           INSTALLER_IDENTITY_LINE=$(security find-identity -v "$KEYCHAIN_PATH" \
             | grep 'Developer ID Installer' | head -1 || true)
           test -n "$INSTALLER_IDENTITY_LINE" || {
@@ -217,6 +220,8 @@ jobs:
             "$APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$VST3_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          test -x "$APP_PATH/Contents/Resources/Setup/Helper/Sound Capsule Helper"
+          test -f "$APP_PATH/Contents/Resources/Setup/fl-studio/SoundCapsule/device_SoundCapsule.py"
           codesign --verify --strict --verbose=2 "$HELPER_PATH/Sound Capsule Helper"
           codesign --verify --deep --strict --verbose=2 \
             "$HELPER_PATH/_internal/Python.framework"

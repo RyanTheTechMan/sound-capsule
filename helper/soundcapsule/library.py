@@ -21,7 +21,7 @@ from .capsule import (
     unique_legacy_capsule_path,
 )
 
-INDEX_VERSION = 14
+INDEX_VERSION = 15
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS capsules (
@@ -476,7 +476,14 @@ class CapsuleLibrary:
             )
             end = max(1.0, phrase_end, note_end, automation_end)
             preview_duration = capsule.preview_duration_seconds()
-            midi_duration = end * 60.0 / (
+            # Phrase previews keep their saved trailing space in the geometry,
+            # but the UI expands that geometry only through the last visible
+            # MIDI/automation event.  Map that displayed endpoint to the same
+            # instant in the rendered WAV; using the entire phrase duration
+            # here makes repeated or cut placements visibly run ahead of audio
+            # whenever the captured range has an empty tail.
+            displayed_content_end = max(note_end, automation_end)
+            midi_duration = displayed_content_end * 60.0 / (
                 manifest.source_ppq * manifest.source_tempo_bpm
             )
             playback_end = (

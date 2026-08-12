@@ -322,11 +322,15 @@ class LibraryTests(unittest.TestCase):
             row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
             notes = json.loads(row["note_preview"])
             phrase_end = 16 * project.ppq / 4
-            midi_seconds = phrase_end * 60.0 / (project.ppq * project.tempo_bpm)
+            visible_midi_seconds = 120 * 60.0 / (
+                project.ppq * project.tempo_bpm
+            )
 
             self.assertAlmostEqual(notes[0][0], 24 / phrase_end, places=6)
             self.assertAlmostEqual(notes[0][1], 96 / phrase_end, places=6)
-            self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
+            self.assertAlmostEqual(
+                row["midi_playback_end"], visible_midi_seconds / 4.0, places=6
+            )
 
     def test_phrase_midi_preview_repeats_and_crops_pattern_notes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -367,9 +371,13 @@ class LibraryTests(unittest.TestCase):
             self.assertAlmostEqual(notes[1][0], 192 / 384, places=6)
             self.assertAlmostEqual(notes[1][1], 72 / 384, places=6)
             midi_seconds = 384 * 60.0 / (project.ppq * project.tempo_bpm)
-            self.assertAlmostEqual(
-                row["midi_playback_end"], midi_seconds / 4.0, places=6
+            visible_midi_seconds = 264 * 60.0 / (
+                project.ppq * project.tempo_bpm
             )
+            self.assertAlmostEqual(
+                row["midi_playback_end"], visible_midi_seconds / 4.0, places=6
+            )
+            self.assertLess(visible_midi_seconds, midi_seconds)
 
     def test_automation_preview_overlays_the_shared_midi_timeline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -416,9 +424,13 @@ class LibraryTests(unittest.TestCase):
             library.reindex()
 
             row = next(item for item in library.list() if item["id"] == capsule.manifest.id)
-            midi_seconds = 384 * 60.0 / (project.ppq * project.tempo_bpm)
+            visible_midi_seconds = 120 * 60.0 / (
+                project.ppq * project.tempo_bpm
+            )
 
-            self.assertAlmostEqual(row["midi_playback_end"], midi_seconds / 4.0, places=6)
+            self.assertAlmostEqual(
+                row["midi_playback_end"], visible_midi_seconds / 4.0, places=6
+            )
 
     def test_v1_midi_preview_keeps_legacy_pattern_length_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

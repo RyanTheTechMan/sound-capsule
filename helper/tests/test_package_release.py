@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from scripts.package_release import copy_setup_payload, find_one
+from scripts.stage_macos_app import stage_macos_setup
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +84,28 @@ class PackageReleaseTests(unittest.TestCase):
             )
             self.assertFalse((destination / "Helper" / "soundcapsule").exists())
             self.assertFalse((destination / "scripts").exists())
+
+    def test_macos_app_keeps_setup_payload_when_moved_without_archive_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "Sound Capsule.app"
+            (app / "Contents" / "MacOS").mkdir(parents=True)
+            helper = root / "Sound Capsule Helper"
+            helper.mkdir()
+            executable = helper / "Sound Capsule Helper"
+            executable.write_bytes(b"helper")
+            executable.chmod(0o755)
+
+            destination = stage_macos_setup(app, helper)
+            moved_app = root / "Applications" / app.name
+            moved_app.parent.mkdir()
+            app.rename(moved_app)
+
+            embedded = moved_app / destination.relative_to(app)
+            self.assertTrue((embedded / "Helper" / "Sound Capsule Helper").is_file())
+            self.assertTrue(
+                (embedded / "fl-studio" / "SoundCapsule" / "device_SoundCapsule.py").is_file()
+            )
 
 
 if __name__ == "__main__":
