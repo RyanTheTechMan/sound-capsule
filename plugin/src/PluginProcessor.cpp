@@ -53,18 +53,35 @@ juce::File frozenHelperExecutable()
     );
 }
 
-bool compatibleHelperIsRunning(int timeoutMs)
+enum class HelperCompatibility
+{
+    unavailable,
+    compatible,
+    incompatible
+};
+
+HelperCompatibility helperCompatibility(int timeoutMs)
 {
     try
     {
         const auto response = HelperClient().request(
             "ping", juce::var(new juce::DynamicObject()), nullptr, timeoutMs);
-        return response.getProperty("server_version", "").toString().isNotEmpty();
+        return response.getProperty("server_version", "").toString()
+                     == JucePlugin_VersionString
+                 ? HelperCompatibility::compatible
+                 : HelperCompatibility::incompatible;
     }
-    catch (const std::exception&)
+    catch (const std::exception& error)
     {
-        return false;
+        return juce::String(error.what()).contains("does not match app")
+                 ? HelperCompatibility::incompatible
+                 : HelperCompatibility::unavailable;
     }
+}
+
+bool compatibleHelperIsRunning(int timeoutMs)
+{
+    return helperCompatibility(timeoutMs) == HelperCompatibility::compatible;
 }
 
 bool waitForCompatibleHelper(int timeoutMs)
@@ -361,7 +378,14 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
         if (compatibleHelperIsRunning(350))
             return true;
         if (helperProcess != nullptr && helperProcess->isRunning())
-            return waitForCompatibleHelper(3000) || helperProcess->isRunning();
+        {
+            if (waitForCompatibleHelper(3000))
+                return true;
+            if (helperCompatibility(350) != HelperCompatibility::incompatible)
+                return true;
+            helperProcess->kill();
+            helperProcess.reset();
+        }
 
         helperProcess = std::make_unique<juce::ChildProcess>();
         if (!helperProcess->start(
@@ -373,9 +397,15 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
         if (waitForCompatibleHelper(5000))
             return true;
         if (helperProcess->isRunning())
-            return true; // A large first reindex may still be finishing.
+        {
+            if (helperCompatibility(350) != HelperCompatibility::incompatible)
+                return true; // A matching helper may still be indexing a large library.
+            helperProcess->kill();
+        }
         helperProcess.reset();
-        return false;
+        // A development build may coexist with an older installed release.
+        // Fall through to its current source helper instead of accepting the
+        // stale frozen helper merely because it implements protocol version 2.
     }
 
     // Development/source-tree fallback. Native releases always use the
@@ -419,7 +449,11 @@ bool SoundCapsuleAudioProcessor::ensureHelperRunning(bool refreshSetup)
     if (waitForCompatibleHelper(5000))
         return true;
     if (helperProcess->isRunning())
-        return true; // A large first reindex may still be finishing.
+    {
+        if (helperCompatibility(350) != HelperCompatibility::incompatible)
+            return true; // A matching helper may still be indexing a large library.
+        helperProcess->kill();
+    }
     helperProcess.reset();
     return false;
 }

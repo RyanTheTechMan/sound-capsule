@@ -886,6 +886,19 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                 return self.service.library.add_capsules(
                     [Path(path) for path in raw_paths]
                 )
+        if command == "capture_preflight":
+            with self.operation_lock:
+                result = self.service.capture_preflight(
+                    project_path=Path(args["project"]) if args.get("project") else None,
+                    individually=bool(args.get("individually", False)),
+                    include_mixer_insert=bool(
+                        args.get(
+                            "include_mixer_insert",
+                            self.settings.save_mixer_insert,
+                        )
+                    ),
+                )
+            return result.to_dict()
         if command == "capture":
             raw_tags = args.get("tags", [])
             if not isinstance(raw_tags, list):
@@ -919,6 +932,14 @@ class SoundCapsuleServer(socketserver.ThreadingTCPServer):
                                 "include_mixer_insert",
                                 self.settings.save_mixer_insert,
                             )
+                        ),
+                        omit_unsupported_automation=bool(
+                            args.get("omit_unsupported_automation", False)
+                        ),
+                        preflight_token=(
+                            str(args["preflight_token"])
+                            if args.get("preflight_token")
+                            else None
                         ),
                         tags=[str(tag)[:100] for tag in raw_tags][:100],
                         progress_callback=capture_progress,

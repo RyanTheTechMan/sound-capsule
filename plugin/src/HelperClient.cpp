@@ -118,6 +118,14 @@ juce::var HelperClient::request(const juce::String& command, const juce::var& ar
         != helperProtocolVersion)
         throw std::runtime_error(
             "The running Sound Capsule helper is incompatible; close older app instances and retry");
+    const auto serverVersion = parsed.getProperty(
+        "server_version", "").toString();
+    if (serverVersion != JucePlugin_VersionString)
+        throw std::runtime_error(
+            ("Sound Capsule helper " + serverVersion
+             + " does not match app " + JucePlugin_VersionString
+             + "; close older app instances and run Retry Setup")
+                .toStdString());
     if (!static_cast<bool>(parsed.getProperty("ok", false)))
         throw std::runtime_error(parsed.getProperty("error", "Helper request failed").toString().toStdString());
     return parsed;

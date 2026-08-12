@@ -49,6 +49,7 @@ EVENT_PLUGIN_LOCATION = 212
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
 EVENT_AUTOMATION_BINDINGS = 216
+EVENT_REMOTE_CONTROLLER = 227
 EVENT_AUTOMATION_POINTS = 234
 EVENT_PLAYLIST = 233
 EVENT_ARRANGEMENT_NEW = 99
@@ -85,6 +86,16 @@ MIXER_PARAM_HIGH_FREQ = 218
 MIXER_PARAM_LOW_Q = 224
 MIXER_PARAM_MID_Q = 225
 MIXER_PARAM_HIGH_Q = 226
+MIXER_AUTOMATION_NAMESPACE = 0x70000000
+MIXER_AUTOMATION_CONTROL_BASE = 0x1F00
+MIXER_AUTOMATION_EFFECT_PARAMETER_BASE = 0x8000
+MIXER_AUTOMATION_SLOT_STRIDE = 64
+PORTABLE_GENERATOR_CONTROL_NAMES = {
+    0: "channel volume",
+    1: "channel panning",
+    4: "channel pitch",
+}
+PORTABLE_GENERATOR_CONTROL_IDS = frozenset(PORTABLE_GENERATOR_CONTROL_NAMES)
 PORTABLE_MIXER_PARAM_IDS = frozenset(
     {
         MIXER_PARAM_SLOT_ENABLED,
@@ -123,6 +134,22 @@ DEFAULT_MIXER_PARAMS = {
     MIXER_PARAM_LOW_Q: 17_500,
     MIXER_PARAM_MID_Q: 17_500,
     MIXER_PARAM_HIGH_Q: 17_500,
+}
+MIXER_AUTOMATION_CONTROL_NAMES = {
+    MIXER_PARAM_SLOT_ENABLED: "effect enabled",
+    MIXER_PARAM_SLOT_MIX: "effect mix level",
+    MIXER_PARAM_VOLUME: "insert volume",
+    MIXER_PARAM_PAN: "insert pan",
+    MIXER_PARAM_STEREO_SEPARATION: "insert stereo separation",
+    MIXER_PARAM_LOW_GAIN: "insert low EQ gain",
+    MIXER_PARAM_MID_GAIN: "insert mid EQ gain",
+    MIXER_PARAM_HIGH_GAIN: "insert high EQ gain",
+    MIXER_PARAM_LOW_FREQ: "insert low EQ frequency",
+    MIXER_PARAM_MID_FREQ: "insert mid EQ frequency",
+    MIXER_PARAM_HIGH_FREQ: "insert high EQ frequency",
+    MIXER_PARAM_LOW_Q: "insert low EQ bandwidth",
+    MIXER_PARAM_MID_Q: "insert mid EQ bandwidth",
+    MIXER_PARAM_HIGH_Q: "insert high EQ bandwidth",
 }
 PORTABLE_INSERT_PREFIX_IDS = frozenset(
     {EVENT_INSERT_ACTIVE, EVENT_INSERT_ICON, EVENT_INSERT_COLOR, EVENT_INSERT_NAME}
@@ -171,11 +198,14 @@ RACK_GLOBAL_EVENT_IDS = frozenset({11, 13, 133})
 NOTE_STRUCT = struct.Struct("<IHHIHHBBBBBBBB")
 NOTE_SIZE = NOTE_STRUCT.size
 AUTOMATION_BINDING_STRUCT = struct.Struct("<III")
+REMOTE_CONTROLLER_STRUCT = struct.Struct("<2sH4sI8s")
+AUTOMATION_CONNECTION_HEADER = struct.Struct("<4sB3x")
+AUTOMATION_CONNECTION_MAGIC = b"SCA5"
 AUTOMATION_POINT_STRUCT = struct.Struct("<ddf4s")
 AUTOMATION_POINT_HEADER_SIZE = 21
 PLAYLIST_ITEM_SIZES = (88, 60, 32)
 
-SUPPORTED_PROJECT_MAJOR = 25
+SUPPORTED_PROJECT_MAJOR = 26
 
 
 class FLPFormatError(ValueError):
@@ -409,6 +439,220 @@ class AutomationBinding:
         remapped = ((target_iid & 0xFFFF) << 16) | (event_id & 0xFFFF)
         return AutomationBinding(
             AUTOMATION_BINDING_STRUCT.pack(prefix, remapped, initial_value)
+        )
+
+    def with_target_event_id(self, target_event_id: int) -> "AutomationBinding":
+        if not 0 <= target_event_id <= 0xFFFFFFFF:
+            raise ValueError("automation target event id is outside the supported range")
+        prefix, _, initial_value = AUTOMATION_BINDING_STRUCT.unpack(self.raw)
+        return AutomationBinding(
+            AUTOMATION_BINDING_STRUCT.pack(prefix, target_event_id, initial_value)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteControllerLink:
+    """Lossless FL event-227 internal-controller connection.
+
+    FL 25/26 store the Automation Clip instance ID at byte 2 and the
+    destination event ID at byte 8. The remaining controller, formula, and
+    mapping bytes are opaque and deliberately preserved.
+    """
+
+    raw: bytes
+
+    @classmethod
+    def parse(cls, payload: bytes) -> "RemoteControllerLink":
+        if len(payload) != REMOTE_CONTROLLER_STRUCT.size:
+            raise FLPFormatError(
+                "remote-controller link is not a 20-byte FL 25/26 record"
+            )
+        return cls(payload)
+
+    @property
+    def source_automation_iid(self) -> int:
+        return REMOTE_CONTROLLER_STRUCT.unpack(self.raw)[1]
+
+    @property
+    def target_event_id(self) -> int:
+        return REMOTE_CONTROLLER_STRUCT.unpack(self.raw)[3]
+
+    def remap(
+        self, *, source_automation_iid: int, target_event_id: int
+    ) -> "RemoteControllerLink":
+        if not 0 <= source_automation_iid <= 0xFFFF:
+            raise FLPUnsupportedError(
+                "destination Automation Clip ID exceeds FL's controller-link range"
+            )
+        if not 0 <= target_event_id <= 0xFFFFFFFF:
+            raise ValueError("automation target event id is outside the supported range")
+        prefix, _, opaque, _, suffix = REMOTE_CONTROLLER_STRUCT.unpack(self.raw)
+        return RemoteControllerLink(
+            REMOTE_CONTROLLER_STRUCT.pack(
+                prefix, source_automation_iid, opaque, target_event_id, suffix
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationTarget:
+    """Portable semantic identity for one Automation Clip destination."""
+
+    kind: str
+    source_channel_iid: int | None = None
+    source_insert_index: int | None = None
+    slot_index: int | None = None
+    parameter_index: int | None = None
+    control_id: int | None = None
+
+    def target_event_id(
+        self,
+        *,
+        channel_mapping: dict[int, int],
+        insert_mapping: dict[int, int],
+    ) -> int:
+        if self.kind == "generator_parameter":
+            if self.source_channel_iid is None:
+                raise FLPUnsupportedError("generator automation target is incomplete")
+            target_iid = channel_mapping.get(self.source_channel_iid)
+            if target_iid is None:
+                raise FLPUnsupportedError(
+                    "generator automation target is not included in the import"
+                )
+            if self.parameter_index is not None and self.control_id is None:
+                low_word = (
+                    MIXER_AUTOMATION_EFFECT_PARAMETER_BASE + self.parameter_index
+                )
+            elif (
+                self.parameter_index is None
+                and self.control_id in PORTABLE_GENERATOR_CONTROL_IDS
+            ):
+                low_word = self.control_id
+            else:
+                raise FLPUnsupportedError(
+                    "generator automation parameter identity is incomplete"
+                )
+            event_id = (target_iid << 16) + low_word
+        elif self.kind in {
+            "insert_control",
+            "effect_parameter",
+            "effect_slot_control",
+        }:
+            if self.source_insert_index is None:
+                raise FLPUnsupportedError("mixer automation target is incomplete")
+            destination_insert = insert_mapping.get(self.source_insert_index)
+            if destination_insert is None:
+                raise FLPUnsupportedError(
+                    "mixer automation target has no restored destination insert"
+                )
+            slot_index = self.slot_index or 0
+            event_word = (
+                destination_insert * MIXER_AUTOMATION_SLOT_STRIDE + slot_index
+            ) << 16
+            if self.kind == "effect_parameter":
+                if self.parameter_index is None:
+                    raise FLPUnsupportedError("effect automation target is incomplete")
+                event_id = (
+                    MIXER_AUTOMATION_NAMESPACE
+                    + event_word
+                    + MIXER_AUTOMATION_EFFECT_PARAMETER_BASE
+                    + self.parameter_index
+                )
+            else:
+                if self.control_id is None:
+                    raise FLPUnsupportedError("mixer control automation target is incomplete")
+                event_id = (
+                    MIXER_AUTOMATION_NAMESPACE
+                    + event_word
+                    + MIXER_AUTOMATION_CONTROL_BASE
+                    + self.control_id
+                )
+        else:
+            raise FLPUnsupportedError(
+                f"unsupported automation target kind {self.kind!r}"
+            )
+        if not 0 <= event_id <= 0xFFFFFFFF:
+            raise FLPUnsupportedError("remapped automation target is outside FL's event range")
+        return event_id
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationConnection:
+    """One portable destination and its connection-specific FL state."""
+
+    role: str
+    target: AutomationTarget
+    binding: AutomationBinding | None = None
+    remote_link: RemoteControllerLink | None = None
+
+    @property
+    def target_event_id(self) -> int:
+        if self.binding is not None:
+            return self.binding.target_event_id
+        if self.remote_link is not None:
+            return self.remote_link.target_event_id
+        raise FLPFormatError("automation connection has no raw target state")
+
+    def to_bytes(self) -> bytes:
+        flags = (1 if self.binding is not None else 0) | (
+            2 if self.remote_link is not None else 0
+        )
+        payload = bytearray(
+            AUTOMATION_CONNECTION_HEADER.pack(AUTOMATION_CONNECTION_MAGIC, flags)
+        )
+        if self.binding is not None:
+            payload.extend(self.binding.raw)
+        if self.remote_link is not None:
+            payload.extend(self.remote_link.raw)
+        return bytes(payload)
+
+    @classmethod
+    def from_bytes(
+        cls,
+        payload: bytes,
+        *,
+        role: str,
+        target: AutomationTarget,
+    ) -> "AutomationConnection":
+        if len(payload) < AUTOMATION_CONNECTION_HEADER.size:
+            raise FLPFormatError("automation connection state is truncated")
+        magic, flags = AUTOMATION_CONNECTION_HEADER.unpack_from(payload)
+        if magic != AUTOMATION_CONNECTION_MAGIC or flags & ~3:
+            raise FLPFormatError("automation connection state has an invalid header")
+        offset = AUTOMATION_CONNECTION_HEADER.size
+        binding = None
+        link = None
+        if flags & 1:
+            end = offset + AUTOMATION_BINDING_STRUCT.size
+            records = AutomationBinding.parse_many(payload[offset:end])
+            if len(records) != 1:
+                raise FLPFormatError("automation connection binding is missing")
+            binding = records[0]
+            offset = end
+        if flags & 2:
+            end = offset + REMOTE_CONTROLLER_STRUCT.size
+            link = RemoteControllerLink.parse(payload[offset:end])
+            offset = end
+        if offset != len(payload):
+            raise FLPFormatError("automation connection state has trailing bytes")
+        if role == "primary" and binding is None:
+            raise FLPFormatError(
+                "primary automation connection has no event-216 binding"
+            )
+        if (
+            binding is not None
+            and link is not None
+            and binding.target_event_id != link.target_event_id
+        ):
+            raise FLPFormatError(
+                "automation binding and controller link disagree"
+            )
+        if role == "linked" and (binding is None or link is None):
+            raise FLPFormatError(
+                "linked automation connection has invalid event-227 state"
+            )
+        return cls(
+            role=role, target=target, binding=binding, remote_link=link
         )
 
 
@@ -1015,14 +1259,309 @@ class FLPFile:
         if event is None:
             raise FLPUnsupportedError("automation channels are missing their target bindings")
         records = AutomationBinding.parse_many(event.payload)
-        if len(records) != len(automation_channels):
+        records_by_target: dict[int, AutomationBinding] = {}
+        for record in records:
+            previous = records_by_target.get(record.target_event_id)
+            if previous is not None and previous.raw != record.raw:
+                raise FLPUnsupportedError(
+                    "automation target table contains conflicting duplicate bindings"
+                )
+            records_by_target[record.target_event_id] = record
+
+        links_by_iid = self.remote_controller_links()
+        result: dict[int, AutomationBinding] = {}
+        linked_target_ids: set[int] = set()
+        unlinked_channels: list[ChannelSection] = []
+        for section in automation_channels:
+            links = links_by_iid.get(section.iid, ())
+            if not links:
+                unlinked_channels.append(section)
+                continue
+            primary_target_id = links[0].target_event_id
+            binding = records_by_target.get(primary_target_id)
+            if binding is None:
+                raise FLPUnsupportedError(
+                    f'automation clip "{section.name}" references a missing target binding'
+                )
+            result[section.iid] = binding
+            linked_target_ids.update(link.target_event_id for link in links)
+
+        unlinked_records = [
+            record
+            for record in records
+            if record.target_event_id not in linked_target_ids
+        ]
+        if unlinked_channels and len(unlinked_records) != len(unlinked_channels):
             raise FLPUnsupportedError(
-                "automation target bindings do not match the Channel Rack"
+                "automation target bindings cannot be safely associated with the Channel Rack"
             )
-        return {
-            section.iid: record
-            for section, record in zip(automation_channels, records, strict=True)
+        if unlinked_channels:
+            result.update(
+                {
+                    section.iid: record
+                    for section, record in zip(
+                        unlinked_channels, unlinked_records, strict=True
+                    )
+                }
+            )
+        return result
+
+    def remote_controller_links(self) -> dict[int, list[RemoteControllerLink]]:
+        """Return event-227 links grouped by their Automation Clip instance ID."""
+        result: dict[int, list[RemoteControllerLink]] = {}
+        for event in self.events:
+            if event.id != EVENT_REMOTE_CONTROLLER:
+                continue
+            link = RemoteControllerLink.parse(event.payload)
+            result.setdefault(link.source_automation_iid, []).append(link)
+        return result
+
+    def automation_connections(
+        self,
+        automation_iid: int,
+        *,
+        allowed_target_event_ids: set[int] | None = None,
+    ) -> list[AutomationConnection]:
+        """Decode and optionally sanitize every connection of one clip.
+
+        Event 227 repeats the primary event-216 destination in FL 25/26. That
+        matching record is folded into the primary connection so its opaque
+        formula/mapping bytes can be restored without duplicating the target.
+        If filtering removes the original primary, the first retained linked
+        destination becomes the new primary while keeping its event-227 state.
+        """
+        candidates = self.automation_connection_records(automation_iid)
+        binding = candidates[0][1]
+        assert binding is not None
+
+        seen_targets: set[int] = set()
+        connections: list[AutomationConnection] = []
+        for role, candidate_binding, link in candidates:
+            event_id = (
+                candidate_binding.target_event_id
+                if candidate_binding is not None
+                else link.target_event_id if link is not None else -1
+            )
+            if event_id in seen_targets:
+                raise FLPUnsupportedError(
+                    f"automation channel {automation_iid} contains duplicate target connections"
+                )
+            seen_targets.add(event_id)
+            if (
+                allowed_target_event_ids is not None
+                and event_id not in allowed_target_event_ids
+            ):
+                continue
+            target = self.classify_automation_event_id(event_id)
+            if target is None:
+                continue
+            connections.append(
+                AutomationConnection(
+                    role=role,
+                    target=target,
+                    binding=candidate_binding,
+                    remote_link=link,
+                )
+            )
+
+        if connections and connections[0].role != "primary":
+            promoted = connections[0]
+            promoted_binding = promoted.binding
+            if promoted_binding is None:
+                promoted_binding = binding.with_target_event_id(
+                    promoted.target_event_id
+                )
+            connections[0] = AutomationConnection(
+                role="primary",
+                target=promoted.target,
+                binding=promoted_binding,
+                remote_link=promoted.remote_link,
+            )
+        return connections
+
+    def automation_connection_records(
+        self, automation_iid: int
+    ) -> list[tuple[str, AutomationBinding | None, RemoteControllerLink | None]]:
+        """Resolve event-227 links through FL's deduplicated event-216 table."""
+        bindings = self.automation_bindings()
+        primary_binding = bindings.get(automation_iid)
+        if primary_binding is None:
+            raise FLPUnsupportedError(
+                f"automation channel {automation_iid} is missing its target binding"
+            )
+        remote_links = self.remote_controller_links().get(automation_iid, ())
+        if not remote_links:
+            return [("primary", primary_binding, None)]
+        event = next(
+            candidate
+            for candidate in self.events
+            if candidate.id == EVENT_AUTOMATION_BINDINGS
+        )
+        bindings_by_target = {
+            binding.target_event_id: binding
+            for binding in AutomationBinding.parse_many(event.payload)
         }
+        candidates: list[
+            tuple[str, AutomationBinding | None, RemoteControllerLink | None]
+        ] = []
+        for index, link in enumerate(remote_links):
+            binding = bindings_by_target.get(link.target_event_id)
+            if binding is None:
+                raise FLPUnsupportedError(
+                    f"automation channel {automation_iid} references a missing target binding"
+                )
+            candidates.append(
+                ("primary" if index == 0 else "linked", binding, link)
+            )
+        return candidates
+
+    def classify_automation_binding(
+        self, binding: AutomationBinding
+    ) -> AutomationTarget | None:
+        """Resolve a raw FL event id to a portable capsule target."""
+        return self.classify_automation_event_id(binding.target_event_id)
+
+    def classify_automation_event_id(
+        self, event_id: int
+    ) -> AutomationTarget | None:
+        """Resolve a raw FL event id to a portable capsule target."""
+        sections = self.channel_sections()
+        known_channel_ids = {section.iid for section in sections}
+        target_iid = event_id >> 16
+        if target_iid not in known_channel_ids:
+            target_iid = None
+        low_word = event_id & 0xFFFF
+        if target_iid is not None:
+            if low_word in PORTABLE_GENERATOR_CONTROL_IDS:
+                return AutomationTarget(
+                    kind="generator_parameter",
+                    source_channel_iid=target_iid,
+                    control_id=low_word,
+                )
+            if low_word < MIXER_AUTOMATION_EFFECT_PARAMETER_BASE:
+                return None
+            return AutomationTarget(
+                kind="generator_parameter",
+                source_channel_iid=target_iid,
+                parameter_index=low_word - MIXER_AUTOMATION_EFFECT_PARAMETER_BASE,
+            )
+
+        if event_id < MIXER_AUTOMATION_NAMESPACE:
+            return None
+        relative = event_id - MIXER_AUTOMATION_NAMESPACE
+        packed_target = relative >> 16
+        source_insert = packed_target // MIXER_AUTOMATION_SLOT_STRIDE
+        slot_index = packed_target % MIXER_AUTOMATION_SLOT_STRIDE
+        if source_insert <= 0:
+            return None
+        try:
+            inserts = {
+                section.index: section for section in self.mixer_insert_sections()
+            }
+        except (FLPFormatError, FLPUnsupportedError):
+            return None
+        insert = inserts.get(source_insert)
+        if insert is None:
+            return None
+
+        if low_word >= MIXER_AUTOMATION_EFFECT_PARAMETER_BASE:
+            parameter_index = low_word - MIXER_AUTOMATION_EFFECT_PARAMETER_BASE
+            slots = {slot.index: slot for slot in insert.effect_slots}
+            slot = slots.get(slot_index)
+            if slot is None or not slot.occupied:
+                return None
+            return AutomationTarget(
+                kind="effect_parameter",
+                source_insert_index=source_insert,
+                slot_index=slot_index,
+                parameter_index=parameter_index,
+            )
+
+        control_id = low_word - MIXER_AUTOMATION_CONTROL_BASE
+        if control_id not in PORTABLE_MIXER_PARAM_IDS:
+            return None
+        if control_id in {MIXER_PARAM_SLOT_ENABLED, MIXER_PARAM_SLOT_MIX}:
+            slots = {slot.index: slot for slot in insert.effect_slots}
+            slot = slots.get(slot_index)
+            if slot is None or not slot.occupied:
+                return None
+            return AutomationTarget(
+                kind="effect_slot_control",
+                source_insert_index=source_insert,
+                slot_index=slot_index,
+                control_id=control_id,
+            )
+        if slot_index != 0:
+            return None
+        return AutomationTarget(
+            kind="insert_control",
+            source_insert_index=source_insert,
+            control_id=control_id,
+        )
+
+    def automation_target_description(
+        self,
+        target: AutomationTarget | None,
+        *,
+        event_id: int | None = None,
+    ) -> str:
+        if target is None:
+            if event_id is not None and event_id >= MIXER_AUTOMATION_NAMESPACE:
+                relative = event_id - MIXER_AUTOMATION_NAMESPACE
+                source_insert = (relative >> 16) // MIXER_AUTOMATION_SLOT_STRIDE
+                if source_insert == 0:
+                    return "Master mixer control"
+                if source_insert > 0:
+                    return f"unsupported control on mixer insert {source_insert}"
+            if event_id == 0x40000005:
+                return "global tempo control"
+            return (
+                f"unsupported project control 0x{event_id:08X}"
+                if event_id is not None
+                else "unsupported project control"
+            )
+        if target.kind == "generator_parameter":
+            name = next(
+                (
+                    section.name
+                    for section in self.channel_sections()
+                    if section.iid == target.source_channel_iid
+                ),
+                f"channel {target.source_channel_iid}",
+            )
+            if target.control_id is not None:
+                return (
+                    f"{name} "
+                    f"{PORTABLE_GENERATOR_CONTROL_NAMES.get(target.control_id, 'control')}"
+                )
+            return f"{name} parameter {target.parameter_index}"
+        if target.kind == "insert_control":
+            control = MIXER_AUTOMATION_CONTROL_NAMES.get(
+                target.control_id, f"control {target.control_id}"
+            )
+            return f"mixer insert {target.source_insert_index} {control}"
+        slots = {}
+        try:
+            insert = next(
+                section
+                for section in self.mixer_insert_sections()
+                if section.index == target.source_insert_index
+            )
+            slots = {slot.index: slot for slot in insert.effect_slots}
+        except (StopIteration, FLPFormatError, FLPUnsupportedError):
+            pass
+        plugin = slots.get(target.slot_index)
+        plugin_name = plugin.plugin_name if plugin is not None else "effect"
+        if target.kind == "effect_parameter":
+            detail = f"parameter {target.parameter_index}"
+        else:
+            detail = MIXER_AUTOMATION_CONTROL_NAMES.get(
+                target.control_id, f"control {target.control_id}"
+            )
+        return (
+            f"mixer insert {target.source_insert_index}, slot "
+            f"{(target.slot_index or 0) + 1} ({plugin_name}) {detail}"
+        )
 
     def playlist_items_for_channels(
         self, channel_ids: Sequence[int]
@@ -1559,6 +2098,7 @@ class FLPFile:
         pattern_id: int,
         *,
         preserve_mixer_inserts: bool = False,
+        automation_target_event_ids: dict[int, Sequence[int]] | None = None,
     ) -> "FLPFile":
         selected = set(channel_ids)
         if not selected:
@@ -1599,6 +2139,14 @@ class FLPFile:
             if section.iid in selected and section.channel_type == 5
         ]
         if automation_ids:
+            if automation_target_event_ids is not None:
+                target._sanitize_automation_preview_connections(
+                    {
+                        iid: automation_target_event_ids[iid]
+                        for iid in automation_ids
+                        if iid in automation_target_event_ids
+                    }
+                )
             target._isolate_automation_preview(automation_ids, pattern_id)
             # FL stores transport loop mode as 0 = Pattern, 1 = Song.
             target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 1)
@@ -1606,6 +2154,48 @@ class FLPFile:
             target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 0)
         target.validate()
         return target
+
+    def _sanitize_automation_preview_connections(
+        self, allowed_by_automation_iid: dict[int, Sequence[int]]
+    ) -> None:
+        """Remove excluded links and retarget a filtered primary for rendering."""
+        if not allowed_by_automation_iid:
+            return
+        automation_sections = {
+            section.iid: section
+            for section in self.channel_sections()
+            if section.channel_type == 5
+        }
+        bindings = self.automation_bindings()
+        links_by_iid = self.remote_controller_links()
+        for automation_iid, allowed in allowed_by_automation_iid.items():
+            section = automation_sections.get(automation_iid)
+            if section is None:
+                raise FLPUnsupportedError(
+                    f"automation channel {automation_iid} is missing from the preview"
+                )
+            if not allowed:
+                raise FLPUnsupportedError(
+                    f'automation clip "{section.name}" has no retained preview target'
+                )
+            if (
+                not links_by_iid.get(automation_iid)
+                and bindings[automation_iid].target_event_id not in allowed
+            ):
+                raise FLPUnsupportedError(
+                    f'automation clip "{section.name}" cannot promote a target without an internal-controller link'
+                )
+
+        sanitized: list[Event] = []
+        for event in self.events:
+            if event.id != EVENT_REMOTE_CONTROLLER:
+                sanitized.append(event)
+                continue
+            link = RemoteControllerLink.parse(event.payload)
+            allowed = allowed_by_automation_iid.get(link.source_automation_iid)
+            if allowed is None or link.target_event_id in allowed:
+                sanitized.append(event)
+        self.events = sanitized
 
     def _channel_insert_index(self) -> int:
         sections = self.channel_sections()
@@ -1713,7 +2303,15 @@ class FLPFile:
         pattern_name: str,
         target_pattern_id: int | None = None,
         automation_bindings: dict[int, AutomationBinding] | None = None,
+        automation_targets: dict[int, AutomationTarget] | None = None,
+        automation_remote_links: dict[
+            int,
+            Sequence[
+                tuple[AutomationTarget, AutomationBinding, RemoteControllerLink]
+            ],
+        ] | None = None,
         automation_playlist_items: dict[int, Sequence[PlaylistItem]] | None = None,
+        mixer_insert_mapping: dict[int, int] | None = None,
         playlist_anchor: int = 0,
     ) -> tuple["FLPFile", dict[int, int], int]:
         target = self.clone()
@@ -1758,7 +2356,10 @@ class FLPFile:
             sections,
             mapping,
             automation_bindings or {},
+            automation_targets or {},
+            automation_remote_links or {},
             automation_playlist_items or {},
+            mixer_insert_mapping=mixer_insert_mapping or {},
             source_ppq=source_ppq,
             destination_anchor=playlist_anchor,
         )
@@ -1772,6 +2373,14 @@ class FLPFile:
         *,
         target_mapping: dict[int, int],
         bindings: dict[int, AutomationBinding],
+        targets: dict[int, AutomationTarget] | None = None,
+        remote_links: dict[
+            int,
+            Sequence[
+                tuple[AutomationTarget, AutomationBinding, RemoteControllerLink]
+            ],
+        ] | None = None,
+        mixer_insert_mapping: dict[int, int] | None = None,
         playlist_items: dict[int, Sequence[PlaylistItem]],
         source_ppq: int,
         playlist_anchor: int,
@@ -1794,7 +2403,10 @@ class FLPFile:
             sections,
             complete_mapping,
             bindings,
+            targets or {},
+            remote_links or {},
             playlist_items,
+            mixer_insert_mapping=mixer_insert_mapping or {},
             source_ppq=source_ppq,
             destination_anchor=playlist_anchor,
         )
@@ -1806,8 +2418,16 @@ class FLPFile:
         sections: Sequence[ChannelSection],
         mapping: dict[int, int],
         bindings: dict[int, AutomationBinding],
+        targets: dict[int, AutomationTarget],
+        remote_links: dict[
+            int,
+            Sequence[
+                tuple[AutomationTarget, AutomationBinding, RemoteControllerLink]
+            ],
+        ],
         playlist_items: dict[int, Sequence[PlaylistItem]],
         *,
+        mixer_insert_mapping: dict[int, int],
         source_ppq: int,
         destination_anchor: int,
     ) -> None:
@@ -1815,21 +2435,52 @@ class FLPFile:
         if not automation_sections:
             return
         source_channel_ids = set(mapping)
-        remapped_bindings: list[AutomationBinding] = []
+        remapped_bindings: list[tuple[AutomationBinding, bool]] = []
         for section in automation_sections:
             binding = bindings.get(section.iid)
             if binding is None:
                 raise FLPUnsupportedError(
                     f'automation clip "{section.name}" is missing its target binding'
                 )
-            target_source_iid = binding.target_channel_iid(source_channel_ids)
-            if target_source_iid is None or target_source_iid not in mapping:
-                raise FLPUnsupportedError(
-                    f'automation clip "{section.name}" does not target a captured Channel Rack channel'
+            semantic_target = targets.get(section.iid)
+            if semantic_target is None:
+                target_source_iid = binding.target_channel_iid(source_channel_ids)
+                if target_source_iid is None or target_source_iid not in mapping:
+                    raise FLPUnsupportedError(
+                        f'automation clip "{section.name}" has no portable target metadata'
+                    )
+                remapped_bindings.append(
+                    (
+                        binding.remap_target_channel(mapping[target_source_iid]),
+                        bool(remote_links.get(section.iid)),
+                    )
                 )
-            remapped_bindings.append(
-                binding.remap_target_channel(mapping[target_source_iid])
-            )
+            else:
+                remapped_bindings.append(
+                    (
+                        binding.with_target_event_id(
+                            semantic_target.target_event_id(
+                                channel_mapping=mapping,
+                                insert_mapping=mixer_insert_mapping,
+                            )
+                        ),
+                        bool(remote_links.get(section.iid)),
+                    )
+                )
+            for linked_target, linked_binding, _ in remote_links.get(
+                section.iid, ()
+            ):
+                remapped_bindings.append(
+                    (
+                        linked_binding.with_target_event_id(
+                            linked_target.target_event_id(
+                                channel_mapping=mapping,
+                                insert_mapping=mixer_insert_mapping,
+                            )
+                        ),
+                        True,
+                    )
+                )
 
         binding_index = next(
             (
@@ -1838,16 +2489,80 @@ class FLPFile:
             ),
             None,
         )
-        payload = b"".join(binding.raw for binding in remapped_bindings)
+        existing_bindings = (
+            AutomationBinding.parse_many(self.events[binding_index].payload)
+            if binding_index is not None
+            else []
+        )
+        existing_target_ids = {
+            binding.target_event_id for binding in existing_bindings
+        }
+        unique_new_bindings: list[AutomationBinding] = []
+        deduplicated_by_target: dict[int, AutomationBinding] = {}
+        for binding, deduplicate in remapped_bindings:
+            if not deduplicate:
+                unique_new_bindings.append(binding)
+                continue
+            if binding.target_event_id in existing_target_ids:
+                continue
+            previous = deduplicated_by_target.get(binding.target_event_id)
+            if previous is not None:
+                if previous.raw != binding.raw:
+                    raise FLPUnsupportedError(
+                        "imported automation connections contain conflicting target state"
+                    )
+                continue
+            deduplicated_by_target[binding.target_event_id] = binding
+            unique_new_bindings.append(binding)
+        payload = b"".join(
+            binding.raw for binding in unique_new_bindings
+        )
         if binding_index is None:
             insert_at = next(
                 (index for index, event in enumerate(self.events) if event.id == EVENT_CHANNEL_NEW),
                 0,
             )
-            self.events.insert(insert_at, data_event(EVENT_AUTOMATION_BINDINGS, payload))
-        else:
+            if payload:
+                self.events.insert(
+                    insert_at, data_event(EVENT_AUTOMATION_BINDINGS, payload)
+                )
+        elif payload:
             event = self.events[binding_index]
             self.events[binding_index] = event.with_payload(event.payload + payload)
+
+        remapped_links: list[RemoteControllerLink] = []
+        for section in automation_sections:
+            for semantic_target, _, link in remote_links.get(section.iid, ()):
+                remapped_links.append(
+                    link.remap(
+                        source_automation_iid=mapping[section.iid],
+                        target_event_id=semantic_target.target_event_id(
+                            channel_mapping=mapping,
+                            insert_mapping=mixer_insert_mapping,
+                        ),
+                    )
+                )
+        if remapped_links:
+            existing_link_indices = [
+                index
+                for index, event in enumerate(self.events)
+                if event.id == EVENT_REMOTE_CONTROLLER
+            ]
+            if existing_link_indices:
+                link_insert_at = existing_link_indices[-1] + 1
+            else:
+                link_insert_at = next(
+                    (
+                        index
+                        for index, event in enumerate(self.events)
+                        if event.id == EVENT_CHANNEL_NEW
+                    ),
+                    0,
+                )
+            self.events[link_insert_at:link_insert_at] = [
+                data_event(EVENT_REMOTE_CONTROLLER, link.raw)
+                for link in remapped_links
+            ]
 
         source_items = [
             item

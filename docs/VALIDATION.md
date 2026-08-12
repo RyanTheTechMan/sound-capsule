@@ -16,8 +16,9 @@ uv run --python 3.12 --project helper python -m unittest discover -s helper/test
 ```
 
 It covers lossless parsing, opaque events, exact note properties, grouped and
-individual capsule packaging, selected Automation Clip target remapping and
-playhead placement, automation-aware Song-mode previews, mixer insert and gapped
+individual capsule packaging, selected Automation Clip multi-target decoding,
+filtering, remapping, and playhead placement, automation-aware sanitized
+Song-mode previews, mixer insert and gapped
 effect-slot extraction, shared-chain restoration, bypass/mix parameters, pristine
 insert allocation, embedded Sampler assets, ZIP/checksum attacks,
 new-pattern and current-pattern append, override, PPQ scaling, isolated preview construction, project lookup,
@@ -112,12 +113,14 @@ release is claimed as host-tested:
    existing channels, Master, unrelated mixer inserts, Playlist, and arrangement
    state. Include shared inserts, gapped native and wrapped effects, disabled and
    partially mixed slots, and projects with no remaining pristine inserts.
-5. Select generator-targeted Automation Clips in the Channel Rack alongside
-   their target generators. Capture grouped and individually, verify the audible
-   preview follows automation, then import at several playhead positions and
-   confirm every selected Playlist instance and relative offset is preserved.
-   Confirm unselected automation is excluded and mixer/global automation reports
-   the documented unsupported-target error.
+5. Select generator- and effect-targeted Automation Clips in the Channel Rack
+   alongside their target generators. Capture grouped and individually, verify
+   the audible preview follows automation, then import at several playhead
+   positions and confirm every selected Playlist instance and relative offset is
+   preserved. Cover insert volume/pan/stereo/EQ, effect parameters, slot bypass
+   and mix, and shared inserts. Confirm unselected automation is excluded; Master,
+   global, routing, send, and unrelated targets must produce the omission warning
+   and must not appear in the imported project.
 6. Override an equal-size destination selection. Verify saved chains use fresh
    inserts and reroute only the overridden channels; legacy and toggle-off
    capsules retain target routing. Confirm former inserts and unrelated channels

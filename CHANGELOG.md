@@ -6,6 +6,32 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-12
+
+### Added
+
+- Selected Automation Clips can now preserve multiple destinations, including
+  generator parameters/channel controls and portable controls or effect
+  parameters on the generator's saved non-Master insert.
+- Capture preflight warns before dropping Master, global, routing, unrelated,
+  or otherwise unsupported automation connections.
+
+### Changed
+
+- Capsule schema 5 stores semantic automation target identity so imports can
+  rebuild mixer event IDs after allocating a fresh destination insert. Schemas
+  1–4 remain readable.
+
+### Fixed
+
+- Saving no longer fails merely because a selected Automation Clip targets an
+  effect or portable control on the generator's saved mixer insert.
+- Effect automation is remapped to the restored destination slot instead of
+  retaining the source project's insert number.
+- The app now requires an exact helper-version match and replaces a stale
+  helper it launched, preventing new capture commands from reaching an older
+  runtime that does not implement them.
+
 ## [0.4.0] - 2026-08-10
 
 ### Added

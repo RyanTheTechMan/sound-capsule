@@ -2807,29 +2807,90 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
         safe->operationId.clear();
         safe->operationProgressPollInFlight.store(false);
     };
-    runAfterProjectSaved([safe, captureOperationId, name, individually, tags,
-                          includeMixerInsert, showFailure] {
+    const std::function<void(juce::String, bool)> startCapture =
+        [safe, captureOperationId, name, individually, tags, includeMixerInsert,
+         showFailure](juce::String preflightToken, bool omitUnsupported) {
+            if (safe == nullptr || safe->operationId != captureOperationId) return;
+            safe->operationPollingEnabled = true;
+            safe->lastOperationProgressPollAt = 0;
+            safe->sendCommand(
+                "capture", object({{"name", name}, {"individually", individually},
+                                   {"include_mixer_insert", includeMixerInsert},
+                                   {"omit_unsupported_automation", omitUnsupported},
+                                   {"preflight_token", preflightToken},
+                                   {"tags", tags}, {"operation_id", captureOperationId}}),
+                [safe, captureOperationId](juce::var) {
+                    if (safe == nullptr || safe->operationId != captureOperationId) return;
+                    safe->operationPollingEnabled = false;
+                    safe->operationProgress.finish(
+                        true, "Capsule saved", "Added to the Sound Capsule library");
+                    safe->operationOverlayHideAt =
+                        juce::Time::getMillisecondCounter() + 1100;
+                    safe->operationId.clear();
+                    safe->operationProgressPollInFlight.store(false);
+                    safe->retryOperation = {};
+                    safe->status.setText("Saved to library", juce::dontSendNotification);
+                    safe->refreshLibrary();
+                },
+                300000, false, showFailure);
+        };
+    runAfterProjectSaved([safe, captureOperationId, individually,
+                          includeMixerInsert, showFailure, startCapture] {
         if (safe == nullptr) return;
-        safe->operationPollingEnabled = true;
-        safe->lastOperationProgressPollAt = 0;
         safe->sendCommand(
-            "capture", object({{"name", name}, {"individually", individually},
-                               {"include_mixer_insert", includeMixerInsert},
-                               {"tags", tags}, {"operation_id", captureOperationId}}),
-            [safe, captureOperationId](juce::var) {
+            "capture_preflight",
+            object({{"individually", individually},
+                    {"include_mixer_insert", includeMixerInsert}}),
+            [safe, captureOperationId, showFailure, startCapture](juce::var response) {
                 if (safe == nullptr || safe->operationId != captureOperationId) return;
-                safe->operationPollingEnabled = false;
-                safe->operationProgress.finish(
-                    true, "Capsule saved", "Added to the Sound Capsule library");
-                safe->operationOverlayHideAt =
-                    juce::Time::getMillisecondCounter() + 1100;
-                safe->operationId.clear();
-                safe->operationProgressPollInFlight.store(false);
-                safe->retryOperation = {};
-                safe->status.setText("Saved to library", juce::dontSendNotification);
-                safe->refreshLibrary();
+                const auto blocking = response.getProperty(
+                    "blocking_error", juce::var()).toString();
+                if (blocking.isNotEmpty())
+                {
+                    showFailure(blocking);
+                    return;
+                }
+                const auto token = response.getProperty("token", "").toString();
+                const auto* excluded = response.getProperty(
+                    "excluded", juce::var()).getArray();
+                if (excluded == nullptr || excluded->isEmpty())
+                {
+                    startCapture(token, false);
+                    return;
+                }
+                juce::StringArray details;
+                const auto shown = juce::jmin(8, excluded->size());
+                for (int index = 0; index < shown; ++index)
+                {
+                    const auto item = (*excluded)[index];
+                    details.add("• " + item.getProperty("clip_name", "Automation Clip").toString()
+                                + " — " + item.getProperty("target", "unsupported target").toString());
+                }
+                if (excluded->size() > shown)
+                    details.add("• " + juce::String(excluded->size() - shown)
+                                + " more connection(s)");
+                const auto message =
+                    "Some selected automation connections are outside the saved generator or "
+                    "its non-Master mixer insert:\n\n"
+                    + details.joinIntoString("\n")
+                    + "\n\nContinue without these connections? Clips with no portable target "
+                      "will be omitted.";
+                juce::AlertWindow::showAsync(
+                    juce::MessageBoxOptions::makeOptionsOkCancel(
+                        juce::MessageBoxIconType::WarningIcon,
+                        "Automation connections will be omitted", message,
+                        "Continue without excluded connections", "Cancel",
+                        safe.getComponent()),
+                    [safe, captureOperationId, token, showFailure,
+                     startCapture](int result) {
+                        if (safe == nullptr || safe->operationId != captureOperationId) return;
+                        if (result == 1)
+                            startCapture(token, true);
+                        else
+                            showFailure("Operation cancelled");
+                    });
             },
-            300000, false, showFailure);
+            60000, false, showFailure);
     }, showFailure);
 }
 

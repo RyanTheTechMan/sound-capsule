@@ -20,6 +20,7 @@ from soundcapsule.bridge import (
 from soundcapsule.capsule import Capsule
 from soundcapsule.config import Settings
 from soundcapsule.flp import EVENT_FL_VERSION, FLPFile
+from soundcapsule.project import CapturePreflight
 from soundcapsule.server import PROTOCOL_VERSION, SoundCapsuleServer
 from test_flp import fixture_project, write_silence
 
@@ -464,6 +465,39 @@ class ServerTests(unittest.TestCase):
                 self.assertFalse(failure["active"])
                 self.assertEqual(failure["step"], "Capture failed")
                 self.assertEqual(failure["error"], "render failed")
+
+    def test_capture_preflight_command_returns_warning_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings(data_dir=Path(temporary), server_port=0)
+            result = CapturePreflight(
+                token="a" * 64,
+                selected_channel_ids=[2, 9],
+                retained_automation_ids=[],
+                retained_target_event_ids={},
+                automation_owners={},
+                retained=[],
+                excluded=[{
+                    "source_iid": 9,
+                    "clip_name": "Filter sweep",
+                    "target": "Master mixer control",
+                    "reason": "Master is not portable",
+                }],
+            )
+            with SoundCapsuleServer(settings) as server, mock.patch.object(
+                server.service, "capture_preflight", return_value=result
+            ) as preflight:
+                response = server.dispatch({
+                    "command": "capture_preflight",
+                    "args": {"individually": True, "include_mixer_insert": False},
+                })
+
+            preflight.assert_called_once_with(
+                project_path=None,
+                individually=True,
+                include_mixer_insert=False,
+            )
+            self.assertTrue(response["requires_confirmation"])
+            self.assertEqual(response["excluded"][0]["clip_name"], "Filter sweep")
 
     def test_concurrent_mutation_is_rejected_without_clobbering_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

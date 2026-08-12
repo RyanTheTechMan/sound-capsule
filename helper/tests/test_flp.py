@@ -12,6 +12,8 @@ from pathlib import Path
 from soundcapsule.capsule import Capsule, _open_capsule_archive
 from soundcapsule.flp import (
     AUTOMATION_BINDING_STRUCT,
+    REMOTE_CONTROLLER_STRUCT,
+    AutomationBinding,
     EVENT_ARRANGEMENT_NEW,
     EVENT_AUTOMATION_BINDINGS,
     EVENT_AUTOMATION_POINTS,
@@ -38,6 +40,7 @@ from soundcapsule.flp import (
     EVENT_PATTERN_NOTES,
     EVENT_PLAYLIST,
     EVENT_PROJECT_LOOP_MODE,
+    EVENT_REMOTE_CONTROLLER,
     EVENT_PADDING,
     EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PLUGIN_LOCATION,
@@ -46,10 +49,14 @@ from soundcapsule.flp import (
     FLPFile,
     FORMAT_PROJECT,
     MIXER_PARAM_STRUCT,
+    MIXER_PARAM_SLOT_ENABLED,
+    MIXER_PARAM_SLOT_MIX,
     MixerParamRecord,
     NOTE_STRUCT,
     PlaylistItem,
+    RemoteControllerLink,
     NoteRecord,
+    PORTABLE_MIXER_PARAM_IDS,
     data_event,
     scalar_event,
     text_event,
@@ -241,6 +248,33 @@ def automation_points(*points: tuple[float, float, float]) -> bytes:
         previous = position
     payload.extend(b"\0" * 112)
     return bytes(payload)
+
+
+def remote_controller_link(
+    source_iid: int, target_event_id: int, *, marker: int = 1
+) -> bytes:
+    return REMOTE_CONTROLLER_STRUCT.pack(
+        b"\x00\x00",
+        source_iid,
+        bytes((marker, 0, 0, 0)),
+        target_event_id,
+        struct.pack("<II", 8, 469),
+    )
+
+
+def add_automation_target_binding(
+    project: FLPFile, target_event_id: int, *, initial_value: int = 0
+) -> None:
+    event = next(
+        item for item in project.events if item.id == EVENT_AUTOMATION_BINDINGS
+    )
+    records = AutomationBinding.parse_many(event.payload)
+    if any(record.target_event_id == target_event_id for record in records):
+        return
+    project.events[project.events.index(event)] = event.with_payload(
+        event.payload
+        + AUTOMATION_BINDING_STRUCT.pack(0, target_event_id, initial_value)
+    )
 
 
 def fixture_project_with_automation(
@@ -980,6 +1014,17 @@ class FLPRoundTripTests(unittest.TestCase):
 
 
 class AutomationClipFLPTests(unittest.TestCase):
+    def test_parses_fl25_fl26_remote_controller_binary_layout_losslessly(self) -> None:
+        raw = bytes.fromhex(
+            "0000220000000000011fc87108000000d5010000"
+        )
+
+        link = RemoteControllerLink.parse(raw)
+
+        self.assertEqual(link.source_automation_iid, 34)
+        self.assertEqual(link.target_event_id, 0x71C81F01)
+        self.assertEqual(link.raw, raw)
+
     def test_reads_automation_points_and_accumulates_delta_positions(self) -> None:
         section = next(
             section
@@ -1003,6 +1048,188 @@ class AutomationClipFLPTests(unittest.TestCase):
         self.assertEqual(binding.target_event_id, (2 << 16) | 0x80D5)
         self.assertEqual(len(playlist), 1)
         self.assertEqual((playlist[0].position, playlist[0].length), (960, 384))
+
+    def test_decodes_lossless_primary_and_linked_controller_connections(self) -> None:
+        project = fixture_project_with_automation()
+        primary = (2 << 16) | 0x80D5
+        effect = 0x71C0802A
+        add_automation_target_binding(project, effect, initial_value=42)
+        add_automation_target_binding(project, 0x70001FC0, initial_value=64)
+        project.events.extend(
+            [
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, primary, marker=1),
+                ),
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, effect, marker=2),
+                ),
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, 0x70001FC0, marker=3),
+                ),
+            ]
+        )
+
+        connections = project.automation_connections(9)
+
+        self.assertEqual([item.role for item in connections], ["primary", "linked"])
+        self.assertEqual(
+            [item.target.kind for item in connections],
+            ["generator_parameter", "effect_parameter"],
+        )
+        self.assertEqual(connections[0].remote_link.raw[4:8], b"\x01\x00\x00\x00")
+        remapped = connections[1].remote_link.remap(
+            source_automation_iid=17, target_event_id=0x7040802A
+        )
+        self.assertEqual(remapped.source_automation_iid, 17)
+        self.assertEqual(remapped.target_event_id, 0x7040802A)
+        self.assertEqual(remapped.raw[:2] + remapped.raw[4:8] + remapped.raw[12:],
+                         connections[1].remote_link.raw[:2]
+                         + connections[1].remote_link.raw[4:8]
+                         + connections[1].remote_link.raw[12:])
+
+    def test_event_216_targets_are_deduplicated_across_controller_links(self) -> None:
+        project = fixture_project_with_automation()
+        primary = (2 << 16) | 0x80D5
+        original = next(
+            section for section in project.channel_sections() if section.iid == 9
+        )
+        pattern_at = next(
+            index
+            for index, event in enumerate(project.events)
+            if event.id == EVENT_PATTERN_NEW
+        )
+        project.events[pattern_at:pattern_at] = original.remap(10).events
+        project.channel_count += 1
+        project.events.extend(
+            [
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, primary, marker=1),
+                ),
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(10, primary, marker=2),
+                ),
+            ]
+        )
+
+        bindings = project.automation_bindings()
+
+        self.assertEqual(set(bindings), {9, 10})
+        self.assertEqual(
+            {binding.target_event_id for binding in bindings.values()}, {primary}
+        )
+        self.assertEqual(
+            project.automation_connection_records(10)[0][2].raw[4], 2
+        )
+
+    def test_preview_promotes_retained_link_when_primary_is_excluded(self) -> None:
+        project = fixture_project_with_automation()
+        primary = (2 << 16) | 0x80D5
+        effect = 0x71C0802A
+        add_automation_target_binding(project, effect, initial_value=42)
+        project.events.extend(
+            [
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, primary, marker=1),
+                ),
+                data_event(
+                    EVENT_REMOTE_CONTROLLER,
+                    remote_controller_link(9, effect, marker=2),
+                ),
+            ]
+        )
+
+        preview = project.isolated_preview_project(
+            [2, 9],
+            3,
+            preserve_mixer_inserts=True,
+            automation_target_event_ids={9: [effect]},
+        )
+
+        self.assertEqual(preview.automation_bindings()[9].target_event_id, effect)
+        links = preview.remote_controller_links()[9]
+        self.assertEqual([link.target_event_id for link in links], [effect])
+
+    def test_classifies_and_remaps_portable_mixer_automation_targets(self) -> None:
+        project = fixture_project()
+
+        insert_volume = project.classify_automation_binding(
+            AutomationBinding(AUTOMATION_BINDING_STRUCT.pack(0, 0x71C01FC0, 0))
+        )
+        effect_mix = project.classify_automation_binding(
+            AutomationBinding(AUTOMATION_BINDING_STRUCT.pack(0, 0x71C01F01, 0))
+        )
+        effect_parameter = project.classify_automation_binding(
+            AutomationBinding(AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0))
+        )
+
+        self.assertEqual(
+            (insert_volume.kind, insert_volume.source_insert_index, insert_volume.control_id),
+            ("insert_control", 7, 192),
+        )
+        self.assertEqual(
+            (effect_mix.kind, effect_mix.slot_index, effect_mix.control_id),
+            ("effect_slot_control", 0, 1),
+        )
+        self.assertEqual(
+            (
+                effect_parameter.kind,
+                effect_parameter.source_insert_index,
+                effect_parameter.slot_index,
+                effect_parameter.parameter_index,
+            ),
+            ("effect_parameter", 7, 0, 42),
+        )
+        self.assertEqual(
+            effect_parameter.target_event_id(
+                channel_mapping={}, insert_mapping={7: 1}
+            ),
+            0x7040802A,
+        )
+        self.assertIsNone(
+            project.classify_automation_binding(
+                AutomationBinding(AUTOMATION_BINDING_STRUCT.pack(0, 0x70001FC0, 0))
+            )
+        )
+        for control_id in PORTABLE_MIXER_PARAM_IDS - {
+            MIXER_PARAM_SLOT_ENABLED,
+            MIXER_PARAM_SLOT_MIX,
+        }:
+            target = project.classify_automation_event_id(
+                0x71C00000 + 0x1F00 + control_id
+            )
+            self.assertIsNotNone(target, control_id)
+            self.assertEqual(
+                (target.kind, target.source_insert_index, target.control_id),
+                ("insert_control", 7, control_id),
+            )
+
+    def test_classifies_and_remaps_generator_channel_controls(self) -> None:
+        project = fixture_project()
+
+        for control_id in (0, 1, 4):
+            target = project.classify_automation_event_id((2 << 16) | control_id)
+            self.assertEqual(
+                (
+                    target.kind,
+                    target.source_channel_iid,
+                    target.parameter_index,
+                    target.control_id,
+                ),
+                ("generator_parameter", 2, None, control_id),
+            )
+            self.assertEqual(
+                target.target_event_id(
+                    channel_mapping={2: 11}, insert_mapping={}
+                ),
+                (11 << 16) | control_id,
+            )
+        self.assertIsNone(project.classify_automation_event_id((2 << 16) | 5))
 
     def test_reads_fl26_88_byte_playlist_items(self) -> None:
         project = fixture_project_with_automation(playlist_item_size=88)
@@ -1290,13 +1517,173 @@ class CapsuleTests(unittest.TestCase):
             )
 
             capsule.verify()
-            self.assertEqual(capsule.manifest.schema_version, 4)
+            self.assertEqual(capsule.manifest.schema_version, 5)
             self.assertEqual(len(capsule.manifest.automations), 1)
             automation = capsule.manifest.automations[0]
-            self.assertEqual((automation.source_iid, automation.target_source_iid), (9, 2))
+            self.assertEqual(automation.source_iid, 9)
+            self.assertEqual(len(automation.targets), 1)
+            target = automation.targets[0]
+            self.assertEqual(
+                (target.target_kind, target.source_channel_iid, target.parameter_index),
+                ("generator_parameter", 2, 213),
+            )
             self.assertEqual(capsule.read_automation_binding(automation).target_event_id, (2 << 16) | 0x80D5)
             item = capsule.read_automation_playlist(automation)[0]
             self.assertEqual((item.item_index, item.position, item.length), (9, 960, 384))
+
+    def test_verification_rejects_missing_automation_connection_member(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Missing-Connection.flcapsule",
+                name="Missing Connection",
+                project=fixture_project_with_automation(),
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(capsule)
+            missing = capsule.manifest.automations[0].targets[0].state_path
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist()
+                    if name != missing
+                }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+
+            with self.assertRaisesRegex(ValueError, "missing required members"):
+                capsule.verify()
+
+    def test_verification_rejects_corrupt_automation_connection_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Corrupt-Connection.flcapsule",
+                name="Corrupt Connection",
+                project=fixture_project_with_automation(),
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(capsule)
+            state_path = capsule.manifest.automations[0].targets[0].state_path
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist()
+                    if name != "checksums.json"
+                }
+            members[state_path] = b"broken"
+            checksums = {
+                name: hashlib.sha256(data).hexdigest()
+                for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+                target.writestr("checksums.json", json.dumps(checksums))
+
+            with self.assertRaisesRegex(ValueError, "connection state is truncated"):
+                capsule.verify()
+
+    def test_schema_five_capsule_preserves_effect_parameter_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            project = fixture_project_with_automation()
+            binding_event = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding_event)] = binding_event.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+            )
+
+            capsule = Capsule.build(
+                root / "Effect-Automated.flcapsule",
+                name="Effect Automated",
+                project=project,
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+
+            capsule.verify()
+            automation = capsule.manifest.automations[0]
+            target = automation.targets[0]
+            self.assertEqual(
+                (
+                    target.target_kind,
+                    target.source_insert_index,
+                    target.slot_index,
+                    target.parameter_index,
+                ),
+                ("effect_parameter", 7, 0, 42),
+            )
+            self.assertEqual(
+                capsule.read_automation_binding(automation).target_event_id,
+                0x71C0802A,
+            )
+
+    def test_schema_five_preserves_multiple_connections_and_omits_master(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            project = fixture_project_with_automation()
+            primary = (2 << 16) | 0x80D5
+            add_automation_target_binding(
+                project, 0x71C0802A, initial_value=42
+            )
+            add_automation_target_binding(
+                project, 0x70001FC0, initial_value=64
+            )
+            project.events.extend(
+                [
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, primary, marker=1),
+                    ),
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, 0x71C0802A, marker=2),
+                    ),
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, 0x70001FC0, marker=3),
+                    ),
+                ]
+            )
+
+            capsule = Capsule.build(
+                root / "Multi-Target.flcapsule",
+                name="Multi Target",
+                project=project,
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+
+            capsule.verify()
+            automation = capsule.manifest.automations[0]
+            self.assertEqual(
+                [(target.role, target.target_kind) for target in automation.targets],
+                [
+                    ("primary", "generator_parameter"),
+                    ("linked", "effect_parameter"),
+                ],
+            )
+            connections = capsule.read_automation_connections(automation)
+            self.assertEqual(len(connections), 2)
+            self.assertEqual(connections[1].remote_link.raw[4], 2)
 
     def test_capsule_rejects_mixer_or_global_automation_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1314,7 +1701,7 @@ class CapsuleTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeError,
-                "targets a mixer, effect, or global control",
+                "target is not portable with the selected generators",
             ):
                 Capsule.build(
                     root / "Unsupported.flcapsule",
@@ -1369,7 +1756,7 @@ class CapsuleTests(unittest.TestCase):
             capsule.verify()
             manifest = capsule.manifest
             self.assertEqual(manifest.name, "Lead")
-            self.assertEqual(manifest.schema_version, 4)
+            self.assertEqual(manifest.schema_version, 5)
             self.assertEqual(manifest.source_tempo_bpm, 130.0)
             self.assertEqual(manifest.tags, ["dark", "lead"])
             self.assertEqual([channel.source_iid for channel in manifest.channels], [2, 5])
@@ -1521,6 +1908,50 @@ class CapsuleTests(unittest.TestCase):
                 if schema_version == 1:
                     self.assertIsNone(capsule.manifest.source_tempo_bpm)
 
+    def test_schema_four_automation_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Legacy-Automation.flcapsule",
+                name="Legacy Automation",
+                project=fixture_project_with_automation(),
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(capsule)
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist() if name != "checksums.json"
+                }
+            manifest = json.loads(members["manifest.json"])
+            manifest["schema_version"] = 4
+            automation = manifest["automations"][0]
+            target = automation.pop("targets")[0]
+            automation["target_source_iid"] = target["source_channel_iid"]
+            automation["binding_path"] = target["state_path"]
+            members[target["state_path"]] = capsule.read_automation_binding(
+                capsule.manifest.automations[0]
+            ).raw
+            members["manifest.json"] = json.dumps(manifest).encode()
+            checksums = {
+                name: hashlib.sha256(data).hexdigest()
+                for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target_archive:
+                for name, data in members.items():
+                    target_archive.writestr(name, data)
+                target_archive.writestr("checksums.json", json.dumps(checksums))
+
+            capsule.verify()
+            legacy = capsule.manifest.automations[0]
+            self.assertEqual(capsule.manifest.schema_version, 4)
+            self.assertEqual(legacy.target_source_iid, 2)
+            self.assertFalse(legacy.targets)
+
     def test_capsule_rejects_newer_schema_even_with_valid_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1534,7 +1965,7 @@ class CapsuleTests(unittest.TestCase):
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist() if name != "checksums.json"}
             manifest = json.loads(members["manifest.json"])
-            manifest["schema_version"] = 5
+            manifest["schema_version"] = 6
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
             with zipfile.ZipFile(capsule.path, "w") as target:

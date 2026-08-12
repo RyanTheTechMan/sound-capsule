@@ -12,7 +12,9 @@ from soundcapsule.capsule import Capsule
 from soundcapsule.bridge import BridgeSession
 from soundcapsule.config import Settings
 from soundcapsule.flp import (
+    AUTOMATION_BINDING_STRUCT,
     EVENT_ARRANGEMENT_NEW,
+    EVENT_AUTOMATION_BINDINGS,
     EVENT_CHANNEL_ENABLED,
     EVENT_CURRENT_ARRANGEMENT,
     EVENT_FL_VERSION,
@@ -20,6 +22,8 @@ from soundcapsule.flp import (
     EVENT_PLAYLIST,
     EVENT_PLUGIN_INTERNAL_NAME,
     EVENT_PROJECT_DATA_PATH,
+    EVENT_REMOTE_CONTROLLER,
+    EVENT_TEMPO,
     FLPFile,
     FLPUnsupportedError,
     parse_text,
@@ -34,7 +38,13 @@ from soundcapsule.project_locator import (
     _windows_indexed_projects,
 )
 from soundcapsule.renderer import RenderError
-from test_flp import fixture_project, fixture_project_with_automation, write_silence
+from test_flp import (
+    add_automation_target_binding,
+    fixture_project,
+    fixture_project_with_automation,
+    remote_controller_link,
+    write_silence,
+)
 
 
 class ProjectServiceTests(unittest.TestCase):
@@ -1520,9 +1530,231 @@ class ProjectServiceTests(unittest.TestCase):
             manifest = capsules[0].manifest
             self.assertEqual([channel.source_iid for channel in manifest.channels], [2, 9])
             self.assertEqual(
-                [(automation.source_iid, automation.target_source_iid) for automation in manifest.automations],
+                [
+                    (
+                        automation.source_iid,
+                        automation.targets[0].source_channel_iid,
+                    )
+                    for automation in manifest.automations
+                ],
                 [(9, 2)],
             )
+
+    def test_capture_preflight_retains_effect_target_on_selected_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            binding_event = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding_event)] = binding_event.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 2], selected_channel_names=["Serum Lead", "Serum macro sweep"],
+                selected_channel_types=[2, 5], current_pattern=3, pattern_name="Verse",
+                pattern_length_steps=16, ppq=96, changed=0, save_sequence=1,
+                channel_count=3, last_save_requested_at=time.time(),
+                load_sequence=1, last_load_status=100, last_load_at=time.time(),
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                preflight = service.capture_preflight()
+
+            self.assertFalse(preflight.requires_confirmation)
+            self.assertEqual(preflight.retained_automation_ids, [9])
+            self.assertIn("slot 1", preflight.retained[0]["target"])
+
+    def test_preflight_lists_each_retained_and_excluded_linked_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            primary = (2 << 16) | 0x80D5
+            add_automation_target_binding(
+                project, 0x71C0802A, initial_value=42
+            )
+            add_automation_target_binding(
+                project, 0x70001FC0, initial_value=64
+            )
+            project.events.extend(
+                [
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, primary, marker=1),
+                    ),
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, 0x71C0802A, marker=2),
+                    ),
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, 0x70001FC0, marker=3),
+                    ),
+                ]
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 2],
+                selected_channel_names=["Serum Lead", "Serum macro sweep"],
+                selected_channel_types=[2, 5], current_pattern=3,
+                pattern_name="Verse", pattern_length_steps=16, ppq=96,
+                changed=0, save_sequence=1, channel_count=3,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+            )
+
+            with mock.patch.object(
+                service.bridge, "session", return_value=session
+            ), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                preflight = service.capture_preflight()
+
+            self.assertTrue(preflight.requires_confirmation)
+            self.assertEqual(len(preflight.retained), 2)
+            self.assertEqual(len(preflight.excluded), 1)
+            self.assertEqual(
+                preflight.retained_target_event_ids[9],
+                [primary, 0x71C0802A],
+            )
+            self.assertEqual(preflight.excluded[0]["target"], "Master mixer control")
+
+    def test_toggle_off_can_confirm_omission_of_effect_automation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            binding_event = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding_event)] = binding_event.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 2], selected_channel_names=["Serum Lead", "Serum macro sweep"],
+                selected_channel_types=[2, 5], current_pattern=3, pattern_name="Verse",
+                pattern_length_steps=16, ppq=96, changed=0, save_sequence=1,
+                channel_count=3, last_save_requested_at=time.time(),
+                load_sequence=1, last_load_status=100, last_load_at=time.time(),
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                preflight = service.capture_preflight(include_mixer_insert=False)
+                capsules = service.capture(
+                    "Dry",
+                    preview_wav=preview,
+                    include_mixer_insert=False,
+                    omit_unsupported_automation=True,
+                    preflight_token=preflight.token,
+                )
+
+            self.assertTrue(preflight.requires_confirmation)
+            self.assertEqual(preflight.excluded[0]["reason"], "Save mixer insert is disabled")
+            self.assertEqual(
+                [channel.source_iid for channel in capsules[0].manifest.channels],
+                [2],
+            )
+            self.assertFalse(capsules[0].manifest.automations)
+            self.assertFalse(capsules[0].manifest.mixer_inserts)
+
+    def test_individual_preflight_rejects_automation_on_shared_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            sections = {section.iid: section for section in project.channel_sections()}
+            project._replace_channel_events(
+                sections[5], sections[5].with_mixer_insert(7).events
+            )
+            binding_event = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding_event)] = binding_event.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 1, 2], selected_channel_names=["Serum Lead", "Kick", "Serum macro sweep"],
+                selected_channel_types=[2, 0, 5], current_pattern=3, pattern_name="Verse",
+                pattern_length_steps=16, ppq=96, changed=0, save_sequence=1,
+                channel_count=3, last_save_requested_at=time.time(),
+                load_sequence=1, last_load_status=100, last_load_at=time.time(),
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                preflight = service.capture_preflight(individually=True)
+
+            self.assertIn("save the selected generators as a group", preflight.blocking_error)
+
+    def test_capture_rejects_stale_automation_preflight_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            binding_event = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding_event)] = binding_event.with_payload(
+                AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 2], selected_channel_names=["Serum Lead", "Serum macro sweep"],
+                selected_channel_types=[2, 5], current_pattern=3, pattern_name="Verse",
+                pattern_length_steps=16, ppq=96, changed=0, save_sequence=1,
+                channel_count=3, last_save_requested_at=time.time(),
+                load_sequence=1, last_load_status=100, last_load_at=time.time(),
+            )
+
+            with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                preflight = service.capture_preflight(include_mixer_insert=False)
+                project._set_scalar_event(EVENT_TEMPO, 131_000)
+                source.write_bytes(project.to_bytes())
+                with self.assertRaisesRegex(
+                    FLPUnsupportedError, "changed after confirmation"
+                ):
+                    service.capture(
+                        "Stale",
+                        preview_wav=preview,
+                        include_mixer_insert=False,
+                        omit_unsupported_automation=True,
+                        preflight_token=preflight.token,
+                    )
 
     def test_capture_requires_selected_automation_target_channel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1549,7 +1781,7 @@ class ProjectServiceTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     FLPUnsupportedError,
-                    "requires its target Channel Rack channel to be selected",
+                    "select at least one generator",
                 ):
                     service.capture("Automation", preview_wav=preview)
 
@@ -1599,6 +1831,83 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(result.channel_mapping, {2: 6, 9: 7})
             item = merged.playlist_items_for_channels([7])[7][0]
             self.assertEqual((item.position, item.length), (1440, 384))
+
+    def test_import_restores_effect_automation_on_allocated_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            automated = fixture_project_with_automation()
+            binding_event = next(
+                event for event in automated.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            automated.events[automated.events.index(binding_event)] = (
+                binding_event.with_payload(
+                    AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+                )
+            )
+            add_automation_target_binding(
+                automated, (2 << 16) | 0x80D5, initial_value=11
+            )
+            automated.events.extend(
+                [
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(9, 0x71C0802A, marker=1),
+                    ),
+                    data_event(
+                        EVENT_REMOTE_CONTROLLER,
+                        remote_controller_link(
+                            9, (2 << 16) | 0x80D5, marker=2
+                        ),
+                    ),
+                ]
+            )
+            capsule = Capsule.build(
+                settings.library_dir / "Effect-Automated.flcapsule",
+                name="Effect Automated",
+                project=automated,
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            destination = fixture_project()
+            destination.events.extend(
+                [
+                    scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+                    data_event(EVENT_PLAYLIST, b""),
+                    scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+                ]
+            )
+            project_path = root / "Destination.flp"
+            project_path.write_bytes(destination.to_bytes())
+            service = CapsuleService(settings)
+            service.library.reindex()
+
+            result = service.import_capsule(
+                capsule.manifest.id,
+                mode="append",
+                project_path=project_path,
+                open_project=False,
+            )
+
+            merged = FLPFile.read(result.merged_project)
+            self.assertEqual(result.channel_mapping, {2: 6, 9: 7})
+            channels = {section.iid: section for section in merged.channel_sections()}
+            self.assertEqual(channels[6].mixer_insert, 1)
+            self.assertEqual(
+                merged.automation_bindings()[7].target_event_id,
+                0x7040802A,
+            )
+            links = merged.remote_controller_links()[7]
+            self.assertEqual(
+                [link.target_event_id for link in links],
+                [0x7040802A, (6 << 16) | 0x80D5],
+            )
+            self.assertEqual([link.raw[4] for link in links], [1, 2])
 
     def test_windows_capture_never_falls_back_to_another_fl_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

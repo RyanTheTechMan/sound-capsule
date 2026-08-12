@@ -49,6 +49,34 @@ class UndoResult:
     reload_confirmed: bool | None = None
 
 
+@dataclass(slots=True)
+class CapturePreflight:
+    token: str
+    selected_channel_ids: list[int]
+    retained_automation_ids: list[int]
+    retained_target_event_ids: dict[int, list[int]]
+    automation_owners: dict[int, int]
+    retained: list[dict[str, object]]
+    excluded: list[dict[str, object]]
+    blocking_error: str | None = None
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return bool(self.excluded)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "token": self.token,
+            "selected_channel_ids": self.selected_channel_ids,
+            "retained_automation_ids": self.retained_automation_ids,
+            "retained_target_event_ids": self.retained_target_event_ids,
+            "retained": self.retained,
+            "excluded": self.excluded,
+            "requires_confirmation": self.requires_confirmation,
+            "blocking_error": self.blocking_error,
+        }
+
+
 class CapsuleService:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -164,6 +192,184 @@ class CapsuleService:
             ids.append(sections[index].iid)
         return ids
 
+    @staticmethod
+    def _capture_preflight_token(
+        source_hash: str,
+        channel_ids: list[int],
+        *,
+        individually: bool,
+        include_mixer_insert: bool,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "source_sha256": source_hash,
+                "channel_ids": channel_ids,
+                "individually": individually,
+                "include_mixer_insert": include_mixer_insert,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    def _analyze_capture(
+        self,
+        project: FLPFile,
+        channel_ids: list[int],
+        source_hash: str,
+        *,
+        individually: bool,
+        include_mixer_insert: bool,
+    ) -> CapturePreflight:
+        sections_by_id = {
+            section.iid: section for section in project.channel_sections()
+        }
+        missing = [iid for iid in channel_ids if iid not in sections_by_id]
+        if missing:
+            raise FLPUnsupportedError(f"selected channel ids were not found: {missing}")
+        primary_ids = [
+            iid for iid in channel_ids if sections_by_id[iid].channel_type != 5
+        ]
+        if not primary_ids:
+            raise FLPUnsupportedError(
+                "select at least one generator together with its Automation Clips"
+            )
+        selected_automation_ids = [
+            iid for iid in channel_ids if sections_by_id[iid].channel_type == 5
+        ]
+        bindings = project.automation_bindings() if selected_automation_ids else {}
+        selected_set = set(primary_ids)
+        generators_by_insert: dict[int, list[int]] = {}
+        for iid in primary_ids:
+            insert_index = sections_by_id[iid].mixer_insert
+            if insert_index > 0:
+                generators_by_insert.setdefault(insert_index, []).append(iid)
+
+        retained_ids: list[int] = []
+        retained_target_event_ids: dict[int, list[int]] = {}
+        owners: dict[int, int] = {}
+        retained: list[dict[str, object]] = []
+        excluded: list[dict[str, object]] = []
+        blocking_error: str | None = None
+        for automation_iid in selected_automation_ids:
+            section = sections_by_id[automation_iid]
+            if bindings.get(automation_iid) is None:
+                raise FLPUnsupportedError(
+                    f'automation clip "{section.name}" is missing its target binding'
+                )
+            connection_owner_ids: list[list[int]] = []
+            retained_event_ids: list[int] = []
+            for role, binding, remote_link in project.automation_connection_records(
+                automation_iid
+            ):
+                event_id = (
+                    binding.target_event_id
+                    if binding is not None
+                    else remote_link.target_event_id
+                    if remote_link is not None
+                    else -1
+                )
+                target = project.classify_automation_event_id(event_id)
+                description = project.automation_target_description(
+                    target, event_id=event_id
+                )
+                owner_ids: list[int] = []
+                reason: str | None = None
+                if target is None:
+                    reason = (
+                        "Master, global, routing, or unknown targets are not portable"
+                    )
+                elif target.kind == "generator_parameter":
+                    if target.source_channel_iid in selected_set:
+                        owner_ids = [target.source_channel_iid]
+                    else:
+                        reason = "the target generator is not selected"
+                elif not include_mixer_insert:
+                    reason = "Save mixer insert is disabled"
+                else:
+                    owner_ids = generators_by_insert.get(
+                        target.source_insert_index or 0, []
+                    )
+                    if not owner_ids:
+                        reason = (
+                            "the target insert is unrelated to the selected generators"
+                        )
+
+                item = {
+                    "source_iid": automation_iid,
+                    "clip_name": section.name,
+                    "connection_role": role,
+                    "target": description,
+                }
+                if reason is not None:
+                    item["reason"] = reason
+                    excluded.append(item)
+                    continue
+                retained.append(item)
+                retained_event_ids.append(event_id)
+                connection_owner_ids.append(owner_ids)
+
+            if not retained_event_ids:
+                continue
+            unique_owners = {
+                owner for owner_ids in connection_owner_ids for owner in owner_ids
+            }
+            if individually and (
+                any(len(owner_ids) != 1 for owner_ids in connection_owner_ids)
+                or len(unique_owners) != 1
+            ):
+                blocking_error = (
+                    f'automation clip "{section.name}" controls a shared insert or '
+                    "spans multiple selected generators; save the selected generators as a group"
+                )
+                continue
+            retained_ids.append(automation_iid)
+            retained_target_event_ids[automation_iid] = retained_event_ids
+            if len(unique_owners) == 1:
+                owners[automation_iid] = next(iter(unique_owners))
+
+        return CapturePreflight(
+            token=self._capture_preflight_token(
+                source_hash,
+                channel_ids,
+                individually=individually,
+                include_mixer_insert=include_mixer_insert,
+            ),
+            selected_channel_ids=channel_ids,
+            retained_automation_ids=retained_ids,
+            retained_target_event_ids=retained_target_event_ids,
+            automation_owners=owners,
+            retained=retained,
+            excluded=excluded,
+            blocking_error=blocking_error,
+        )
+
+    def capture_preflight(
+        self,
+        *,
+        project_path: Path | None = None,
+        individually: bool = False,
+        include_mixer_insert: bool = True,
+    ) -> CapturePreflight:
+        session = self.bridge.session() if project_path is None else None
+        resolved = self._resolve_project(project_path, session)
+        raw = resolved.read_bytes()
+        project = FLPFile.from_bytes(raw)
+        channel_ids = (
+            self._session_channel_ids(project, session)
+            if session
+            else [section.iid for section in project.channel_sections()]
+        )
+        if not channel_ids:
+            raise FLPUnsupportedError("select at least one Channel Rack channel")
+        return self._analyze_capture(
+            project,
+            channel_ids,
+            hashlib.sha256(raw).hexdigest(),
+            individually=individually,
+            include_mixer_insert=include_mixer_insert,
+        )
+
     def capture(
         self,
         name: str,
@@ -172,6 +378,8 @@ class CapsuleService:
         preview_wav: Path | None = None,
         individually: bool = False,
         include_mixer_insert: bool = True,
+        omit_unsupported_automation: bool = False,
+        preflight_token: str | None = None,
         tags: list[str] | None = None,
         progress_callback: Callable[[int, str], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
@@ -184,7 +392,7 @@ class CapsuleService:
         session = self.bridge.session() if project_path is None else None
         project_path = self._resolve_project(project_path, session)
         progress(12, "Staging the saved project")
-        staged_source, _ = self._stage_project(project_path, "capture")
+        staged_source, source_hash = self._stage_project(project_path, "capture")
         generated_files = [staged_source]
         try:
             progress(18, "Reading and validating the FL Studio project")
@@ -205,28 +413,38 @@ class CapsuleService:
             sections_by_id = {
                 section.iid: section for section in project.channel_sections()
             }
+            preflight = self._analyze_capture(
+                project,
+                channel_ids,
+                source_hash,
+                individually=individually,
+                include_mixer_insert=include_mixer_insert,
+            )
+            if preflight_token is not None and preflight_token != preflight.token:
+                raise FLPUnsupportedError(
+                    "the FL Studio project or capture selection changed after confirmation; review the automation warning again"
+                )
+            if preflight.blocking_error:
+                raise FLPUnsupportedError(preflight.blocking_error)
+            if preflight.excluded and not omit_unsupported_automation:
+                details = "; ".join(
+                    f'{item["clip_name"]}: {item["target"]}'
+                    for item in preflight.excluded
+                )
+                raise FLPUnsupportedError(
+                    "the selected Automation Clips contain connections that cannot be saved: "
+                    + details
+                )
+            retained_automation_set = set(preflight.retained_automation_ids)
+            channel_ids = [
+                iid
+                for iid in channel_ids
+                if sections_by_id[iid].channel_type != 5
+                or iid in retained_automation_set
+            ]
             selected_automations = [
                 iid for iid in channel_ids if sections_by_id[iid].channel_type == 5
             ]
-            automation_targets: dict[int, int] = {}
-            if selected_automations:
-                bindings = project.automation_bindings()
-                selected_set = set(channel_ids)
-                known_ids = set(sections_by_id)
-                for automation_iid in selected_automations:
-                    target = bindings[automation_iid].target_channel_iid(known_ids)
-                    if target is None:
-                        raise FLPUnsupportedError(
-                            f'automation clip "{sections_by_id[automation_iid].name}" '
-                            "targets a mixer, effect, or global control; the first automation "
-                            "release supports Channel Rack targets only"
-                        )
-                    if target not in selected_set:
-                        raise FLPUnsupportedError(
-                            f'automation clip "{sections_by_id[automation_iid].name}" '
-                            "requires its target Channel Rack channel to be selected"
-                        )
-                    automation_targets[automation_iid] = target
 
             render_executable = self.settings.fl_executable
             live_macos_render = (
@@ -280,7 +498,7 @@ class CapsuleService:
                             *[
                                 automation
                                 for automation in selected_automations
-                                if automation_targets[automation] == primary
+                                if preflight.automation_owners[automation] == primary
                             ],
                         ]
                         for primary in primary_channels
@@ -309,6 +527,11 @@ class CapsuleService:
                             pattern_id,
                             selected_name,
                             include_mixer_insert=include_mixer_insert,
+                            automation_target_event_ids={
+                                iid: preflight.retained_target_event_ids[iid]
+                                for iid in selected
+                                if iid in preflight.retained_target_event_ids
+                            },
                         )
                         generated_files.append(staged)
                         output = self.settings.staging_dir / f"{slugify(selected_name)}.wav"
@@ -372,11 +595,13 @@ class CapsuleService:
         name: str,
         *,
         include_mixer_insert: bool,
+        automation_target_event_ids: dict[int, list[int]] | None = None,
     ) -> Path:
         preview = source.isolated_preview_project(
             channel_ids,
             pattern_id,
             preserve_mixer_inserts=include_mixer_insert,
+            automation_target_event_ids=automation_target_event_ids,
         )
         path = self.settings.staging_dir / f"preview-{slugify(name)}-{int(time.time() * 1000)}.flp"
         self._atomic_write(path, preview.to_bytes())
@@ -498,6 +723,25 @@ class CapsuleService:
             automation.source_iid: capsule.read_automation_binding(automation)
             for automation in manifest.automations
         }
+        automation_targets = {
+            automation.source_iid: capsule.read_automation_target(automation)
+            for automation in manifest.automations
+            if automation.targets
+        }
+        automation_remote_links = {
+            automation.source_iid: [
+                (
+                    connection.target,
+                    connection.binding,
+                    connection.remote_link,
+                )
+                for connection in capsule.read_automation_connections(automation)
+                if connection.binding is not None
+                and connection.remote_link is not None
+            ]
+            for automation in manifest.automations
+            if automation.targets
+        }
         automation_playlist_items = {
             automation.source_iid: capsule.read_automation_playlist(automation)
             for automation in manifest.automations
@@ -526,16 +770,13 @@ class CapsuleService:
                 else (session.current_pattern if session else project.current_pattern)
             )
             merged, mapping, new_pattern = project.append_capsule(
-                sections,
+                primary_sections,
                 notes_by_source,
                 source_ppq=manifest.source_ppq,
                 pattern_name=manifest.name,
                 target_pattern_id=(
                     active_pattern if destination_mode == "current_pattern" else None
                 ),
-                automation_bindings=automation_bindings,
-                automation_playlist_items=automation_playlist_items,
-                playlist_anchor=playlist_anchor,
             )
         elif mode == "override":
             targets = target_channels or (self._session_channel_ids(project, session) if session else [])
@@ -559,19 +800,11 @@ class CapsuleService:
                 section.iid: target
                 for section, target in zip(primary_sections, targets, strict=True)
             }
-            if automation_sections:
-                merged, mapping = merged.append_automation_channels(
-                    automation_sections,
-                    target_mapping=mapping,
-                    bindings=automation_bindings,
-                    playlist_items=automation_playlist_items,
-                    source_ppq=manifest.source_ppq,
-                    playlist_anchor=playlist_anchor,
-                )
             new_pattern = active_pattern
         else:
             raise ValueError("mode must be 'append' or 'override'")
 
+        mixer_insert_mapping: dict[int, int] = {}
         if manifest.mixer_inserts:
             progress(56, "Restoring mixer inserts and effects")
             mixer_requests = [
@@ -581,7 +814,29 @@ class CapsuleService:
                 )
                 for insert in manifest.mixer_inserts
             ]
-            merged, _ = merged.restore_mixer_insert_states(mixer_requests)
+            merged, mixer_destinations = merged.restore_mixer_insert_states(
+                mixer_requests
+            )
+            mixer_insert_mapping = {
+                insert.source_index: destination
+                for insert, destination in zip(
+                    manifest.mixer_inserts, mixer_destinations, strict=True
+                )
+            }
+
+        if automation_sections:
+            progress(59, "Restoring Automation Clips and target connections")
+            merged, mapping = merged.append_automation_channels(
+                automation_sections,
+                target_mapping=mapping,
+                bindings=automation_bindings,
+                targets=automation_targets,
+                remote_links=automation_remote_links,
+                mixer_insert_mapping=mixer_insert_mapping,
+                playlist_items=automation_playlist_items,
+                source_ppq=manifest.source_ppq,
+                playlist_anchor=playlist_anchor,
+            )
 
         progress(62, "Creating the safety backup")
         merged_bytes = merged.to_bytes()

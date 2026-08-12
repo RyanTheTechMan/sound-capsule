@@ -99,10 +99,13 @@ overwritten and can be revealed from the result message.
      chains are restored to fresh inserts and only the overridden channels are
      rerouted; capsules without mixer state keep the existing destinations.
 
-Selected Automation Clips that target captured Channel Rack channels are saved
-with their current-arrangement Playlist instances. On import, those instances
-are recreated from the playhead. Mixer, effect, and global-control automation is
-not yet supported.
+Selected Automation Clips that target a captured generator, a portable control
+on its saved non-Master insert, or an effect on that insert are saved with their
+current-arrangement Playlist instances. On import, those instances are recreated
+from the playhead and mixer targets follow the newly allocated insert. Master,
+global, routing, send, and unrelated-insert connections are never embedded; the
+app lists them before capture and asks before omitting those connections. A
+selected clip is omitted only when no portable destination remains.
 
 Sound Capsule creates a backup before changing a project. **Undo Import** is
 available for the recovery period configured in Settings.

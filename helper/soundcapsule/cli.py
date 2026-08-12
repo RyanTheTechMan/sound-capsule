@@ -35,6 +35,11 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="save channels without their non-Master mixer insert state",
     )
+    capture.add_argument(
+        "--omit-unsupported-automation",
+        action="store_true",
+        help="omit unsupported connections and clips with no portable target",
+    )
     import_cmd = commands.add_parser("import")
     import_cmd.add_argument("id")
     import_cmd.add_argument("--mode", choices=("append", "override"), default="append")
@@ -113,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
                 preview_wav=args.preview,
                 individually=args.individual,
                 include_mixer_insert=not args.no_mixer_insert,
+                omit_unsupported_automation=args.omit_unsupported_automation,
             )
             _print({"created": [str(item.path) for item in capsules]})
         elif args.command == "import":

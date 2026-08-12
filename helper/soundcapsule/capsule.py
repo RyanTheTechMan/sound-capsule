@@ -15,10 +15,22 @@ import tempfile
 import uuid
 import zipfile
 
-from .flp import AutomationBinding, FLPFile, FLPUnsupportedError, NoteRecord, PlaylistItem
+from .flp import (
+    AutomationBinding,
+    AutomationConnection,
+    AutomationTarget,
+    FLPFile,
+    FLPUnsupportedError,
+    MIXER_PARAM_SLOT_ENABLED,
+    MIXER_PARAM_SLOT_MIX,
+    NoteRecord,
+    PlaylistItem,
+    PORTABLE_GENERATOR_CONTROL_IDS,
+    PORTABLE_MIXER_PARAM_IDS,
+)
 
 
-CAPSULE_SCHEMA_VERSION = 4
+CAPSULE_SCHEMA_VERSION = 5
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
@@ -139,11 +151,35 @@ class ChannelManifest:
 
 
 @dataclass(slots=True)
+class AutomationTargetManifest:
+    role: str
+    target_kind: str
+    state_path: str
+    source_channel_iid: int | None = None
+    source_insert_index: int | None = None
+    slot_index: int | None = None
+    parameter_index: int | None = None
+    control_id: int | None = None
+
+    def to_flp_target(self) -> AutomationTarget:
+        return AutomationTarget(
+            kind=self.target_kind,
+            source_channel_iid=self.source_channel_iid,
+            source_insert_index=self.source_insert_index,
+            slot_index=self.slot_index,
+            parameter_index=self.parameter_index,
+            control_id=self.control_id,
+        )
+
+
+@dataclass(slots=True)
 class AutomationManifest:
     source_iid: int
-    target_source_iid: int
-    binding_path: str
     playlist_path: str
+    targets: list[AutomationTargetManifest] = field(default_factory=list)
+    # Schemas 1-4 stored a singular Channel Rack target directly here.
+    target_source_iid: int | None = None
+    binding_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -203,7 +239,14 @@ class CapsuleManifest:
         )
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        for automation in payload["automations"]:
+            if self.schema_version >= 5:
+                automation.pop("target_source_iid", None)
+                automation.pop("binding_path", None)
+            else:
+                automation.pop("targets", None)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict) -> "CapsuleManifest":
@@ -224,7 +267,18 @@ class CapsuleManifest:
         if not isinstance(mixer_inserts_payload, list):
             raise ValueError("capsule manifest mixer_inserts must be a list")
         channels = [ChannelManifest(**item) for item in channels_payload]
-        automations = [AutomationManifest(**item) for item in automations_payload]
+        automations: list[AutomationManifest] = []
+        for item in automations_payload:
+            if not isinstance(item, dict):
+                raise ValueError("capsule automation metadata must be an object")
+            automation_values = dict(item)
+            targets_payload = automation_values.pop("targets", [])
+            if not isinstance(targets_payload, list):
+                raise ValueError("capsule automation targets must be a list")
+            targets = [AutomationTargetManifest(**target) for target in targets_payload]
+            automations.append(
+                AutomationManifest(targets=targets, **automation_values)
+            )
         mixer_inserts = [
             MixerInsertManifest(**item) for item in mixer_inserts_payload
         ]
@@ -238,7 +292,7 @@ class CapsuleManifest:
         return manifest
 
     def validate(self) -> None:
-        if self.schema_version not in {1, 2, 3, CAPSULE_SCHEMA_VERSION}:
+        if self.schema_version not in set(range(1, CAPSULE_SCHEMA_VERSION + 1)):
             relation = "newer" if self.schema_version > CAPSULE_SCHEMA_VERSION else "unsupported legacy"
             raise ValueError(f"{relation} capsule schema {self.schema_version}; supported schema is {CAPSULE_SCHEMA_VERSION}")
         try:
@@ -274,13 +328,102 @@ class CapsuleManifest:
         for automation in self.automations:
             if automation.source_iid not in source_ids:
                 raise ValueError("automation metadata references a missing channel")
-            if automation.target_source_iid not in source_ids:
-                raise ValueError("automation target is not included in the capsule")
             if channels_by_id[automation.source_iid].channel_type != 5:
                 raise ValueError("automation metadata references a non-automation channel")
-            if channels_by_id[automation.target_source_iid].channel_type == 5:
-                raise ValueError("automation target must be a generator or sampler channel")
-            paths.extend([automation.binding_path, automation.playlist_path])
+            paths.append(automation.playlist_path)
+            if self.schema_version < 5:
+                if automation.targets:
+                    raise ValueError("legacy capsule schemas cannot contain automation target lists")
+                if automation.target_source_iid not in source_ids:
+                    raise ValueError("automation target is not included in the capsule")
+                if channels_by_id[automation.target_source_iid].channel_type == 5:
+                    raise ValueError("automation target must be a generator or sampler channel")
+                if not automation.binding_path:
+                    raise ValueError("automation target binding is missing")
+                paths.append(automation.binding_path)
+                continue
+            if automation.target_source_iid is not None or automation.binding_path is not None:
+                raise ValueError("schema-5 automation cannot use legacy singular target fields")
+            if not automation.targets:
+                raise ValueError("schema-5 automation requires at least one target")
+            if automation.targets[0].role != "primary" or sum(
+                target.role == "primary" for target in automation.targets
+            ) != 1:
+                raise ValueError(
+                    "schema-5 automation requires exactly one primary connection"
+                )
+            target_paths: list[str] = []
+            target_identities: list[tuple[object, ...]] = []
+            for target in automation.targets:
+                if target.role not in {"primary", "linked"}:
+                    raise ValueError("unsupported automation connection role")
+                if target.target_kind == "generator_parameter":
+                    channel = channels_by_id.get(target.source_channel_iid)
+                    if channel is None or channel.channel_type == 5:
+                        raise ValueError("automation generator target is not included")
+                    if target.source_insert_index is not None or target.slot_index is not None:
+                        raise ValueError("automation generator target contains mixer identity")
+                    plugin_parameter = (
+                        target.parameter_index is not None
+                        and 0 <= target.parameter_index <= 0x7FFF
+                        and target.control_id is None
+                    )
+                    channel_control = (
+                        target.parameter_index is None
+                        and target.control_id in PORTABLE_GENERATOR_CONTROL_IDS
+                    )
+                    if not (plugin_parameter or channel_control):
+                        raise ValueError("automation generator parameter is invalid")
+                elif target.target_kind in {
+                    "insert_control", "effect_parameter", "effect_slot_control"
+                }:
+                    if target.source_insert_index is None or target.source_insert_index <= 0:
+                        raise ValueError("automation mixer target cannot reference Master")
+                    if target.source_channel_iid is not None:
+                        raise ValueError("automation mixer target contains channel identity")
+                    if target.target_kind == "insert_control":
+                        if (
+                            target.slot_index is not None
+                            or target.control_id
+                            not in PORTABLE_MIXER_PARAM_IDS
+                            - {MIXER_PARAM_SLOT_ENABLED, MIXER_PARAM_SLOT_MIX}
+                            or target.parameter_index is not None
+                        ):
+                            raise ValueError("automation insert control target is invalid")
+                    elif target.slot_index is None or not 0 <= target.slot_index < 10:
+                        raise ValueError("automation effect slot target is invalid")
+                    elif target.target_kind == "effect_parameter" and (
+                        target.parameter_index is None
+                        or not 0 <= target.parameter_index <= 0x7FFF
+                        or target.control_id is not None
+                    ):
+                        raise ValueError("automation effect parameter is invalid")
+                    elif target.target_kind == "effect_slot_control" and (
+                        target.control_id
+                        not in {MIXER_PARAM_SLOT_ENABLED, MIXER_PARAM_SLOT_MIX}
+                        or target.parameter_index is not None
+                    ):
+                        raise ValueError("automation effect-slot control is invalid")
+                else:
+                    raise ValueError("automation target kind is unsupported")
+                if not re.fullmatch(r"automation/[A-Za-z0-9._-]+\.bin", target.state_path):
+                    raise ValueError("automation target has an invalid state path")
+                target_paths.append(target.state_path)
+                target_identities.append(
+                    (
+                        target.target_kind,
+                        target.source_channel_iid,
+                        target.source_insert_index,
+                        target.slot_index,
+                        target.parameter_index,
+                        target.control_id,
+                    )
+                )
+            if len(target_paths) != len(set(target_paths)):
+                raise ValueError("automation target paths must be unique")
+            if len(target_identities) != len(set(target_identities)):
+                raise ValueError("automation targets must be unique")
+            paths.extend(target_paths)
         if self.schema_version >= 3 and set(automation_ids) != {
             channel.source_iid for channel in self.channels if channel.channel_type == 5
         }:
@@ -312,6 +455,17 @@ class CapsuleManifest:
             raise ValueError("capsule channel is associated with multiple mixer inserts")
         if self.schema_version < 4 and self.mixer_inserts:
             raise ValueError("legacy capsule schemas cannot contain mixer insert state")
+        if self.schema_version >= 5:
+            saved_insert_indices = set(mixer_indices)
+            for automation in self.automations:
+                for target in automation.targets:
+                    if (
+                        target.source_insert_index is not None
+                        and target.source_insert_index not in saved_insert_indices
+                    ):
+                        raise ValueError(
+                            "automation mixer target does not reference a saved insert"
+                        )
         if len(paths) != len(set(paths)):
             raise ValueError("capsule manifest reuses a member path")
 
@@ -357,7 +511,12 @@ class Capsule:
                 if channel.sample_asset:
                     required.add(channel.sample_asset)
             for automation in manifest.automations:
-                required.update({automation.binding_path, automation.playlist_path})
+                required.add(automation.playlist_path)
+                if manifest.schema_version < 5:
+                    assert automation.binding_path is not None
+                    required.add(automation.binding_path)
+                else:
+                    required.update(target.state_path for target in automation.targets)
             for insert in manifest.mixer_inserts:
                 required.add(insert.state_path)
             missing = required - names
@@ -392,18 +551,55 @@ class Capsule:
                 FLPFile.from_bytes(_read_limited(archive, channel.state_path, MAX_CHANNEL_STATE_BYTES))
                 NoteRecord.parse_many(_read_limited(archive, channel.notes_path, MAX_NOTES_BYTES))
             for automation in manifest.automations:
-                bindings = AutomationBinding.parse_many(
-                    _read_limited(
-                        archive,
-                        automation.binding_path,
-                        MAX_AUTOMATION_METADATA_BYTES,
+                if manifest.schema_version < 5:
+                    assert automation.binding_path is not None
+                    bindings = AutomationBinding.parse_many(
+                        _read_limited(
+                            archive,
+                            automation.binding_path,
+                            MAX_AUTOMATION_METADATA_BYTES,
+                        )
                     )
-                )
-                if len(bindings) != 1:
-                    raise ValueError("automation metadata must contain exactly one target binding")
-                known_ids = {channel.source_iid for channel in manifest.channels}
-                if bindings[0].target_channel_iid(known_ids) != automation.target_source_iid:
-                    raise ValueError("automation target binding does not match the manifest")
+                    if len(bindings) != 1:
+                        raise ValueError("automation metadata must contain exactly one target binding")
+                    known_ids = {channel.source_iid for channel in manifest.channels}
+                    if bindings[0].target_channel_iid(known_ids) != automation.target_source_iid:
+                        raise ValueError("automation target binding does not match the manifest")
+                else:
+                    identity_channels = {
+                        channel.source_iid: channel.source_iid
+                        for channel in manifest.channels
+                    }
+                    identity_inserts = {
+                        insert.source_index: insert.source_index
+                        for insert in manifest.mixer_inserts
+                    }
+                    for target in automation.targets:
+                        connection = AutomationConnection.from_bytes(
+                            _read_limited(
+                                archive,
+                                target.state_path,
+                                MAX_AUTOMATION_METADATA_BYTES,
+                            ),
+                            role=target.role,
+                            target=target.to_flp_target(),
+                        )
+                        expected_event_id = target.to_flp_target().target_event_id(
+                            channel_mapping=identity_channels,
+                            insert_mapping=identity_inserts,
+                        )
+                        if connection.target_event_id != expected_event_id:
+                            raise ValueError(
+                                "automation target binding does not match the manifest"
+                            )
+                        if (
+                            connection.remote_link is not None
+                            and connection.remote_link.source_automation_iid
+                            != automation.source_iid
+                        ):
+                            raise ValueError(
+                                "automation controller link does not match its source clip"
+                            )
                 playlist = PlaylistItem.parse_many(
                     _read_limited(
                         archive,
@@ -424,6 +620,22 @@ class Capsule:
                     )
                 )
                 state.validate_mixer_insert_state()
+                if manifest.schema_version >= 5:
+                    occupied_slots = {
+                        slot.index for slot in state.mixer_effect_slots() if slot.occupied
+                    }
+                    for automation in manifest.automations:
+                        for target in automation.targets:
+                            if (
+                                target.source_insert_index == insert.source_index
+                                and target.target_kind in {
+                                    "effect_parameter", "effect_slot_control"
+                                }
+                                and target.slot_index not in occupied_slots
+                            ):
+                                raise ValueError(
+                                    "automation target references an empty effect slot"
+                                )
             if container_format == "legacy":
                 _validate_wave_member(archive, manifest.preview_path)
             elif container_info is None or container_info.scap_offset > MAX_PREVIEW_BYTES:
@@ -499,14 +711,77 @@ class Capsule:
     def read_automation_binding(
         self, automation: AutomationManifest
     ) -> AutomationBinding:
+        path = automation.binding_path
+        if path is None:
+            primary = next(
+                (target for target in automation.targets if target.role == "primary"),
+                None,
+            )
+            if primary is None:
+                raise ValueError("automation metadata has no primary target")
+            with _open_capsule_archive(self.path) as archive:
+                connection = AutomationConnection.from_bytes(
+                    _read_limited(
+                        archive,
+                        primary.state_path,
+                        MAX_AUTOMATION_METADATA_BYTES,
+                    ),
+                    role=primary.role,
+                    target=primary.to_flp_target(),
+                )
+            assert connection.binding is not None
+            return connection.binding
         with _open_capsule_archive(self.path) as archive:
             raw = _read_limited(
-                archive, automation.binding_path, MAX_AUTOMATION_METADATA_BYTES
+                archive, path, MAX_AUTOMATION_METADATA_BYTES
             )
         records = AutomationBinding.parse_many(raw)
         if len(records) != 1:
             raise ValueError("automation metadata must contain exactly one target binding")
         return records[0]
+
+    @staticmethod
+    def read_automation_target(
+        automation: AutomationManifest,
+    ) -> AutomationTarget:
+        if automation.targets:
+            primary = next(
+                (target for target in automation.targets if target.role == "primary"),
+                None,
+            )
+            if primary is None:
+                raise ValueError("automation metadata has no primary target")
+            return primary.to_flp_target()
+        if automation.target_source_iid is None:
+            raise ValueError("legacy automation target is missing")
+        # Legacy bindings retain their exact low event word and are remapped by
+        # the compatibility path in FLPFile rather than this placeholder.
+        return AutomationTarget(
+            kind="generator_parameter",
+            source_channel_iid=automation.target_source_iid,
+            parameter_index=0,
+        )
+
+    def read_automation_connections(
+        self, automation: AutomationManifest
+    ) -> list[AutomationConnection]:
+        if not automation.targets:
+            return []
+        connections: list[AutomationConnection] = []
+        with _open_capsule_archive(self.path) as archive:
+            for target in automation.targets:
+                connections.append(
+                    AutomationConnection.from_bytes(
+                        _read_limited(
+                            archive,
+                            target.state_path,
+                            MAX_AUTOMATION_METADATA_BYTES,
+                        ),
+                        role=target.role,
+                        target=target.to_flp_target(),
+                    )
+                )
+        return connections
 
     def read_automation_playlist(
         self, automation: AutomationManifest
@@ -641,9 +916,15 @@ class Capsule:
         selected_automation_ids = [
             section.iid for section in sections if section.channel_type == 5
         ]
-        automation_bindings = project.automation_bindings()
         automation_items = project.playlist_items_for_channels(selected_automation_ids)
-        known_channel_ids = {section.iid for section in project.channel_sections()}
+        selected_generator_ids = {
+            section.iid for section in sections if section.channel_type != 5
+        }
+        captured_insert_indices = {
+            section.mixer_insert
+            for section in sections
+            if section.channel_type != 5 and section.mixer_insert > 0
+        } if include_mixer_insert else set()
 
         for index, section in enumerate(sections):
             state_path = f"channels/{index:03d}.fst"
@@ -669,37 +950,68 @@ class Capsule:
                 )
             )
             if section.channel_type == 5:
-                binding = automation_bindings.get(section.iid)
-                if binding is None:
-                    raise FLPUnsupportedError(
-                        f'automation clip "{section.name}" is missing its target binding'
+                allowed_target_event_ids: set[int] = set()
+                for _, binding, remote_link in project.automation_connection_records(
+                    section.iid
+                ):
+                    event_id = (
+                        binding.target_event_id
+                        if binding is not None
+                        else remote_link.target_event_id
+                        if remote_link is not None
+                        else -1
                     )
-                target_source_iid = binding.target_channel_iid(known_channel_ids)
-                if target_source_iid is None:
+                    target = project.classify_automation_event_id(event_id)
+                    if target is None:
+                        continue
+                    if (
+                        target.kind == "generator_parameter"
+                        and target.source_channel_iid in selected_generator_ids
+                    ) or (
+                        target.kind != "generator_parameter"
+                        and target.source_insert_index in captured_insert_indices
+                    ):
+                        allowed_target_event_ids.add(event_id)
+                connections = project.automation_connections(
+                    section.iid,
+                    allowed_target_event_ids=allowed_target_event_ids,
+                )
+                if not connections:
                     raise FLPUnsupportedError(
-                        f'automation clip "{section.name}" targets a mixer, effect, or global control; '
-                        "the first automation release supports Channel Rack targets only"
-                    )
-                if target_source_iid not in channel_ids:
-                    raise FLPUnsupportedError(
-                        f'automation clip "{section.name}" targets channel {target_source_iid}; '
-                        "select that Channel Rack channel too"
+                        f'automation clip "{section.name}" target is not portable '
+                        "with the selected generators"
                     )
                 playlist = automation_items.get(section.iid, [])
                 if not playlist:
                     raise FLPUnsupportedError(
                         f'automation clip "{section.name}" is not placed in the current Playlist arrangement'
                     )
-                binding_path = f"automation/{index:03d}-binding.bin"
                 playlist_path = f"automation/{index:03d}-playlist.bin"
-                files[binding_path] = binding.raw
                 files[playlist_path] = b"".join(item.raw for item in playlist)
+                target_manifests: list[AutomationTargetManifest] = []
+                for connection_index, connection in enumerate(connections):
+                    state_path = (
+                        f"automation/{index:03d}-target-{connection_index:03d}.bin"
+                    )
+                    files[state_path] = connection.to_bytes()
+                    target = connection.target
+                    target_manifests.append(
+                        AutomationTargetManifest(
+                            role=connection.role,
+                            target_kind=target.kind,
+                            state_path=state_path,
+                            source_channel_iid=target.source_channel_iid,
+                            source_insert_index=target.source_insert_index,
+                            slot_index=target.slot_index,
+                            parameter_index=target.parameter_index,
+                            control_id=target.control_id,
+                        )
+                    )
                 automation_manifests.append(
                     AutomationManifest(
                         source_iid=section.iid,
-                        target_source_iid=target_source_iid,
-                        binding_path=binding_path,
                         playlist_path=playlist_path,
+                        targets=target_manifests,
                     )
                 )
 
