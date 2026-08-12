@@ -77,6 +77,12 @@ version's section is also used as its GitHub release notes.
 - The macOS application carries its helper and FL Studio bridge inside the app
   bundle, so moving only `Sound Capsule.app` out of the release ZIP no longer
   leaves the self-contained helper behind.
+- Undo Import now saves a dirty FL Studio project before creating its safety
+  backup and restoring the pre-import project, instead of silently stopping
+  until the project is saved manually.
+- Automation omission warnings use a concise **Continue** action.
+- Library rows separate generator, automation, and effect counts, and Automation
+  Clips no longer appear in generator plug-in names or capture suggestions.
 
 ## [0.4.0] - 2026-08-10
 

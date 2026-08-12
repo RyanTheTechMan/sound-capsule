@@ -1186,25 +1186,38 @@ SoundCapsuleAudioProcessorEditor::SoundCapsuleAudioProcessorEditor(SoundCapsuleA
                 juce::MessageBoxIconType::WarningIcon,
                 "Undo last import?",
                 "This restores the project backup from before the import and can replace changes "
-                "made since then. Sound Capsule will first save the current project as a safety backup.",
+                "made since then. Sound Capsule will first save the current FL Studio project so "
+                "all unsaved changes are included in the safety backup.",
                 "Restore backup", "Cancel", safe.getComponent()),
             [safe](int result) {
                 if (safe == nullptr || result != 1) return;
-                safe->sendCommand(
-                    "undo_import", object({{"open", true}}),
-                    [safe](juce::var response) {
+                safe->operationCancelRequested.store(false);
+                safe->runAfterProjectSaved(
+                    [safe] {
                         if (safe == nullptr) return;
-                        const auto confirmed = static_cast<bool>(
-                            response.getProperty("reload_confirmed", false));
-                        safe->undoImport.setVisible(false);
-                        safe->resized();
-                        safe->status.setText(
-                            confirmed ? "Last import restored"
-                                      : "Backup restored; verify FL reloaded the project",
-                            juce::dontSendNotification);
-                        safe->refreshSessionStatus();
+                        safe->sendCommand(
+                            "undo_import", object({{"open", true}}),
+                            [safe](juce::var response) {
+                                if (safe == nullptr) return;
+                                const auto confirmed = static_cast<bool>(
+                                    response.getProperty("reload_confirmed", false));
+                                safe->undoImport.setVisible(false);
+                                safe->resized();
+                                safe->status.setText(
+                                    confirmed ? "Last import restored"
+                                              : "Backup restored; verify FL reloaded the project",
+                                    juce::dontSendNotification);
+                                safe->refreshSessionStatus();
+                            },
+                            120000);
                     },
-                    120000);
+                    [safe](const juce::String& error) {
+                        if (safe != nullptr)
+                            safe->status.setText(
+                                "Could not prepare Undo Import: " + error,
+                                juce::dontSendNotification);
+                    },
+                    false);
             });
     };
     setup.onClick = [this] { showSetup(false); };
@@ -1439,8 +1452,10 @@ juce::String SoundCapsuleAudioProcessorEditor::getNameForRow(int rowNumber)
     auto description = row.name;
     if (row.plugins.isNotEmpty())
         description << ", " << row.plugins;
-    description << ", " << row.channelCount
-                << (row.channelCount == 1 ? " channel" : " channels")
+    description << ", " << row.generatorCount
+                << (row.generatorCount == 1 ? " generator" : " generators")
+                << ", " << row.automationCount
+                << (row.automationCount == 1 ? " automation" : " automations")
                 << ", " << row.effectNames.size()
                 << (row.effectNames.size() == 1 ? " effect" : " effects")
                 << ", " << row.useCount << (row.useCount == 1 ? " use" : " uses");
@@ -1531,7 +1546,7 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
     graphics.setColour(juce::Colours::white);
     graphics.setFont(15.0f);
     graphics.drawText(row.name, nameX, 2,
-                      juce::jmax(0, actionsX - 215 - nameX), 20,
+                      juce::jmax(0, actionsX - 310 - nameX), 20,
                       juce::Justification::centredLeft);
     graphics.setColour(juce::Colours::lightgrey);
     graphics.setFont(12.0f);
@@ -1558,13 +1573,15 @@ void SoundCapsuleAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Gra
         graphics.setColour(active ? background : juce::Colours::lightgrey);
         graphics.drawText(tag, chip.reduced(6, 0), juce::Justification::centred, true);
     }
-    const auto countText = juce::String(row.channelCount)
-                         + (row.channelCount == 1 ? " channel" : " channels")
+    const auto countText = juce::String(row.generatorCount)
+                         + (row.generatorCount == 1 ? " generator" : " generators")
+                         + "  |  " + juce::String(row.automationCount)
+                         + (row.automationCount == 1 ? " automation" : " automations")
                          + "  |  " + juce::String(row.effectNames.size())
                          + (row.effectNames.size() == 1 ? " effect" : " effects")
                          + "  |  " + juce::String(row.useCount)
                          + (row.useCount == 1 ? " use" : " uses");
-    graphics.drawText(countText, actionsX - 205, 2, 195, 20,
+    graphics.drawText(countText, actionsX - 300, 2, 290, 20,
                       juce::Justification::centredRight);
 
     const auto favoriteCentre = juce::Point<float>(static_cast<float>(actionsX + 18),
@@ -2048,7 +2065,7 @@ SoundCapsuleAudioProcessorEditor::hitTestRow(juce::Point<int> position, int rowW
         return RowHoverTarget::versionWarning;
     const auto actionsX = rowWidth - 108;
     if (effectsVisible
-        && juce::Rectangle<int>(actionsX - 205, 2, 195, 20).contains(position))
+        && juce::Rectangle<int>(actionsX - 300, 2, 290, 20).contains(position))
         return RowHoverTarget::effects;
     if (position.y >= 39 && position.x >= 46 && position.x < actionsX - 8)
         return RowHoverTarget::seek;
@@ -2309,7 +2326,14 @@ SoundCapsuleAudioProcessorEditor::capsuleRowFromValue(const juce::var& value)
     juce::StringArray pluginNames, tagNames;
     if (auto* array = plugins.getArray())
         for (const auto& item : *array)
-            pluginNames.add(item.toString());
+        {
+            const auto pluginName = item.toString().trim();
+            if (pluginName == "Automation Clip")
+                ++row.automationCount;
+            else if (pluginName.isNotEmpty())
+                pluginNames.add(pluginName);
+        }
+    row.generatorCount = juce::jmax(0, row.channelCount - row.automationCount);
     if (auto* array = tagValues.getArray())
         for (const auto& item : *array)
             tagNames.add(item.toString());
@@ -2707,21 +2731,37 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         }
         auto selectedCount = 0;
         auto selectedAutomationCount = 0;
-        juce::StringArray selectedNames;
+        juce::StringArray selectedGeneratorNames;
         if (auto* selectedChannels = response.getProperty("selected_channels", juce::var()).getArray())
             selectedCount = selectedChannels->size();
-        if (auto* names = response.getProperty("selected_channel_names", juce::var()).getArray())
-            for (const auto& name : *names)
-                if (name.toString().trim().isNotEmpty())
-                    selectedNames.add(name.toString().trim());
-        if (auto* types = response.getProperty("selected_channel_types", juce::var()).getArray())
-            for (const auto& type : *types)
+        const auto* selectedTypes = response.getProperty(
+            "selected_channel_types", juce::var()).getArray();
+        if (selectedTypes != nullptr)
+        {
+            for (const auto& type : *selectedTypes)
                 if (static_cast<int>(type) == 5)
                     ++selectedAutomationCount;
+        }
+        if (auto* names = response.getProperty(
+                "selected_channel_names", juce::var()).getArray())
+        {
+            for (int index = 0; index < names->size(); ++index)
+            {
+                const auto name = (*names)[index].toString().trim();
+                const auto isAutomation = selectedTypes != nullptr
+                                       && index < selectedTypes->size()
+                                       && static_cast<int>((*selectedTypes)[index]) == 5;
+                if (name.isNotEmpty() && !isAutomation)
+                    selectedGeneratorNames.add(name);
+            }
+        }
+        const auto selectedGeneratorCount = juce::jmax(
+            0, selectedCount - selectedAutomationCount);
 
-        auto nextSuggestion = selectedNames.joinIntoString(" + ");
-        if (nextSuggestion.length() > 80 && selectedNames.size() > 1)
-            nextSuggestion = selectedNames[0] + " + " + juce::String(selectedNames.size() - 1) + " more";
+        auto nextSuggestion = selectedGeneratorNames.joinIntoString(" + ");
+        if (nextSuggestion.length() > 80 && selectedGeneratorNames.size() > 1)
+            nextSuggestion = selectedGeneratorNames[0] + " + "
+                           + juce::String(selectedGeneratorNames.size() - 1) + " more";
         if (!safe->capsuleNameCustom)
             safe->capsuleName.setText(nextSuggestion, false);
         safe->suggestedCapsuleName = nextSuggestion;
@@ -2749,29 +2789,35 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
                                       dirty ? juce::Colours::orange : juce::Colours::white);
         safe->patternStatus.setText("Pattern: " + patternName, juce::dontSendNotification);
         safe->patternStatus.setColour(juce::Label::textColourId, juce::Colours::white);
-        const auto saveVisibilityChanged = safe->saveGroup.isVisible() != (selectedCount > 0)
-                                        || safe->saveIndividual.isVisible() != (selectedCount > 1)
+        const auto saveVisibilityChanged = safe->saveGroup.isVisible()
+                                                != (selectedGeneratorCount > 0)
+                                        || safe->saveIndividual.isVisible()
+                                                != (selectedGeneratorCount > 1)
                                         || !mixerInsertWasVisible
                                         || !relatedAutomationWasVisible
                                         || !safe->selectionSummary.isVisible();
-        safe->saveGroup.setButtonText(selectedCount > 1 ? "Save selected" : "Save capsule");
-        safe->saveGroup.setVisible(selectedCount > 0);
-        safe->saveIndividual.setVisible(selectedCount > 1);
+        safe->saveGroup.setButtonText(selectedGeneratorCount > 1
+                                          ? "Save selected" : "Save capsule");
+        safe->saveGroup.setVisible(selectedGeneratorCount > 0);
+        safe->saveIndividual.setVisible(selectedGeneratorCount > 1);
         if (selectedCount > 0)
         {
-            auto selectionText = "Selected in FL: " + juce::String(selectedCount)
-                               + (selectedCount == 1 ? " channel" : " channels");
-            if (!selectedNames.isEmpty())
+            auto selectionText = "Selected in FL: "
+                               + juce::String(selectedGeneratorCount)
+                               + (selectedGeneratorCount == 1
+                                      ? " generator" : " generators");
+            if (!selectedGeneratorNames.isEmpty())
                 selectionText << "  " << juce::String::charToString(0x2014) << "  "
-                              << selectedNames.joinIntoString(", ");
+                              << selectedGeneratorNames.joinIntoString(", ");
             if (selectedAutomationCount > 0)
                 selectionText << "  " << juce::String::charToString(0x2022) << "  "
                               << selectedAutomationCount
                               << (selectedAutomationCount == 1
-                                      ? " automation clip"
-                                      : " automation clips");
+                                      ? " automation"
+                                      : " automations");
             safe->selectionSummary.setText(selectionText, juce::dontSendNotification);
-            safe->selectionSummary.setTooltip(selectedNames.joinIntoString(", "));
+            safe->selectionSummary.setTooltip(
+                selectedGeneratorNames.joinIntoString(", "));
         }
         else
         {
@@ -2802,7 +2848,7 @@ void SoundCapsuleAudioProcessorEditor::refreshSessionStatus()
         safe->connectionStatus.setTooltip(
             "FL MIDI scripting API " + response.getProperty("midi_api_version", 0).toString());
         safe->patternStatus.setTooltip(patternName);
-        safe->saveGroup.setTooltip(selectedNames.joinIntoString(", "));
+        safe->saveGroup.setTooltip(selectedGeneratorNames.joinIntoString(", "));
         if (connectionWarningWasVisible || !importFieldsWereVisible
             || undoVisibilityChanged || saveVisibilityChanged)
             safe->resized();
@@ -2926,7 +2972,7 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
                     juce::MessageBoxOptions::makeOptionsOkCancel(
                         juce::MessageBoxIconType::WarningIcon,
                         "Automation content will be omitted", message,
-                        "Continue without excluded connections", "Cancel",
+                        "Continue", "Cancel",
                         safe.getComponent()),
                     [safe, captureOperationId, token, showFailure,
                      startCapture](int result) {
@@ -3800,12 +3846,14 @@ void SoundCapsuleAudioProcessorEditor::showSetup(bool initial)
 }
 
 void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(
-    std::function<void()> action, std::function<void(juce::String)> onFailure)
+    std::function<void()> action, std::function<void(juce::String)> onFailure,
+    bool confirmUnsavedChanges)
 {
     juce::Component::SafePointer<SoundCapsuleAudioProcessorEditor> safe(this);
     sendCommand("session", object({}),
                 [safe, continuation = std::move(action),
-                 failure = onFailure](juce::var response) mutable {
+                 failure = onFailure,
+                 confirmUnsavedChanges](juce::var response) mutable {
         if (safe == nullptr) return;
         const auto changed = static_cast<int>(response.getProperty("changed", 0));
         const auto previousSequence = static_cast<int>(response.getProperty("save_sequence", 0));
@@ -3815,6 +3863,12 @@ void SoundCapsuleAudioProcessorEditor::runAfterProjectSaved(
             // temporarily headed by a rendered Sound Capsule preview. Even a
             // clean project is saved so the helper can identify the exact FLP
             // from its fresh modification time instead of guessing.
+            safe->waitForFlSave(previousSequence, std::move(continuation),
+                                std::move(failure));
+            return;
+        }
+        if (!confirmUnsavedChanges)
+        {
             safe->waitForFlSave(previousSequence, std::move(continuation),
                                 std::move(failure));
             return;

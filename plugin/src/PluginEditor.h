@@ -112,6 +112,8 @@ private:
         juce::StringArray effectNames;
         bool favorite = false;
         int channelCount = 0;
+        int generatorCount = 0;
+        int automationCount = 0;
         int useCount = 0;
         juce::String capsulePath;
         std::vector<NotePreview> notes;
@@ -160,7 +162,8 @@ private:
                                juce::String notice = {});
 #endif
     void runAfterProjectSaved(std::function<void()> action,
-                              std::function<void(juce::String)> onFailure = {});
+                              std::function<void(juce::String)> onFailure = {},
+                              bool confirmUnsavedChanges = true);
     void waitForFlSave(int previousSaveSequence, std::function<void()> action,
                        std::function<void(juce::String)> onFailure = {});
     void stopPreviewPlayback();
