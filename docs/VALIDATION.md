@@ -18,7 +18,9 @@ uv run --python 3.12 --project helper python -m unittest discover -s helper/test
 It covers lossless parsing, opaque events, exact note properties, grouped and
 individual capsule packaging, selected Automation Clip multi-target decoding,
 filtering, remapping, and playhead placement, automation-aware sanitized
-Song-mode previews, mixer insert and gapped
+Song-mode previews, selection/playhead phrase resolution, FL 25/26 Playlist
+offset decoding, boundary cropping, repeated Pattern placement restoration,
+mixer insert and gapped
 effect-slot extraction, shared-chain restoration, bypass/mix parameters, pristine
 insert allocation, embedded Sampler assets, ZIP/checksum attacks,
 new-pattern and current-pattern append, override, PPQ scaling, isolated preview construction, project lookup,
@@ -107,18 +109,22 @@ release is claimed as host-tested:
    external I/O are absent; repeat with the option disabled. Test generators with
    long release, tempo sync, sidechain assumptions, and missing dependencies.
 4. Append to both the active pattern and a new pattern at matching and different
-   PPQ. Verify plugin state, pattern selection/naming, all note properties,
+   PPQ. Verify schema-6 append creates an isolated pattern even when the saved
+   preference is **Current pattern**, while schemas 1–5 retain their legacy
+   current-pattern behavior. Verify plugin state, pattern selection/naming, all note properties,
    preserved active-pattern notes, fresh restored inserts for saved mixer state,
    direct-to-Master routing for capsules without mixer state, and unchanged
    existing channels, Master, unrelated mixer inserts, Playlist, and arrangement
    state. Include shared inserts, gapped native and wrapped effects, disabled and
    partially mixed slots, and projects with no remaining pristine inserts.
 5. Select generator- and effect-targeted Automation Clips in the Channel Rack
-   alongside their target generators. Capture grouped and individually, verify
-   the audible preview follows automation, then import at several playhead
-   positions and confirm every selected Playlist instance and relative offset is
-   preserved. Cover insert volume/pan/stereo/EQ, effect parameters, slot bypass
-   and mix, and shared inserts. Confirm unselected automation is excluded; Master,
+   alongside their target generators. Capture an explicit Playlist selection
+   with repetitions, gaps, partial Pattern clips, leading space, and automation
+   crossing both boundaries. Repeat without a selection at, between, and beyond
+   current-Pattern occurrences. Verify the preview ends at the phrase boundary,
+   then import into all three destinations at several playheads and PPQs. Cover
+   insert volume/pan/stereo/EQ, effect parameters, slot bypass and mix, and shared
+   inserts. Confirm unselected and out-of-window automation is excluded; Master,
    global, routing, send, and unrelated targets must produce the omission warning
    and must not appear in the imported project.
 6. Override an equal-size destination selection. Verify saved chains use fresh

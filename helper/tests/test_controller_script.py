@@ -33,6 +33,11 @@ class ControllerScriptTests(unittest.TestCase):
     def load_script(self, root: Path):
         saves: list[tuple[int, int]] = []
         modules = {
+            "arrangement": stub_module(
+                "arrangement",
+                selectionStart=lambda: 192,
+                selectionEnd=lambda: 768,
+            ),
             "channels": stub_module(
                 "channels",
                 channelCount=lambda _include_all: 1,
@@ -140,6 +145,8 @@ class ControllerScriptTests(unittest.TestCase):
             self.assertEqual(session.selected_channel_names, ["Lead"])
             self.assertEqual(session.selected_channel_types, [2])
             self.assertEqual(session.song_position_ticks, 384)
+            self.assertEqual(session.playlist_selection_start_ticks, 192)
+            self.assertEqual(session.playlist_selection_end_ticks, 768)
             self.assertEqual(session.host_name, "FL Studio 2026")
             self.assertEqual(session.midi_api_version, 42)
 

@@ -26,6 +26,7 @@ from soundcapsule.flp import (
     EVENT_TEMPO,
     FLPFile,
     FLPUnsupportedError,
+    PlaylistItem,
     parse_text,
     data_event,
     scalar_event,
@@ -42,6 +43,8 @@ from test_flp import (
     add_automation_target_binding,
     fixture_project,
     fixture_project_with_automation,
+    pattern_playlist_item,
+    playlist_item,
     remote_controller_link,
     write_silence,
 )
@@ -1230,7 +1233,7 @@ class ProjectServiceTests(unittest.TestCase):
             with self.assertRaises(FLPUnsupportedError):
                 service.undo_last_import(project_path=source, open_project=False)
 
-    def test_default_import_appends_to_current_pattern_and_reports_progress(self) -> None:
+    def test_schema_six_default_import_uses_isolated_pattern_and_reports_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             settings = Settings(data_dir=root / "data")
@@ -1256,12 +1259,59 @@ class ProjectServiceTests(unittest.TestCase):
             )
 
             merged = FLPFile.read(source)
+            self.assertEqual(result.import_destination, "new_pattern")
+            self.assertEqual(result.pattern_id, 4)
+            self.assertEqual(merged.max_pattern_id(), 4)
+            self.assertEqual(
+                [note.rack_channel for note in merged.pattern_notes()[3]], [2, 5]
+            )
+            self.assertEqual(
+                [note.rack_channel for note in merged.pattern_notes()[4]], [6]
+            )
+            self.assertEqual(
+                [item.pattern_id for item in merged.playlist_items_for_pattern(4)],
+                [4],
+            )
+            self.assertEqual(updates[-1], (100, "Import complete"))
+            self.assertGreaterEqual(len(updates), 6)
+
+    def test_schema_five_default_import_still_appends_to_current_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            source = root / "Song.flp"
+            source.write_bytes(fixture_project().to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                settings.library_dir / "Legacy.flcapsule",
+                name="Legacy",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            manifest = capsule.manifest
+            manifest.schema_version = 5
+            manifest.playlist_phrase = None
+            capsule.replace_manifest(manifest)
+            service = CapsuleService(settings)
+
+            result = service.import_capsule(
+                capsule.manifest.id,
+                mode="append",
+                project_path=source,
+                open_project=False,
+            )
+
+            merged = FLPFile.read(result.merged_project)
             self.assertEqual(result.import_destination, "current_pattern")
             self.assertEqual(result.pattern_id, 3)
             self.assertEqual(merged.max_pattern_id(), 3)
-            self.assertEqual([note.rack_channel for note in merged.pattern_notes()[3]], [2, 6, 5])
-            self.assertEqual(updates[-1], (100, "Import complete"))
-            self.assertGreaterEqual(len(updates), 6)
+            self.assertEqual(
+                [note.rack_channel for note in merged.pattern_notes()[3]],
+                [2, 6, 5],
+            )
 
     def test_undo_does_not_fall_back_to_an_older_import(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1561,6 +1611,8 @@ class ProjectServiceTests(unittest.TestCase):
                 pattern_length_steps=16, ppq=96, changed=0, save_sequence=1,
                 channel_count=3, last_save_requested_at=time.time(),
                 load_sequence=1, last_load_status=100, last_load_at=time.time(),
+                playlist_selection_start_ticks=960,
+                playlist_selection_end_ticks=1344,
             )
 
             with mock.patch.object(service.bridge, "session", return_value=session), mock.patch(
@@ -1572,6 +1624,7 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertFalse(preflight.requires_confirmation)
             self.assertEqual(preflight.retained_automation_ids, [9])
             self.assertIn("slot 1", preflight.retained[0]["target"])
+            self.assertEqual(preflight.playlist_window_source, "selection")
 
     def test_preflight_lists_each_retained_and_excluded_linked_destination(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1756,6 +1809,131 @@ class ProjectServiceTests(unittest.TestCase):
                         preflight_token=preflight.token,
                     )
 
+    def test_preflight_reports_selected_automation_outside_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            playlist_index = project._current_playlist_event_index()
+            assert playlist_index is not None
+            playlist = project.events[playlist_index]
+            pattern = next(
+                item for item in PlaylistItem.parse_many(playlist.payload)
+                if item.is_pattern
+            )
+            project.events[playlist_index] = playlist.with_payload(
+                pattern.raw + playlist_item(9, position=5_000, length=384)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 2],
+                selected_channel_names=["Serum Lead", "Serum macro sweep"],
+                selected_channel_types=[2, 5], current_pattern=3,
+                pattern_name="Verse", pattern_length_steps=16, ppq=96,
+                changed=0, save_sequence=1, channel_count=3,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                song_position_ticks=960,
+            )
+
+            with mock.patch.object(
+                service.bridge, "session", return_value=session
+            ), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                preflight = service.capture_preflight()
+                with self.assertRaisesRegex(
+                    FLPUnsupportedError, "connections that cannot be saved"
+                ):
+                    service.capture("Phrase", preview_wav=preview)
+                capsules = service.capture(
+                    "Phrase",
+                    preview_wav=preview,
+                    omit_unsupported_automation=True,
+                    preflight_token=preflight.token,
+                )
+
+            self.assertTrue(preflight.requires_confirmation)
+            self.assertEqual(preflight.retained_automation_ids, [])
+            self.assertEqual(preflight.excluded[0]["connection_role"], "placement")
+            self.assertIn("no placement", preflight.excluded[0]["target"])
+            self.assertEqual(
+                (
+                    preflight.playlist_window_start,
+                    preflight.playlist_window_end,
+                    preflight.playlist_window_source,
+                ),
+                (960, 1344, "playhead"),
+            )
+            self.assertFalse(capsules[0].manifest.automations)
+
+    def test_moving_playhead_invalidates_preflight_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            binding_event = next(
+                event for event in project.events
+                if event.id == EVENT_AUTOMATION_BINDINGS
+            )
+            project.events[project.events.index(binding_event)] = (
+                binding_event.with_payload(
+                    AUTOMATION_BINDING_STRUCT.pack(0, 0x71C0802A, 0)
+                )
+            )
+            playlist_index = project._current_playlist_event_index()
+            assert playlist_index is not None
+            playlist = project.events[playlist_index]
+            project.events[playlist_index] = playlist.with_payload(
+                playlist.payload
+                + pattern_playlist_item(3, position=2_000, length=384)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            common = dict(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0, 2],
+                selected_channel_names=["Serum Lead", "Serum macro sweep"],
+                selected_channel_types=[2, 5], current_pattern=3,
+                pattern_name="Verse", pattern_length_steps=16, ppq=96,
+                changed=0, save_sequence=1, channel_count=3,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+            )
+            first = BridgeSession(**common, song_position_ticks=960)
+            second = BridgeSession(**common, song_position_ticks=2_000)
+
+            with mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
+            ):
+                with mock.patch.object(
+                    service.bridge, "session", return_value=first
+                ):
+                    preflight = service.capture_preflight(
+                        include_mixer_insert=False
+                    )
+                with mock.patch.object(
+                    service.bridge, "session", return_value=second
+                ):
+                    with self.assertRaisesRegex(
+                        FLPUnsupportedError, "playhead.*changed"
+                    ):
+                        service.capture(
+                            "Stale phrase",
+                            preview_wav=preview,
+                            include_mixer_insert=False,
+                            omit_unsupported_automation=True,
+                            preflight_token=preflight.token,
+                        )
+
     def test_capture_requires_selected_automation_target_channel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1784,6 +1962,79 @@ class ProjectServiceTests(unittest.TestCase):
                     "select at least one generator",
                 ):
                     service.capture("Automation", preview_wav=preview)
+
+    def test_schema_six_phrase_restores_in_all_import_modes_and_scales_ppq(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = Settings(data_dir=root / "data")
+            settings.ensure()
+            preview = root / "preview.wav"
+            write_silence(preview)
+            captured = fixture_project(ppq=96)
+            captured.events.extend(
+                [
+                    scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+                    data_event(
+                        EVENT_PLAYLIST,
+                        pattern_playlist_item(3, position=960, length=192)
+                        + pattern_playlist_item(3, position=1_250, length=192),
+                    ),
+                    scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+                ]
+            )
+            window = captured.resolve_playlist_capture_window(
+                3,
+                playhead=0,
+                selection_start=900,
+                selection_end=1_600,
+            )
+            capsule = Capsule.build(
+                settings.library_dir / "Phrase.flcapsule",
+                name="Phrase",
+                project=captured,
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+                include_mixer_insert=False,
+                playlist_window=window,
+            )
+            service = CapsuleService(settings)
+
+            cases = [
+                ("append", "current_pattern", [2], 4),
+                ("append", "new_pattern", [2], 4),
+                ("override", "override_selection", [2], 3),
+            ]
+            for index, (mode, destination_mode, targets, expected_pattern) in enumerate(cases):
+                with self.subTest(destination=destination_mode):
+                    destination = root / f"Destination-{index}.flp"
+                    destination.write_bytes(fixture_project(ppq=192).to_bytes())
+                    result = service.import_capsule(
+                        capsule.manifest.id,
+                        mode=mode,
+                        project_path=destination,
+                        target_channels=targets,
+                        import_destination=destination_mode,
+                        open_project=False,
+                    )
+
+                    merged = FLPFile.read(result.merged_project)
+                    self.assertEqual(result.pattern_id, expected_pattern)
+                    self.assertEqual(
+                        result.import_destination,
+                        "override_selection"
+                        if mode == "override"
+                        else "new_pattern",
+                    )
+                    self.assertEqual(
+                        [
+                            (item.position, item.length)
+                            for item in merged.playlist_items_for_pattern(
+                                expected_pattern
+                            )
+                        ],
+                        [(120, 384), (700, 384)],
+                    )
 
     def test_connected_import_places_automation_at_live_playhead(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1831,6 +2082,11 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertEqual(result.channel_mapping, {2: 6, 9: 7})
             item = merged.playlist_items_for_channels([7])[7][0]
             self.assertEqual((item.position, item.length), (1440, 384))
+            phrase = merged.playlist_items_for_pattern(result.pattern_id)
+            self.assertEqual(
+                [(item.position, item.length) for item in phrase],
+                [(1440, 384)],
+            )
 
     def test_import_restores_effect_automation_on_allocated_insert(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

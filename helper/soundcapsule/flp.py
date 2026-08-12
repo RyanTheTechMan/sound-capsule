@@ -49,6 +49,7 @@ EVENT_PLUGIN_LOCATION = 212
 EVENT_PATTERN_NOTES = 224
 EVENT_CHANNEL_SAMPLE_PATH = 196
 EVENT_AUTOMATION_BINDINGS = 216
+EVENT_PLAYLIST_SELECTION = 217
 EVENT_REMOTE_CONTROLLER = 227
 EVENT_AUTOMATION_POINTS = 234
 EVENT_PLAYLIST = 233
@@ -732,6 +733,126 @@ class PlaylistItem:
     def length(self) -> int:
         return struct.unpack_from("<I", self.raw, 8)[0]
 
+    @property
+    def end_position(self) -> int:
+        return self.position + self.length
+
+    @property
+    def is_pattern(self) -> bool:
+        return self.item_index > self.pattern_base
+
+    @property
+    def pattern_id(self) -> int | None:
+        if not self.is_pattern:
+            return None
+        return self.item_index - self.pattern_base
+
+    @property
+    def muted(self) -> bool:
+        return bool(struct.unpack_from("<H", self.raw, 18)[0] & 0x2000)
+
+    @property
+    def runtime_id(self) -> int | None:
+        if self.record_size == 32:
+            return None
+        return struct.unpack_from("<I", self.raw, 32)[0]
+
+    def with_runtime_id(self, runtime_id: int) -> "PlaylistItem":
+        if self.record_size == 32:
+            return self
+        if not 0 <= runtime_id <= 0xFFFFFFFF:
+            raise FLPUnsupportedError("Playlist item runtime ID exceeds FL limits")
+        raw = bytearray(self.raw)
+        struct.pack_into("<I", raw, 32, runtime_id)
+        return PlaylistItem(bytes(raw))
+
+    def with_muted(self, muted: bool = True) -> "PlaylistItem":
+        raw = bytearray(self.raw)
+        flags = struct.unpack_from("<H", raw, 18)[0]
+        flags = flags | 0x2000 if muted else flags & ~0x2000
+        struct.pack_into("<H", raw, 18, flags)
+        return PlaylistItem(bytes(raw))
+
+    def crop_to_window(
+        self,
+        window_start: int,
+        window_end: int,
+        *,
+        ppq: int,
+        destination_anchor: int = 0,
+    ) -> "PlaylistItem | None":
+        """Intersect one placement with a song window without rewriting opaque fields."""
+        if ppq <= 0:
+            raise FLPFormatError("Playlist crop PPQ must be positive")
+        if window_start < 0 or window_end <= window_start:
+            raise FLPFormatError("Playlist crop window must be a non-empty positive range")
+        intersection_start = max(self.position, window_start)
+        intersection_end = min(self.end_position, window_end)
+        if intersection_end <= intersection_start:
+            return None
+        if self.length <= 0:
+            raise FLPUnsupportedError("Playlist item has no duration")
+
+        left = intersection_start - self.position
+        right = intersection_end - self.position
+        raw = bytearray(self.raw)
+        normalized_position = destination_anchor + intersection_start - window_start
+        if not 0 <= normalized_position <= 0xFFFFFFFF:
+            raise FLPUnsupportedError("Playlist item position exceeds FL Studio limits")
+        struct.pack_into("<I", raw, 0, normalized_position)
+        struct.pack_into("<I", raw, 8, intersection_end - intersection_start)
+
+        # A placement wholly inside the window retains its exact source offsets.
+        if left == 0 and right == self.length:
+            return PlaylistItem(bytes(raw))
+
+        if self.is_pattern:
+            start_offset, end_offset = struct.unpack_from("<II", self.raw, 24)
+            if start_offset == end_offset == 0xFFFFFFFF:
+                content_start = 0.0
+                content_span = float(self.length)
+            elif end_offset > start_offset:
+                content_start = float(start_offset)
+                content_span = float(end_offset - start_offset)
+            else:
+                raise FLPUnsupportedError(
+                    "Pattern placement has unsupported crop offsets"
+                )
+            scale = content_span / self.length
+            cropped_start = round(content_start + left * scale)
+            cropped_end = round(content_start + right * scale)
+            cropped_end = max(cropped_start + 1, cropped_end)
+            if cropped_end > 0xFFFFFFFF:
+                raise FLPUnsupportedError("Pattern crop exceeds FL Studio limits")
+            struct.pack_into("<II", raw, 24, cropped_start, cropped_end)
+        else:
+            start_offset, end_offset = struct.unpack_from("<ff", self.raw, 24)
+            untrimmed = start_offset == end_offset == -1.0
+            # Early synthetic fixtures used zeroes for an untrimmed channel clip.
+            legacy_untrimmed = start_offset == end_offset == 0.0
+            if untrimmed or legacy_untrimmed:
+                content_start = 0.0
+                content_span = self.length / ppq
+            elif (
+                math.isfinite(start_offset)
+                and math.isfinite(end_offset)
+                and start_offset >= 0.0
+                and end_offset > start_offset
+            ):
+                content_start = start_offset
+                content_span = end_offset - start_offset
+            else:
+                raise FLPUnsupportedError(
+                    "Automation or audio placement has unsupported crop offsets"
+                )
+            scale = content_span / self.length
+            cropped_start = content_start + left * scale
+            cropped_end = content_start + right * scale
+            if not all(math.isfinite(value) for value in (cropped_start, cropped_end)):
+                raise FLPUnsupportedError("Playlist crop offsets are not finite")
+            struct.pack_into("<ff", raw, 24, cropped_start, cropped_end)
+        return PlaylistItem(bytes(raw))
+
     def remap_channel(
         self,
         channel_iid: int,
@@ -741,13 +862,56 @@ class PlaylistItem:
         source_ppq: int,
         destination_ppq: int,
     ) -> "PlaylistItem":
+        if source_ppq <= 0 or destination_ppq <= 0:
+            raise FLPUnsupportedError("Playlist remap PPQ must be positive")
+        if not 0 <= channel_iid <= self.pattern_base:
+            raise FLPUnsupportedError("destination Automation Clip ID is invalid")
         raw = bytearray(self.raw)
         relative = self.position - source_anchor
         position = destination_anchor + round(relative * destination_ppq / source_ppq)
         length = round(self.length * destination_ppq / source_ppq)
-        struct.pack_into("<I", raw, 0, max(0, position))
+        if not 0 <= position <= 0xFFFFFFFF or not 0 < length <= 0xFFFFFFFF:
+            raise FLPUnsupportedError("destination Automation Clip timing exceeds FL limits")
+        struct.pack_into("<I", raw, 0, position)
         struct.pack_into("<H", raw, 6, channel_iid)
-        struct.pack_into("<I", raw, 8, max(1, length))
+        struct.pack_into("<I", raw, 8, length)
+        return PlaylistItem(bytes(raw))
+
+    def remap_pattern(
+        self,
+        pattern_id: int,
+        *,
+        source_anchor: int,
+        destination_anchor: int,
+        source_ppq: int,
+        destination_ppq: int,
+    ) -> "PlaylistItem":
+        if not self.is_pattern:
+            raise FLPUnsupportedError("cannot remap a channel clip as a Pattern clip")
+        if source_ppq <= 0 or destination_ppq <= 0:
+            raise FLPUnsupportedError("Playlist remap PPQ must be positive")
+        if not 0 < pattern_id <= 0xFFFF - self.pattern_base:
+            raise FLPUnsupportedError("destination Pattern ID is invalid")
+        raw = bytearray(self.raw)
+        relative = self.position - source_anchor
+        position = destination_anchor + round(relative * destination_ppq / source_ppq)
+        length = round(self.length * destination_ppq / source_ppq)
+        if not 0 <= position <= 0xFFFFFFFF or not 0 < length <= 0xFFFFFFFF:
+            raise FLPUnsupportedError("destination Pattern timing exceeds FL Studio limits")
+        struct.pack_into("<I", raw, 0, position)
+        struct.pack_into("<H", raw, 6, self.pattern_base + pattern_id)
+        struct.pack_into("<I", raw, 8, length)
+        start_offset, end_offset = struct.unpack_from("<II", self.raw, 24)
+        if start_offset != 0xFFFFFFFF or end_offset != 0xFFFFFFFF:
+            if end_offset <= start_offset:
+                raise FLPUnsupportedError(
+                    "Pattern placement has unsupported crop offsets"
+                )
+            scaled_start = round(start_offset * destination_ppq / source_ppq)
+            scaled_end = round(end_offset * destination_ppq / source_ppq)
+            if scaled_end > 0xFFFFFFFF:
+                raise FLPUnsupportedError("destination Pattern crop exceeds FL Studio limits")
+            struct.pack_into("<II", raw, 24, scaled_start, max(scaled_start + 1, scaled_end))
         return PlaylistItem(bytes(raw))
 
     def as_pattern(self, pattern_id: int, *, position: int, length: int) -> "PlaylistItem":
@@ -759,9 +923,6 @@ class PlaylistItem:
         # Pattern clips use FL's all-bits-set sentinel for "no offset". Keeping
         # the automation values makes FL accept the item but render no notes.
         raw[24:32] = b"\xff" * 8
-        if len(raw) > 32:
-            # FL 26.1 identifies Pattern clips with type 6 (automation is 7).
-            raw[32] = 6
         return PlaylistItem(bytes(raw))
 
     def adapt_size(
@@ -773,12 +934,74 @@ class PlaylistItem:
             return self
         if self.record_size > item_size:
             return PlaylistItem(self.raw[:item_size])
-        extension = (
-            template.raw[self.record_size:item_size]
-            if template is not None and template.record_size >= item_size
-            else b"\0" * (item_size - self.record_size)
+        if template is not None and template.record_size >= item_size:
+            extension = template.raw[self.record_size:item_size]
+            return PlaylistItem(self.raw + extension)
+        raw = bytearray(self.raw + b"\0" * (item_size - self.record_size))
+        if item_size == 88:
+            # FL 26's added Playlist tail defaults to unity gain and no link
+            # group. Zero-initializing the unity field silently mutes a clip.
+            struct.pack_into("<d", raw, 64, 1.0)
+            struct.pack_into("<I", raw, 76, 0xFFFFFFFF)
+        return PlaylistItem(bytes(raw))
+
+    @classmethod
+    def synthetic_pattern(
+        cls,
+        pattern_id: int,
+        *,
+        position: int,
+        length: int,
+        item_size: int,
+        runtime_id: int = 0,
+    ) -> "PlaylistItem":
+        if item_size not in PLAYLIST_ITEM_SIZES:
+            raise FLPUnsupportedError("the requested Playlist item format is not supported")
+        raw = bytearray(item_size)
+        struct.pack_into(
+            "<IHHIHH", raw, 0, max(0, position), 20_480,
+            20_480 + pattern_id, max(1, length), 499, 0,
         )
-        return PlaylistItem(self.raw + extension)
+        raw[16:20] = b"\x78\x00\x40\x00"
+        raw[20:24] = b"\x40\x64\x80\x80"
+        raw[24:32] = b"\xff" * 8
+        if item_size > 32:
+            struct.pack_into("<I", raw, 32, runtime_id)
+        if item_size == 88:
+            struct.pack_into("<d", raw, 64, 1.0)
+            struct.pack_into("<I", raw, 76, 0xFFFFFFFF)
+        return cls(bytes(raw))
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistCaptureWindow:
+    start: int
+    end: int
+    source: str
+    pattern_items: tuple[PlaylistItem, ...]
+
+    def __post_init__(self) -> None:
+        if self.start < 0 or self.end <= self.start or self.end > 0xFFFFFFFF:
+            raise FLPUnsupportedError("the Playlist capture window is invalid")
+        if self.source not in {"selection", "playhead", "standalone"}:
+            raise FLPFormatError("the Playlist capture window source is invalid")
+        if not self.pattern_items or any(
+            not item.is_pattern
+            or item.length <= 0
+            or item.end_position > self.duration
+            for item in self.pattern_items
+        ):
+            raise FLPUnsupportedError(
+                "the Playlist capture window has invalid Pattern placements"
+            )
+
+    @property
+    def duration(self) -> int:
+        return self.end - self.start
+
+    @property
+    def explicit_selection(self) -> bool:
+        return self.source == "selection"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1568,12 +1791,182 @@ class FLPFile:
     ) -> dict[int, list[PlaylistItem]]:
         selected = set(channel_ids)
         result = {iid: [] for iid in selected}
-        playlist_index = self._current_playlist_event_index()
-        if playlist_index is None:
-            return result
-        for item in PlaylistItem.parse_many(self.events[playlist_index].payload):
+        for item in self.playlist_items():
             if item.item_index <= item.pattern_base and item.item_index in selected:
                 result[item.item_index].append(item)
+        return result
+
+    def playlist_items(self) -> list[PlaylistItem]:
+        playlist_index = self._current_playlist_event_index()
+        if playlist_index is None:
+            return []
+        return PlaylistItem.parse_many(self.events[playlist_index].payload)
+
+    def playlist_items_for_pattern(self, pattern_id: int) -> list[PlaylistItem]:
+        return [
+            item for item in self.playlist_items()
+            if item.pattern_id == pattern_id
+        ]
+
+    def playlist_selection(self) -> tuple[int, int] | None:
+        channel_owned = {
+            id(event)
+            for section in self.channel_sections()
+            for event in section.events
+        }
+        selections = [
+            event for event in self.events
+            if event.id == EVENT_PLAYLIST_SELECTION
+            and id(event) not in channel_owned
+        ]
+        if not selections:
+            return None
+        event = selections[-1]
+        if len(event.payload) != 8:
+            raise FLPUnsupportedError("the saved Playlist selection format is unsupported")
+        start, end = struct.unpack("<II", event.payload)
+        return (start, end) if end > start else None
+
+    def _playlist_item_size(self) -> int:
+        items = self.playlist_items()
+        if items:
+            return items[0].record_size
+        try:
+            major = int(self.fl_version.split(".", 1)[0])
+        except ValueError:
+            major = 25
+        return 88 if major >= 26 else 60 if major >= 21 else 32
+
+    @staticmethod
+    def _next_playlist_runtime_id(items: Sequence[PlaylistItem]) -> int:
+        runtime_ids = [
+            item.runtime_id for item in items if item.runtime_id is not None
+        ]
+        next_id = max(runtime_ids, default=-1) + 1
+        if next_id > 0xFFFFFFFF:
+            raise FLPUnsupportedError("the Playlist has no available runtime IDs")
+        return next_id
+
+    def resolve_playlist_capture_window(
+        self,
+        pattern_id: int,
+        *,
+        playhead: int,
+        pattern_length_steps: int | None = None,
+        selection_start: int | None = None,
+        selection_end: int | None = None,
+    ) -> PlaylistCaptureWindow:
+        if playhead < 0:
+            raise FLPUnsupportedError("the FL Studio playhead position is invalid")
+        if selection_start is None and selection_end is None:
+            saved_selection = self.playlist_selection()
+            if saved_selection is not None:
+                selection_start, selection_end = saved_selection
+        has_selection = (
+            selection_start is not None
+            and selection_end is not None
+            and selection_start >= 0
+            and selection_end > selection_start
+        )
+        pattern_items = self.playlist_items_for_pattern(pattern_id)
+
+        if has_selection:
+            assert selection_start is not None and selection_end is not None
+            cropped = tuple(
+                item
+                for source in pattern_items
+                if (
+                    item := source.crop_to_window(
+                        selection_start, selection_end, ppq=self.ppq
+                    )
+                ) is not None
+            )
+            if not cropped:
+                raise FLPUnsupportedError(
+                    f"the selected Playlist range contains no Pattern {pattern_id} clips"
+                )
+            return PlaylistCaptureWindow(
+                selection_start, selection_end, "selection", cropped
+            )
+
+        if pattern_items:
+            containing = [
+                item for item in pattern_items
+                if item.position <= playhead < item.end_position
+            ]
+            chosen = min(
+                containing,
+                key=lambda item: (item.position, item.raw[12:16]),
+            ) if containing else min(
+                pattern_items,
+                key=lambda item: (
+                    item.position - playhead
+                    if playhead < item.position
+                    else playhead - item.end_position,
+                    item.position,
+                    item.raw[12:16],
+                ),
+            )
+            if chosen.length <= 0:
+                raise FLPUnsupportedError("the selected Pattern placement has no duration")
+            start, end = chosen.position, chosen.end_position
+            cropped = tuple(
+                item
+                for source in pattern_items
+                if (item := source.crop_to_window(start, end, ppq=self.ppq))
+                is not None
+            )
+            return PlaylistCaptureWindow(start, end, "playhead", cropped)
+
+        note_end = max(
+            (
+                note.position + note.length
+                for note in self.pattern_notes().get(pattern_id, ())
+            ),
+            default=0,
+        )
+        step_length = (
+            round(pattern_length_steps * self.ppq / 4)
+            if pattern_length_steps is not None and pattern_length_steps > 0
+            else 0
+        )
+        duration = max(step_length, note_end, self.ppq * 4 if not note_end else 1)
+        if playhead + duration > 0xFFFFFFFF:
+            raise FLPUnsupportedError("the standalone Pattern window exceeds FL Studio limits")
+        all_items = self.playlist_items()
+        pattern_template = next(
+            (item for item in all_items if item.is_pattern), None
+        )
+        if pattern_template is not None:
+            item = pattern_template.as_pattern(
+                pattern_id, position=0, length=duration
+            )
+        else:
+            item = PlaylistItem.synthetic_pattern(
+                pattern_id,
+                position=0,
+                length=duration,
+                item_size=self._playlist_item_size(),
+                runtime_id=self._next_playlist_runtime_id(all_items),
+            )
+        return PlaylistCaptureWindow(
+            playhead, playhead + duration, "standalone", (item,)
+        )
+
+    def playlist_items_for_channels_in_window(
+        self,
+        channel_ids: Sequence[int],
+        window: PlaylistCaptureWindow,
+    ) -> dict[int, list[PlaylistItem]]:
+        result: dict[int, list[PlaylistItem]] = {
+            iid: [] for iid in set(channel_ids)
+        }
+        for source in self.playlist_items():
+            if source.is_pattern or source.item_index not in result:
+                continue
+            item = source.crop_to_window(window.start, window.end, ppq=self.ppq)
+            if item is not None:
+                result[source.item_index].append(item)
         return result
 
     def _channel_start_indices(self) -> list[int]:
@@ -2099,6 +2492,7 @@ class FLPFile:
         *,
         preserve_mixer_inserts: bool = False,
         automation_target_event_ids: dict[int, Sequence[int]] | None = None,
+        playlist_window: PlaylistCaptureWindow | None = None,
     ) -> "FLPFile":
         selected = set(channel_ids)
         if not selected:
@@ -2147,8 +2541,14 @@ class FLPFile:
                         if iid in automation_target_event_ids
                     }
                 )
-            target._isolate_automation_preview(automation_ids, pattern_id)
+        if playlist_window is not None:
+            target._isolate_playlist_phrase_preview(
+                automation_ids, pattern_id, playlist_window
+            )
             # FL stores transport loop mode as 0 = Pattern, 1 = Song.
+            target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 1)
+        elif automation_ids:
+            target._isolate_automation_preview(automation_ids, pattern_id)
             target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 1)
         else:
             target._set_scalar_event(EVENT_PROJECT_LOOP_MODE, 0)
@@ -2249,6 +2649,102 @@ class FLPFile:
                 if self.events[index].id == EVENT_PLAYLIST
             ),
             None,
+        )
+
+    def _ensure_current_playlist_event(self) -> int:
+        existing = self._current_playlist_event_index()
+        if existing is not None:
+            return existing
+        starts = [
+            (index, event.scalar) for index, event in enumerate(self.events)
+            if event.id == EVENT_ARRANGEMENT_NEW
+        ]
+        if not starts:
+            arrangement_id = 0
+            self.events.extend(
+                [
+                    scalar_event(EVENT_ARRANGEMENT_NEW, arrangement_id),
+                    data_event(EVENT_PLAYLIST, b""),
+                    scalar_event(EVENT_CURRENT_ARRANGEMENT, arrangement_id),
+                ]
+            )
+            return len(self.events) - 2
+
+        current = next(
+            (event.scalar for event in self.events if event.id == EVENT_CURRENT_ARRANGEMENT),
+            starts[0][1],
+        )
+        current_position = next(
+            (position for position, (_, arrangement_id) in enumerate(starts)
+             if arrangement_id == current),
+            None,
+        )
+        if current_position is None:
+            raise FLPUnsupportedError(
+                "the current Playlist arrangement could not be identified"
+            )
+        insert_at = (
+            starts[current_position + 1][0]
+            if current_position + 1 < len(starts)
+            else next(
+                (
+                    index for index in range(starts[current_position][0] + 1, len(self.events))
+                    if self.events[index].id == EVENT_CURRENT_ARRANGEMENT
+                ),
+                len(self.events),
+            )
+        )
+        self.events.insert(insert_at, data_event(EVENT_PLAYLIST, b""))
+        return insert_at
+
+    def _isolate_playlist_phrase_preview(
+        self,
+        automation_ids: Sequence[int],
+        pattern_id: int,
+        window: PlaylistCaptureWindow,
+    ) -> None:
+        selected_automation = set(automation_ids)
+        items: list[PlaylistItem] = []
+        found_automation = {iid: False for iid in selected_automation}
+        for source in self.playlist_items():
+            is_pattern = source.pattern_id == pattern_id
+            is_automation = (
+                not source.is_pattern and source.item_index in selected_automation
+            )
+            if not (is_pattern or is_automation):
+                continue
+            item = source.crop_to_window(window.start, window.end, ppq=self.ppq)
+            if item is None:
+                continue
+            items.append(item)
+            if is_automation:
+                found_automation[source.item_index] = True
+
+        missing = [iid for iid, found in found_automation.items() if not found]
+        if missing:
+            raise FLPUnsupportedError(
+                "selected automation clips are not placed in the captured Playlist phrase: "
+                + ", ".join(map(str, sorted(missing)))
+            )
+        if not any(item.pattern_id == pattern_id for item in items):
+            # Standalone patterns have no source Playlist record to visit above.
+            items.extend(window.pattern_items)
+        if not items:
+            raise FLPUnsupportedError("the captured Playlist phrase has no clips")
+
+        actual_end = max(item.end_position for item in items)
+        if actual_end < window.duration:
+            boundary = window.pattern_items[0].as_pattern(
+                pattern_id,
+                position=window.duration - 1,
+                length=1,
+            ).with_muted(True).with_runtime_id(
+                self._next_playlist_runtime_id(items)
+            )
+            items.append(boundary)
+        playlist_index = self._ensure_current_playlist_event()
+        self.events[playlist_index] = self.events[playlist_index].with_payload(
+            b"".join(item.raw for item in items)
         )
 
     def _isolate_automation_preview(
@@ -2384,6 +2880,7 @@ class FLPFile:
         playlist_items: dict[int, Sequence[PlaylistItem]],
         source_ppq: int,
         playlist_anchor: int,
+        playlist_source_anchor: int | None = None,
     ) -> tuple["FLPFile", dict[int, int]]:
         target = self.clone()
         existing_ids = [section.iid for section in target.channel_sections()]
@@ -2409,9 +2906,62 @@ class FLPFile:
             mixer_insert_mapping=mixer_insert_mapping or {},
             source_ppq=source_ppq,
             destination_anchor=playlist_anchor,
+            source_anchor=playlist_source_anchor,
         )
         target.validate()
         return target, complete_mapping
+
+    def append_playlist_phrase(
+        self,
+        items: Sequence[PlaylistItem],
+        *,
+        source_pattern_id: int,
+        destination_pattern_id: int,
+        source_ppq: int,
+        playlist_anchor: int,
+    ) -> "FLPFile":
+        """Append normalized Pattern placements relative to a destination playhead."""
+        if source_ppq <= 0:
+            raise FLPUnsupportedError("the capsule Playlist PPQ is invalid")
+        if playlist_anchor < 0:
+            raise FLPUnsupportedError("the destination Playlist playhead is invalid")
+        if not items:
+            raise FLPUnsupportedError("the capsule Playlist phrase has no Pattern clips")
+        if any(item.pattern_id != source_pattern_id for item in items):
+            raise FLPUnsupportedError(
+                "the capsule Playlist phrase references an unexpected Pattern"
+            )
+
+        target = self.clone()
+        playlist_index = target._ensure_current_playlist_event()
+        playlist = target.events[playlist_index]
+        destination_items = PlaylistItem.parse_many(playlist.payload)
+        destination_template = destination_items[0] if destination_items else None
+        destination_size = (
+            destination_template.record_size
+            if destination_template is not None
+            else target._playlist_item_size()
+        )
+        remapped = [
+            item.remap_pattern(
+                destination_pattern_id,
+                source_anchor=0,
+                destination_anchor=playlist_anchor,
+                source_ppq=source_ppq,
+                destination_ppq=target.ppq,
+            ).adapt_size(destination_size, template=destination_template)
+            for item in items
+        ]
+        next_runtime_id = target._next_playlist_runtime_id(destination_items)
+        remapped = [
+            item.with_runtime_id(next_runtime_id + index)
+            for index, item in enumerate(remapped)
+        ]
+        target.events[playlist_index] = playlist.with_payload(
+            playlist.payload + b"".join(item.raw for item in remapped)
+        )
+        target.validate()
+        return target
 
     def _append_automation_support(
         self,
@@ -2430,6 +2980,7 @@ class FLPFile:
         mixer_insert_mapping: dict[int, int],
         source_ppq: int,
         destination_anchor: int,
+        source_anchor: int | None = None,
     ) -> None:
         automation_sections = [section for section in sections if section.channel_type == 5]
         if not automation_sections:
@@ -2579,10 +3130,9 @@ class FLPFile:
                 "automation clips are not placed in the captured Playlist arrangement: "
                 + ", ".join(missing_items)
             )
-        playlist_index = self._current_playlist_event_index()
-        if playlist_index is None:
-            raise FLPUnsupportedError("the destination project has no current Playlist arrangement")
-        source_anchor = min(item.position for item in source_items)
+        playlist_index = self._ensure_current_playlist_event()
+        if source_anchor is None:
+            source_anchor = min(item.position for item in source_items)
         remapped_items = [
             item.remap_channel(
                 mapping[source_iid],
@@ -2605,6 +3155,11 @@ class FLPFile:
         remapped_items = [
             item.adapt_size(destination_size, template=destination_template)
             for item in remapped_items
+        ]
+        next_runtime_id = self._next_playlist_runtime_id(destination_items)
+        remapped_items = [
+            item.with_runtime_id(next_runtime_id + index)
+            for index, item in enumerate(remapped_items)
         ]
         self.events[playlist_index] = playlist.with_payload(
             playlist.payload + b"".join(item.raw for item in remapped_items)

@@ -24,13 +24,14 @@ from .flp import (
     MIXER_PARAM_SLOT_ENABLED,
     MIXER_PARAM_SLOT_MIX,
     NoteRecord,
+    PlaylistCaptureWindow,
     PlaylistItem,
     PORTABLE_GENERATOR_CONTROL_IDS,
     PORTABLE_MIXER_PARAM_IDS,
 )
 
 
-CAPSULE_SCHEMA_VERSION = 5
+CAPSULE_SCHEMA_VERSION = 6
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
@@ -38,6 +39,7 @@ MAX_PREVIEW_BYTES = 512 * 1024 * 1024
 MAX_CHANNEL_STATE_BYTES = 512 * 1024 * 1024
 MAX_NOTES_BYTES = 256 * 1024 * 1024
 MAX_AUTOMATION_METADATA_BYTES = 64 * 1024 * 1024
+MAX_PLAYLIST_PHRASE_BYTES = 64 * 1024 * 1024
 MAX_MIXER_INSERT_STATE_BYTES = 512 * 1024 * 1024
 CAPSULE_EXTENSION = ".flcapsule.wav"
 LEGACY_CAPSULE_EXTENSION = ".flcapsule"
@@ -190,6 +192,12 @@ class MixerInsertManifest:
 
 
 @dataclass(slots=True)
+class PlaylistPhraseManifest:
+    duration_ticks: int
+    pattern_playlist_path: str
+
+
+@dataclass(slots=True)
 class CapsuleManifest:
     id: str
     schema_version: int
@@ -202,6 +210,7 @@ class CapsuleManifest:
     channels: list[ChannelManifest]
     automations: list[AutomationManifest] = field(default_factory=list)
     mixer_inserts: list[MixerInsertManifest] = field(default_factory=list)
+    playlist_phrase: PlaylistPhraseManifest | None = None
     source_pattern_length_steps: int | None = None
     source_tempo_bpm: float | None = None
     preview_path: str = "preview.wav"
@@ -221,6 +230,7 @@ class CapsuleManifest:
         channels: list[ChannelManifest],
         automations: list[AutomationManifest] | None = None,
         mixer_inserts: list[MixerInsertManifest] | None = None,
+        playlist_phrase: PlaylistPhraseManifest | None = None,
     ) -> "CapsuleManifest":
         return cls(
             id=str(uuid.uuid4()),
@@ -234,12 +244,15 @@ class CapsuleManifest:
             channels=channels,
             automations=list(automations or []),
             mixer_inserts=list(mixer_inserts or []),
+            playlist_phrase=playlist_phrase,
             source_pattern_length_steps=pattern_length_steps,
             source_tempo_bpm=project.tempo_bpm,
         )
 
     def to_dict(self) -> dict:
         payload = asdict(self)
+        if self.schema_version < 6:
+            payload.pop("playlist_phrase", None)
         for automation in payload["automations"]:
             if self.schema_version >= 5:
                 automation.pop("target_source_iid", None)
@@ -266,6 +279,11 @@ class CapsuleManifest:
         mixer_inserts_payload = values.pop("mixer_inserts", [])
         if not isinstance(mixer_inserts_payload, list):
             raise ValueError("capsule manifest mixer_inserts must be a list")
+        playlist_phrase_payload = values.pop("playlist_phrase", None)
+        if playlist_phrase_payload is not None and not isinstance(
+            playlist_phrase_payload, dict
+        ):
+            raise ValueError("capsule manifest playlist_phrase must be an object")
         channels = [ChannelManifest(**item) for item in channels_payload]
         automations: list[AutomationManifest] = []
         for item in automations_payload:
@@ -282,10 +300,16 @@ class CapsuleManifest:
         mixer_inserts = [
             MixerInsertManifest(**item) for item in mixer_inserts_payload
         ]
+        playlist_phrase = (
+            PlaylistPhraseManifest(**playlist_phrase_payload)
+            if playlist_phrase_payload is not None
+            else None
+        )
         manifest = cls(
             channels=channels,
             automations=automations,
             mixer_inserts=mixer_inserts,
+            playlist_phrase=playlist_phrase,
             **values,
         )
         manifest.validate()
@@ -343,14 +367,14 @@ class CapsuleManifest:
                 paths.append(automation.binding_path)
                 continue
             if automation.target_source_iid is not None or automation.binding_path is not None:
-                raise ValueError("schema-5 automation cannot use legacy singular target fields")
+                raise ValueError("schema-5+ automation cannot use legacy singular target fields")
             if not automation.targets:
-                raise ValueError("schema-5 automation requires at least one target")
+                raise ValueError("schema-5+ automation requires at least one target")
             if automation.targets[0].role != "primary" or sum(
                 target.role == "primary" for target in automation.targets
             ) != 1:
                 raise ValueError(
-                    "schema-5 automation requires exactly one primary connection"
+                    "schema-5+ automation requires exactly one primary connection"
                 )
             target_paths: list[str] = []
             target_identities: list[tuple[object, ...]] = []
@@ -466,6 +490,19 @@ class CapsuleManifest:
                         raise ValueError(
                             "automation mixer target does not reference a saved insert"
                         )
+        if self.schema_version >= 6:
+            if self.playlist_phrase is None:
+                raise ValueError("schema-6 capsule is missing Playlist phrase metadata")
+            if not 0 < self.playlist_phrase.duration_ticks <= 0xFFFFFFFF:
+                raise ValueError("capsule Playlist phrase duration is invalid")
+            if not re.fullmatch(
+                r"playlist/[A-Za-z0-9._-]+\.bin",
+                self.playlist_phrase.pattern_playlist_path,
+            ):
+                raise ValueError("capsule Playlist phrase has an invalid member path")
+            paths.append(self.playlist_phrase.pattern_playlist_path)
+        elif self.playlist_phrase is not None:
+            raise ValueError("legacy capsule schemas cannot contain Playlist phrase metadata")
         if len(paths) != len(set(paths)):
             raise ValueError("capsule manifest reuses a member path")
 
@@ -519,6 +556,8 @@ class Capsule:
                     required.update(target.state_path for target in automation.targets)
             for insert in manifest.mixer_inserts:
                 required.add(insert.state_path)
+            if manifest.playlist_phrase is not None:
+                required.add(manifest.playlist_phrase.pattern_playlist_path)
             missing = required - names
             if missing:
                 raise ValueError("capsule is missing required members: " + ", ".join(sorted(missing)))
@@ -550,6 +589,27 @@ class Capsule:
             for channel in manifest.channels:
                 FLPFile.from_bytes(_read_limited(archive, channel.state_path, MAX_CHANNEL_STATE_BYTES))
                 NoteRecord.parse_many(_read_limited(archive, channel.notes_path, MAX_NOTES_BYTES))
+            if manifest.playlist_phrase is not None:
+                phrase_items = PlaylistItem.parse_many(
+                    _read_limited(
+                        archive,
+                        manifest.playlist_phrase.pattern_playlist_path,
+                        MAX_PLAYLIST_PHRASE_BYTES,
+                    )
+                )
+                if not phrase_items:
+                    raise ValueError("capsule Playlist phrase has no Pattern placements")
+                if any(item.record_size not in {60, 88} for item in phrase_items):
+                    raise ValueError("capsule Playlist phrase uses an unsupported FL layout")
+                if any(
+                    item.pattern_id != manifest.source_pattern
+                    or item.length <= 0
+                    or item.end_position > manifest.playlist_phrase.duration_ticks
+                    for item in phrase_items
+                ):
+                    raise ValueError("capsule Playlist phrase placement is invalid")
+                if len({item.raw for item in phrase_items}) != len(phrase_items):
+                    raise ValueError("capsule Playlist phrase contains duplicate placements")
             for automation in manifest.automations:
                 if manifest.schema_version < 5:
                     assert automation.binding_path is not None
@@ -611,6 +671,22 @@ class Capsule:
                     item.item_index != automation.source_iid for item in playlist
                 ):
                     raise ValueError("automation Playlist metadata does not match its channel")
+                if manifest.playlist_phrase is not None:
+                    if any(
+                        item.record_size not in {60, 88}
+                        or item.is_pattern
+                        or item.length <= 0
+                        or item.end_position
+                        > manifest.playlist_phrase.duration_ticks
+                        for item in playlist
+                    ):
+                        raise ValueError(
+                            "automation Playlist metadata is outside the captured phrase"
+                        )
+                    if len({item.raw for item in playlist}) != len(playlist):
+                        raise ValueError(
+                            "automation Playlist metadata contains duplicate placements"
+                        )
             for insert in manifest.mixer_inserts:
                 state = FLPFile.from_bytes(
                     _read_limited(
@@ -707,6 +783,18 @@ class Capsule:
         state = FLPFile.from_bytes(raw)
         state.validate_mixer_insert_state()
         return state
+
+    def read_playlist_phrase(self) -> list[PlaylistItem]:
+        phrase = self.manifest.playlist_phrase
+        if phrase is None:
+            return []
+        with _open_capsule_archive(self.path) as archive:
+            raw = _read_limited(
+                archive,
+                phrase.pattern_playlist_path,
+                MAX_PLAYLIST_PHRASE_BYTES,
+            )
+        return PlaylistItem.parse_many(raw)
 
     def read_automation_binding(
         self, automation: AutomationManifest
@@ -904,7 +992,14 @@ class Capsule:
         tags: list[str] | None = None,
         embed_sampler_assets: bool = True,
         include_mixer_insert: bool = True,
+        playlist_window: PlaylistCaptureWindow | None = None,
     ) -> "Capsule":
+        if playlist_window is None:
+            playlist_window = project.resolve_playlist_capture_window(
+                pattern_id,
+                playhead=0,
+                pattern_length_steps=pattern_length_steps,
+            )
         sections = project.extract_channels(channel_ids)
         all_notes = project.pattern_notes().get(pattern_id, [])
         notes_by_channel = {iid: [note for note in all_notes if note.rack_channel == iid] for iid in channel_ids}
@@ -916,7 +1011,9 @@ class Capsule:
         selected_automation_ids = [
             section.iid for section in sections if section.channel_type == 5
         ]
-        automation_items = project.playlist_items_for_channels(selected_automation_ids)
+        automation_items = project.playlist_items_for_channels_in_window(
+            selected_automation_ids, playlist_window
+        )
         selected_generator_ids = {
             section.iid for section in sections if section.channel_type != 5
         }
@@ -925,6 +1022,14 @@ class Capsule:
             for section in sections
             if section.channel_type != 5 and section.mixer_insert > 0
         } if include_mixer_insert else set()
+        phrase_path = "playlist/pattern.bin"
+        files[phrase_path] = b"".join(
+            item.raw for item in playlist_window.pattern_items
+        )
+        playlist_phrase = PlaylistPhraseManifest(
+            duration_ticks=playlist_window.duration,
+            pattern_playlist_path=phrase_path,
+        )
 
         for index, section in enumerate(sections):
             state_path = f"channels/{index:03d}.fst"
@@ -984,7 +1089,7 @@ class Capsule:
                 playlist = automation_items.get(section.iid, [])
                 if not playlist:
                     raise FLPUnsupportedError(
-                        f'automation clip "{section.name}" is not placed in the current Playlist arrangement'
+                        f'automation clip "{section.name}" is not placed in the captured Playlist phrase'
                     )
                 playlist_path = f"automation/{index:03d}-playlist.bin"
                 files[playlist_path] = b"".join(item.raw for item in playlist)
@@ -1048,6 +1153,7 @@ class Capsule:
             channels=channel_manifests,
             automations=automation_manifests,
             mixer_inserts=mixer_insert_manifests,
+            playlist_phrase=playlist_phrase,
         )
         manifest.tags = sorted(
             {tag.strip() for tag in (tags or []) if tag.strip()}, key=str.casefold

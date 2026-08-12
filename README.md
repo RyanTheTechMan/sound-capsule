@@ -73,6 +73,8 @@ overwritten and can be revealed from the result message.
 1. In FL Studio, select the generator channel or channels you want to save and
    choose the pattern to capture. You may also select Automation Clip channels
    in the Channel Rack; select each clip's target generator channel as well.
+   An active Playlist time selection defines the captured phrase. Without one,
+   Sound Capsule uses the current Pattern occurrence at—or nearest—the playhead.
 2. In Sound Capsule, enter a name and optional comma-separated tags.
 3. Leave **Save mixer insert** enabled to include each generator's non-Master
    mixer insert and effect chain. The choice is remembered; disable it for the
@@ -92,20 +94,22 @@ overwritten and can be revealed from the result message.
 3. Right-click **Import**, or use the three-dot menu, to choose a destination
    for this import:
 
-   - **Current pattern** adds the capsule’s channels and notes to the open
-     pattern.
+   - **Current pattern** adds schemas 1–5 to the open pattern. A schema-6
+     Playlist phrase automatically uses a new isolated pattern so its captured
+     repetitions cannot replay unrelated notes already in the open pattern.
    - **New pattern** creates a pattern for the capsule.
    - **Override selection** replaces matching selected channels. Saved mixer
      chains are restored to fresh inserts and only the overridden channels are
      rerouted; capsules without mixer state keep the existing destinations.
 
-Selected Automation Clips that target a captured generator, a portable control
-on its saved non-Master insert, or an effect on that insert are saved with their
-current-arrangement Playlist instances. On import, those instances are recreated
-from the playhead and mixer targets follow the newly allocated insert. Master,
-global, routing, send, and unrelated-insert connections are never embedded; the
-app lists them before capture and asks before omitting those connections. A
-selected clip is omitted only when no portable destination remains.
+The captured phrase preserves repeated and partial current-Pattern clips,
+leading gaps, and offsets. Only selected Automation Clip placements intersecting
+that phrase are saved; boundary-crossing placements are cropped without moving
+their curve. On import, the whole phrase is recreated from the destination
+playhead and scaled for its PPQ. Mixer targets follow the newly allocated insert.
+Master, global, routing, send, and unrelated-insert connections are never
+embedded. The app asks before omitting excluded connections or a selected
+Automation Clip that has no placement in the phrase.
 
 Sound Capsule creates a backup before changing a project. **Undo Import** is
 available for the recovery period configured in Settings.
@@ -134,14 +138,15 @@ or import its embedded contents.
 
 ## What’s included
 
-Sound Capsule captures generator channels, their active-pattern notes, explicitly
-selected Automation Clips targeting those channels, and—when enabled—each distinct
-non-Master mixer insert shared by the selected generators. Insert identity and
-controls, EQ, effect-slot order and state, slot enable states, and mix levels are
-restored to pristine inserts in the destination project. Master state, external
-I/O, sends and routing graphs, solo/lock/layout state, and audio-track links are
-not embedded. Third-party plug-ins, sample libraries, and other dependencies must
-be installed on the computer where you import the capsule.
+Sound Capsule captures generator channels, their active-pattern notes and
+selection-aware Playlist phrase, explicitly selected Automation Clips targeting
+those channels, and—when enabled—each distinct non-Master mixer insert shared by
+the selected generators. Insert identity and controls, EQ, effect-slot order and
+state, slot enable states, and mix levels are restored to pristine inserts in the
+destination project. Master state, external I/O, sends and routing graphs,
+solo/lock/layout state, and audio-track links are not embedded. Third-party
+plug-ins, sample libraries, and other dependencies must be installed on the
+computer where you import the capsule.
 
 ## Contributing
 

@@ -15,7 +15,13 @@ import uuid
 from .bridge import BridgeQueue, BridgeSession
 from .capsule import Capsule, slugify, unique_capsule_path
 from .config import Settings
-from .flp import ChannelSection, FLPFile, FLPUnsupportedError, NoteRecord
+from .flp import (
+    ChannelSection,
+    FLPFile,
+    FLPUnsupportedError,
+    NoteRecord,
+    PlaylistCaptureWindow,
+)
 from .library import CapsuleLibrary
 from .project_locator import ProjectLocator, indexed_project_paths, recent_project_paths
 from .renderer import close_windows_fl_studio, render_project
@@ -58,6 +64,9 @@ class CapturePreflight:
     automation_owners: dict[int, int]
     retained: list[dict[str, object]]
     excluded: list[dict[str, object]]
+    playlist_window_start: int = 0
+    playlist_window_end: int = 0
+    playlist_window_source: str = ""
     blocking_error: str | None = None
 
     @property
@@ -72,6 +81,9 @@ class CapturePreflight:
             "retained_target_event_ids": self.retained_target_event_ids,
             "retained": self.retained,
             "excluded": self.excluded,
+            "playlist_window_start": self.playlist_window_start,
+            "playlist_window_end": self.playlist_window_end,
+            "playlist_window_source": self.playlist_window_source,
             "requires_confirmation": self.requires_confirmation,
             "blocking_error": self.blocking_error,
         }
@@ -199,6 +211,7 @@ class CapsuleService:
         *,
         individually: bool,
         include_mixer_insert: bool,
+        playlist_window: PlaylistCaptureWindow,
     ) -> str:
         payload = json.dumps(
             {
@@ -206,6 +219,11 @@ class CapsuleService:
                 "channel_ids": channel_ids,
                 "individually": individually,
                 "include_mixer_insert": include_mixer_insert,
+                "playlist_window": {
+                    "start": playlist_window.start,
+                    "end": playlist_window.end,
+                    "source": playlist_window.source,
+                },
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -220,6 +238,7 @@ class CapsuleService:
         *,
         individually: bool,
         include_mixer_insert: bool,
+        playlist_window: PlaylistCaptureWindow,
     ) -> CapturePreflight:
         sections_by_id = {
             section.iid: section for section in project.channel_sections()
@@ -251,8 +270,22 @@ class CapsuleService:
         retained: list[dict[str, object]] = []
         excluded: list[dict[str, object]] = []
         blocking_error: str | None = None
+        automation_placements = project.playlist_items_for_channels_in_window(
+            selected_automation_ids, playlist_window
+        )
         for automation_iid in selected_automation_ids:
             section = sections_by_id[automation_iid]
+            if not automation_placements.get(automation_iid):
+                excluded.append(
+                    {
+                        "source_iid": automation_iid,
+                        "clip_name": section.name,
+                        "connection_role": "placement",
+                        "target": "no placement in the captured Playlist phrase",
+                        "reason": "the clip is outside the selected phrase",
+                    }
+                )
+                continue
             if bindings.get(automation_iid) is None:
                 raise FLPUnsupportedError(
                     f'automation clip "{section.name}" is missing its target binding'
@@ -334,6 +367,7 @@ class CapsuleService:
                 channel_ids,
                 individually=individually,
                 include_mixer_insert=include_mixer_insert,
+                playlist_window=playlist_window,
             ),
             selected_channel_ids=channel_ids,
             retained_automation_ids=retained_ids,
@@ -341,7 +375,34 @@ class CapsuleService:
             automation_owners=owners,
             retained=retained,
             excluded=excluded,
+            playlist_window_start=playlist_window.start,
+            playlist_window_end=playlist_window.end,
+            playlist_window_source=playlist_window.source,
             blocking_error=blocking_error,
+        )
+
+    @staticmethod
+    def _resolve_capture_window(
+        project: FLPFile,
+        session: BridgeSession | None,
+        pattern_id: int,
+    ) -> PlaylistCaptureWindow:
+        return project.resolve_playlist_capture_window(
+            pattern_id,
+            playhead=session.song_position_ticks if session is not None else 0,
+            pattern_length_steps=(
+                session.pattern_length_steps if session is not None else None
+            ),
+            selection_start=(
+                session.playlist_selection_start_ticks
+                if session is not None
+                else None
+            ),
+            selection_end=(
+                session.playlist_selection_end_ticks
+                if session is not None
+                else None
+            ),
         )
 
     def capture_preflight(
@@ -362,12 +423,15 @@ class CapsuleService:
         )
         if not channel_ids:
             raise FLPUnsupportedError("select at least one Channel Rack channel")
+        pattern_id = session.current_pattern if session else project.current_pattern
+        playlist_window = self._resolve_capture_window(project, session, pattern_id)
         return self._analyze_capture(
             project,
             channel_ids,
             hashlib.sha256(raw).hexdigest(),
             individually=individually,
             include_mixer_insert=include_mixer_insert,
+            playlist_window=playlist_window,
         )
 
     def capture(
@@ -413,16 +477,20 @@ class CapsuleService:
             sections_by_id = {
                 section.iid: section for section in project.channel_sections()
             }
+            playlist_window = self._resolve_capture_window(
+                project, session, pattern_id
+            )
             preflight = self._analyze_capture(
                 project,
                 channel_ids,
                 source_hash,
                 individually=individually,
                 include_mixer_insert=include_mixer_insert,
+                playlist_window=playlist_window,
             )
             if preflight_token is not None and preflight_token != preflight.token:
                 raise FLPUnsupportedError(
-                    "the FL Studio project or capture selection changed after confirmation; review the automation warning again"
+                    "the FL Studio project, selection, playhead, or capture options changed after confirmation; review the capture warning again"
                 )
             if preflight.blocking_error:
                 raise FLPUnsupportedError(preflight.blocking_error)
@@ -532,6 +600,7 @@ class CapsuleService:
                                 for iid in selected
                                 if iid in preflight.retained_target_event_ids
                             },
+                            playlist_window=playlist_window,
                         )
                         generated_files.append(staged)
                         output = self.settings.staging_dir / f"{slugify(selected_name)}.wav"
@@ -571,6 +640,7 @@ class CapsuleService:
                             save_mode="individual" if individually else "group",
                             tags=tags,
                             include_mixer_insert=include_mixer_insert,
+                            playlist_window=playlist_window,
                         )
                     )
                     if preview_wav is None:
@@ -596,12 +666,14 @@ class CapsuleService:
         *,
         include_mixer_insert: bool,
         automation_target_event_ids: dict[int, list[int]] | None = None,
+        playlist_window: PlaylistCaptureWindow | None = None,
     ) -> Path:
         preview = source.isolated_preview_project(
             channel_ids,
             pattern_id,
             preserve_mixer_inserts=include_mixer_insert,
             automation_target_event_ids=automation_target_event_ids,
+            playlist_window=playlist_window,
         )
         path = self.settings.staging_dir / f"preview-{slugify(name)}-{int(time.time() * 1000)}.flp"
         self._atomic_write(path, preview.to_bytes())
@@ -746,6 +818,7 @@ class CapsuleService:
             automation.source_iid: capsule.read_automation_playlist(automation)
             for automation in manifest.automations
         }
+        playlist_phrase_items = capsule.read_playlist_phrase()
         automation_sections = [
             section for section in sections if section.channel_type == 5
         ]
@@ -769,13 +842,20 @@ class CapsuleService:
                 if pattern_id is not None
                 else (session.current_pattern if session else project.current_pattern)
             )
+            # A schema-6 phrase must remain isolated. Reusing the current
+            # destination Pattern would make every captured repetition replay
+            # unrelated notes that were already in that Pattern.
+            phrase_requires_new_pattern = manifest.playlist_phrase is not None
             merged, mapping, new_pattern = project.append_capsule(
                 primary_sections,
                 notes_by_source,
                 source_ppq=manifest.source_ppq,
                 pattern_name=manifest.name,
                 target_pattern_id=(
-                    active_pattern if destination_mode == "current_pattern" else None
+                    active_pattern
+                    if destination_mode == "current_pattern"
+                    and not phrase_requires_new_pattern
+                    else None
                 ),
             )
         elif mode == "override":
@@ -824,6 +904,16 @@ class CapsuleService:
                 )
             }
 
+        if manifest.playlist_phrase is not None:
+            progress(58, "Restoring the captured Playlist phrase")
+            merged = merged.append_playlist_phrase(
+                playlist_phrase_items,
+                source_pattern_id=manifest.source_pattern,
+                destination_pattern_id=new_pattern,
+                source_ppq=manifest.source_ppq,
+                playlist_anchor=playlist_anchor,
+            )
+
         if automation_sections:
             progress(59, "Restoring Automation Clips and target connections")
             merged, mapping = merged.append_automation_channels(
@@ -836,6 +926,9 @@ class CapsuleService:
                 playlist_items=automation_playlist_items,
                 source_ppq=manifest.source_ppq,
                 playlist_anchor=playlist_anchor,
+                playlist_source_anchor=(
+                    0 if manifest.playlist_phrase is not None else None
+                ),
             )
 
         progress(62, "Creating the safety backup")
@@ -845,7 +938,11 @@ class CapsuleService:
         if not transaction_id or len(transaction_id) > 100:
             raise ValueError("operation_id must contain between 1 and 100 characters")
         result_destination = (
-            "override_selection" if mode == "override" else destination_mode
+            "override_selection"
+            if mode == "override"
+            else "new_pattern"
+            if manifest.playlist_phrase is not None
+            else destination_mode
         )
         backup: Path | None = None
         if in_place:

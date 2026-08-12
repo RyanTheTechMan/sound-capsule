@@ -12,6 +12,7 @@ import os
 import sys
 import time
 
+import arrangement
 import channels
 import general
 import midi
@@ -119,6 +120,17 @@ def _host_executable():
         return ""
 
 
+def _playlist_selection():
+    try:
+        start = int(arrangement.selectionStart())
+        end = int(arrangement.selectionEnd())
+    except Exception:
+        return -1, -1
+    if start < 0 or end <= start:
+        return -1, -1
+    return start, end
+
+
 def _publish_session(force=False, bridge_active=True):
     global _last_publish
     now = time.time()
@@ -126,6 +138,7 @@ def _publish_session(force=False, bridge_active=True):
         return
     selected, names, selected_types, channel_names, channel_types = _selected_channels()
     pattern = patterns.patternNumber()
+    selection_start, selection_end = _playlist_selection()
     payload = {
         "timestamp": now,
         "project_title": general.getProjectTitle(),
@@ -145,6 +158,8 @@ def _publish_session(force=False, bridge_active=True):
         "pattern_length_steps": patterns.getPatternLength(pattern),
         "ppq": general.getRecPPQ(),
         "song_position_ticks": int(transport.getSongPos(midi.SONGLENGTH_ABSTICKS)),
+        "playlist_selection_start_ticks": selection_start,
+        "playlist_selection_end_ticks": selection_end,
         "changed": general.getChangedFlag(),
         "save_sequence": _save_sequence,
         "last_save_requested_at": _last_save_requested_at,

@@ -39,6 +39,7 @@ from soundcapsule.flp import (
     EVENT_PATTERN_NEW,
     EVENT_PATTERN_NOTES,
     EVENT_PLAYLIST,
+    EVENT_PLAYLIST_SELECTION,
     EVENT_PROJECT_LOOP_MODE,
     EVENT_REMOTE_CONTROLLER,
     EVENT_PADDING,
@@ -236,6 +237,17 @@ def playlist_item(
     return bytes(raw)
 
 
+def pattern_playlist_item(
+    pattern_id: int, *, position: int, length: int, item_size: int = 60
+) -> bytes:
+    return PlaylistItem.synthetic_pattern(
+        pattern_id,
+        position=position,
+        length=length,
+        item_size=item_size,
+    ).raw
+
+
 def automation_points(*points: tuple[float, float, float]) -> bytes:
     payload = bytearray(21)
     payload[:4] = b"\x01\x00\x00\x00"
@@ -312,9 +324,11 @@ def fixture_project_with_automation(
             scalar_event(EVENT_ARRANGEMENT_NEW, 0),
             data_event(
                 EVENT_PLAYLIST,
-                playlist_item(
-                    9, position=960, length=384,
-                    item_size=playlist_item_size,
+                pattern_playlist_item(
+                    3, position=960, length=384, item_size=playlist_item_size
+                )
+                + playlist_item(
+                    9, position=960, length=384, item_size=playlist_item_size
                 ),
             ),
             scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
@@ -1013,6 +1027,175 @@ class FLPRoundTripTests(unittest.TestCase):
         self.assertEqual((replacement.position, replacement.length, replacement.key), (48, 192, 60))
 
 
+class PlaylistPhraseFLPTests(unittest.TestCase):
+    @staticmethod
+    def project_with_playlist(*items: bytes) -> FLPFile:
+        project = fixture_project()
+        project.events.extend(
+            [
+                scalar_event(EVENT_ARRANGEMENT_NEW, 0),
+                data_event(EVENT_PLAYLIST, b"".join(items)),
+                scalar_event(EVENT_CURRENT_ARRANGEMENT, 0),
+            ]
+        )
+        return project
+
+    def test_fl25_and_fl26_clip_offsets_parse_losslessly(self) -> None:
+        for item_size in (60, 88):
+            channel_raw = bytearray(
+                playlist_item(9, position=96, length=384, item_size=item_size)
+            )
+            struct.pack_into("<ff", channel_raw, 24, 1.25, 5.25)
+            pattern_raw = bytearray(
+                pattern_playlist_item(
+                    3, position=192, length=384, item_size=item_size
+                )
+            )
+            struct.pack_into("<II", pattern_raw, 24, 48, 432)
+
+            items = PlaylistItem.parse_many(bytes(channel_raw) + bytes(pattern_raw))
+
+            self.assertEqual(items[0].raw, bytes(channel_raw))
+            self.assertEqual(struct.unpack_from("<ff", items[0].raw, 24), (1.25, 5.25))
+            self.assertEqual(items[1].raw, bytes(pattern_raw))
+            self.assertEqual(struct.unpack_from("<II", items[1].raw, 24), (48, 432))
+
+    def test_fl26_synthetic_and_adapted_placements_use_audible_tail_defaults(self) -> None:
+        synthetic = PlaylistItem.synthetic_pattern(
+            3, position=0, length=384, item_size=88, runtime_id=4
+        )
+        adapted = PlaylistItem(
+            pattern_playlist_item(3, position=0, length=384, item_size=60)
+        ).adapt_size(88)
+
+        for item in (synthetic, adapted):
+            self.assertEqual(struct.unpack_from("<d", item.raw, 64)[0], 1.0)
+            self.assertEqual(struct.unpack_from("<I", item.raw, 76)[0], 0xFFFFFFFF)
+
+    def test_playlist_selection_takes_priority_and_crops_repetitions(self) -> None:
+        project = self.project_with_playlist(
+            pattern_playlist_item(3, position=100, length=100),
+            pattern_playlist_item(3, position=260, length=100),
+            pattern_playlist_item(3, position=500, length=100),
+        )
+        project.events.append(
+            data_event(EVENT_PLAYLIST_SELECTION, struct.pack("<II", 120, 330))
+        )
+
+        window = project.resolve_playlist_capture_window(3, playhead=550)
+
+        self.assertEqual((window.start, window.end, window.source), (120, 330, "selection"))
+        self.assertEqual(
+            [(item.position, item.length) for item in window.pattern_items],
+            [(0, 80), (140, 70)],
+        )
+        self.assertEqual(
+            [struct.unpack_from("<II", item.raw, 24) for item in window.pattern_items],
+            [(20, 100), (0, 70)],
+        )
+
+    def test_playhead_uses_containing_then_nearest_earlier_on_ties(self) -> None:
+        project = self.project_with_playlist(
+            pattern_playlist_item(3, position=100, length=100),
+            pattern_playlist_item(3, position=300, length=100),
+        )
+
+        containing = project.resolve_playlist_capture_window(3, playhead=350)
+        tied = project.resolve_playlist_capture_window(3, playhead=250)
+
+        self.assertEqual((containing.start, containing.end), (300, 400))
+        self.assertEqual((tied.start, tied.end), (100, 200))
+
+    def test_standalone_pattern_window_is_synthesized_at_playhead(self) -> None:
+        project = fixture_project()
+
+        window = project.resolve_playlist_capture_window(
+            3, playhead=720, pattern_length_steps=16
+        )
+
+        self.assertEqual((window.start, window.end, window.source), (720, 1104, "standalone"))
+        self.assertEqual(
+            [(item.pattern_id, item.position, item.length) for item in window.pattern_items],
+            [(3, 0, 384)],
+        )
+
+    def test_selection_without_current_pattern_fails_clearly(self) -> None:
+        project = self.project_with_playlist(
+            pattern_playlist_item(3, position=100, length=100)
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "contains no Pattern 3 clips"):
+            project.resolve_playlist_capture_window(
+                3, playhead=0, selection_start=500, selection_end=600
+            )
+
+    def test_automation_crop_preserves_curve_offsets_and_opaque_bytes(self) -> None:
+        source = PlaylistItem(
+            playlist_item(9, position=80, length=300, item_size=88)
+        )
+
+        cropped = source.crop_to_window(120, 300, ppq=96)
+
+        self.assertIsNotNone(cropped)
+        assert cropped is not None
+        self.assertEqual((cropped.position, cropped.length), (0, 180))
+        start, end = struct.unpack_from("<ff", cropped.raw, 24)
+        self.assertAlmostEqual(start, 40 / 96)
+        self.assertAlmostEqual(end, 220 / 96, places=6)
+        self.assertEqual(cropped.raw[12:24], source.raw[12:24])
+        self.assertEqual(cropped.raw[32:], source.raw[32:])
+
+    def test_phrase_preview_omits_distant_automation_and_marks_range_end(self) -> None:
+        project = fixture_project_with_automation()
+        playlist_index = project._current_playlist_event_index()
+        assert playlist_index is not None
+        playlist = project.events[playlist_index]
+        project.events[playlist_index] = playlist.with_payload(
+            playlist.payload + playlist_item(9, position=10_000, length=384)
+        )
+        window = project.resolve_playlist_capture_window(
+            3, playhead=960, selection_start=960, selection_end=2_000
+        )
+
+        preview = project.isolated_preview_project(
+            [2, 9], 3, playlist_window=window
+        )
+
+        preview_index = preview._current_playlist_event_index()
+        assert preview_index is not None
+        items = PlaylistItem.parse_many(preview.events[preview_index].payload)
+        automation = [item for item in items if not item.is_pattern]
+        patterns = [item for item in items if item.is_pattern]
+        self.assertEqual([(item.position, item.length) for item in automation], [(0, 384)])
+        self.assertEqual(len(patterns), 2)
+        self.assertTrue(patterns[-1].muted)
+        self.assertEqual(patterns[-1].end_position, window.duration)
+
+    def test_append_phrase_scales_ppq_and_keeps_gaps(self) -> None:
+        destination = fixture_project(ppq=192)
+        items = [
+            PlaylistItem(pattern_playlist_item(3, position=0, length=96)),
+            PlaylistItem(pattern_playlist_item(3, position=192, length=48)),
+        ]
+
+        merged = destination.append_playlist_phrase(
+            items,
+            source_pattern_id=3,
+            destination_pattern_id=3,
+            source_ppq=96,
+            playlist_anchor=480,
+        )
+
+        self.assertEqual(
+            [(item.position, item.length) for item in merged.playlist_items_for_pattern(3)],
+            [(480, 192), (864, 96)],
+        )
+        self.assertEqual(
+            [item.runtime_id for item in merged.playlist_items_for_pattern(3)],
+            [0, 1],
+        )
+
+
 class AutomationClipFLPTests(unittest.TestCase):
     def test_parses_fl25_fl26_remote_controller_binary_layout_losslessly(self) -> None:
         raw = bytes.fromhex(
@@ -1257,7 +1440,7 @@ class AutomationClipFLPTests(unittest.TestCase):
         automation = next(item for item in items if item.item_index <= item.pattern_base)
         self.assertEqual((pattern.position, pattern.item_index), (0, pattern.pattern_base + 3))
         self.assertEqual(pattern.raw[24:32], b"\xff" * 8)
-        self.assertEqual(pattern.raw[32], 6)
+        self.assertEqual(pattern.runtime_id, 0)
         self.assertEqual((automation.position, automation.item_index), (0, 9))
         self.assertEqual(
             {note.rack_channel for note in preview.pattern_notes()[3]},
@@ -1279,7 +1462,7 @@ class AutomationClipFLPTests(unittest.TestCase):
 
         self.assertEqual(pattern.record_size, 88)
         self.assertEqual(pattern.raw[24:32], b"\xff" * 8)
-        self.assertEqual(pattern.raw[32], 6)
+        self.assertEqual(pattern.runtime_id, 0)
 
     def test_append_remaps_target_and_places_automation_at_playhead(self) -> None:
         source = fixture_project_with_automation(ppq=96)
@@ -1517,7 +1700,7 @@ class CapsuleTests(unittest.TestCase):
             )
 
             capsule.verify()
-            self.assertEqual(capsule.manifest.schema_version, 5)
+            self.assertEqual(capsule.manifest.schema_version, 6)
             self.assertEqual(len(capsule.manifest.automations), 1)
             automation = capsule.manifest.automations[0]
             self.assertEqual(automation.source_iid, 9)
@@ -1529,7 +1712,7 @@ class CapsuleTests(unittest.TestCase):
             )
             self.assertEqual(capsule.read_automation_binding(automation).target_event_id, (2 << 16) | 0x80D5)
             item = capsule.read_automation_playlist(automation)[0]
-            self.assertEqual((item.item_index, item.position, item.length), (9, 960, 384))
+            self.assertEqual((item.item_index, item.position, item.length), (9, 0, 384))
 
     def test_verification_rejects_missing_automation_connection_member(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1756,7 +1939,8 @@ class CapsuleTests(unittest.TestCase):
             capsule.verify()
             manifest = capsule.manifest
             self.assertEqual(manifest.name, "Lead")
-            self.assertEqual(manifest.schema_version, 5)
+            self.assertEqual(manifest.schema_version, 6)
+            self.assertEqual(manifest.playlist_phrase.duration_ticks, 240)
             self.assertEqual(manifest.source_tempo_bpm, 130.0)
             self.assertEqual(manifest.tags, ["dark", "lead"])
             self.assertEqual([channel.source_iid for channel in manifest.channels], [2, 5])
@@ -1886,10 +2070,13 @@ class CapsuleTests(unittest.TestCase):
                     for name in source.namelist() if name != "checksums.json"
                 }
             original_manifest = json.loads(members["manifest.json"])
+            phrase_path = original_manifest["playlist_phrase"]["pattern_playlist_path"]
+            members.pop(phrase_path)
             for schema_version in (1, 2, 3):
                 manifest = dict(original_manifest)
                 manifest["schema_version"] = schema_version
                 manifest.pop("mixer_inserts", None)
+                manifest.pop("playlist_phrase", None)
                 if schema_version == 1:
                     manifest.pop("source_tempo_bpm", None)
                 members["manifest.json"] = json.dumps(manifest).encode()
@@ -1929,6 +2116,8 @@ class CapsuleTests(unittest.TestCase):
                 }
             manifest = json.loads(members["manifest.json"])
             manifest["schema_version"] = 4
+            phrase_path = manifest.pop("playlist_phrase")["pattern_playlist_path"]
+            members.pop(phrase_path)
             automation = manifest["automations"][0]
             target = automation.pop("targets")[0]
             automation["target_source_iid"] = target["source_channel_iid"]
@@ -1952,6 +2141,107 @@ class CapsuleTests(unittest.TestCase):
             self.assertEqual(legacy.target_source_iid, 2)
             self.assertFalse(legacy.targets)
 
+    def test_schema_five_automation_remains_readable_without_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Schema-Five.flcapsule",
+                name="Schema Five",
+                project=fixture_project_with_automation(),
+                channel_ids=[2, 9],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(capsule)
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist() if name != "checksums.json"
+                }
+            manifest = json.loads(members["manifest.json"])
+            manifest["schema_version"] = 5
+            phrase_path = manifest.pop("playlist_phrase")["pattern_playlist_path"]
+            members.pop(phrase_path)
+            members["manifest.json"] = json.dumps(manifest).encode()
+            checksums = {
+                name: hashlib.sha256(data).hexdigest()
+                for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+                target.writestr("checksums.json", json.dumps(checksums))
+
+            capsule.verify()
+
+            self.assertEqual(capsule.manifest.schema_version, 5)
+            self.assertIsNone(capsule.manifest.playlist_phrase)
+            self.assertEqual(len(capsule.manifest.automations), 1)
+
+    def test_schema_six_requires_playlist_phrase_member(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Missing-Phrase.flcapsule",
+                name="Missing Phrase",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(capsule)
+            phrase_path = capsule.manifest.playlist_phrase.pattern_playlist_path
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist() if name != phrase_path
+                }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+
+            with self.assertRaisesRegex(ValueError, "missing required members"):
+                capsule.verify()
+
+    def test_schema_six_rejects_invalid_pattern_placement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preview = root / "preview.wav"
+            write_silence(preview)
+            capsule = Capsule.build(
+                root / "Invalid-Phrase.flcapsule",
+                name="Invalid Phrase",
+                project=fixture_project(),
+                channel_ids=[2],
+                pattern_id=3,
+                preview_wav=preview,
+            )
+            make_legacy_capsule(capsule)
+            phrase_path = capsule.manifest.playlist_phrase.pattern_playlist_path
+            with zipfile.ZipFile(capsule.path) as source:
+                members = {
+                    name: source.read(name)
+                    for name in source.namelist() if name != "checksums.json"
+                }
+            placement = bytearray(members[phrase_path])
+            struct.pack_into("<H", placement, 6, 2)
+            members[phrase_path] = bytes(placement)
+            checksums = {
+                name: hashlib.sha256(data).hexdigest()
+                for name, data in members.items()
+            }
+            with zipfile.ZipFile(capsule.path, "w") as target:
+                for name, data in members.items():
+                    target.writestr(name, data)
+                target.writestr("checksums.json", json.dumps(checksums))
+
+            with self.assertRaisesRegex(ValueError, "phrase placement is invalid"):
+                capsule.verify()
+
     def test_capsule_rejects_newer_schema_even_with_valid_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1965,7 +2255,7 @@ class CapsuleTests(unittest.TestCase):
             with zipfile.ZipFile(capsule.path) as source:
                 members = {name: source.read(name) for name in source.namelist() if name != "checksums.json"}
             manifest = json.loads(members["manifest.json"])
-            manifest["schema_version"] = 6
+            manifest["schema_version"] = 7
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
             with zipfile.ZipFile(capsule.path, "w") as target:

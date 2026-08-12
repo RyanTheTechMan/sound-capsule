@@ -394,6 +394,8 @@ class LibraryTests(unittest.TestCase):
             manifest["schema_version"] = 1
             manifest.pop("source_tempo_bpm", None)
             manifest.pop("mixer_inserts", None)
+            phrase_path = manifest.pop("playlist_phrase")["pattern_playlist_path"]
+            members.pop(phrase_path)
             members["manifest.json"] = json.dumps(manifest).encode()
             checksums = {
                 name: hashlib.sha256(data).hexdigest() for name, data in members.items()

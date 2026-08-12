@@ -2868,17 +2868,16 @@ void SoundCapsuleAudioProcessorEditor::captureSelected(bool individually)
                 }
                 if (excluded->size() > shown)
                     details.add("• " + juce::String(excluded->size() - shown)
-                                + " more connection(s)");
+                                + " more excluded item(s)");
                 const auto message =
-                    "Some selected automation connections are outside the saved generator or "
-                    "its non-Master mixer insert:\n\n"
+                    "Some selected automation content cannot be included in this Playlist phrase:\n\n"
                     + details.joinIntoString("\n")
-                    + "\n\nContinue without these connections? Clips with no portable target "
-                      "will be omitted.";
+                    + "\n\nContinue without these items? Clips with no portable target or no "
+                      "placement in the phrase will be omitted.";
                 juce::AlertWindow::showAsync(
                     juce::MessageBoxOptions::makeOptionsOkCancel(
                         juce::MessageBoxIconType::WarningIcon,
-                        "Automation connections will be omitted", message,
+                        "Automation content will be omitted", message,
                         "Continue without excluded connections", "Cancel",
                         safe.getComponent()),
                     [safe, captureOperationId, token, showFailure,
@@ -4016,18 +4015,25 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
                               {"operation_id", importOperationId},
                               {"open", true},
                               {"in_place", true}}),
-            [safe, mode, importOperationId](juce::var response) {
+            [safe, mode, destination, importOperationId](juce::var response) {
                 if (safe == nullptr || safe->operationId != importOperationId) return;
                 const auto confirmed = static_cast<bool>(response.getProperty("reload_confirmed", false));
                 const auto committed = static_cast<bool>(
                     response.getProperty("committed", true));
+                const auto actualDestination = response.getProperty(
+                    "import_destination", destination).toString();
+                const auto usedIsolatedPattern =
+                    mode == ImportMode::currentPattern
+                    && actualDestination == "new_pattern";
                 const auto reloadError = response.getProperty(
                     "reload_error", "").toString();
-                const auto completionDetail = confirmed
+                auto completionDetail = confirmed
                     ? juce::String("FL Studio reopened the updated project")
                     : (reloadError.isNotEmpty()
                         ? juce::String("Project updated; reopen it manually. ") + reloadError
                         : juce::String("Project updated; verify that FL Studio reopened it"));
+                if (usedIsolatedPattern)
+                    completionDetail += ". The Playlist phrase uses a new isolated pattern";
                 safe->operationPollingEnabled = false;
                 safe->operationProgress.finish(
                     committed, committed ? "Import complete" : "Import not committed",
@@ -4039,7 +4045,10 @@ void SoundCapsuleAudioProcessorEditor::performImportCapsule(const juce::String& 
                 safe->status.setText(
                     confirmed
                         ? (mode == ImportMode::overrideSelection
-                               ? "Overridden and reloaded" : "Imported and reloaded")
+                               ? "Overridden and reloaded"
+                               : usedIsolatedPattern
+                                   ? "Imported as a new pattern and reloaded"
+                                   : "Imported and reloaded")
                         : (reloadError.isNotEmpty()
                                ? "Project updated; reopen it manually"
                                : "Project updated; verify FL reloaded it"),

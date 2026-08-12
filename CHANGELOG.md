@@ -6,6 +6,36 @@ version's section is also used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-12
+
+### Added
+
+- Captures now save a Playlist phrase containing every current-Pattern
+  placement in the active Playlist selection, including repetitions, gaps,
+  offsets, and partial clips.
+- Without a selection, capture uses the current Pattern occurrence at or
+  nearest the playhead, or synthesizes a Pattern-length phrase when the Pattern
+  has not been placed in the Playlist.
+
+### Changed
+
+- Capsule schema 6 stores normalized Pattern and Automation Clip placements;
+  imports rebuild the phrase at the destination playhead and scale timing for
+  the destination PPQ. Schemas 1–5 remain readable.
+- Normal schema-6 imports always use a new isolated pattern, even when the
+  current-pattern destination is selected, so phrase repetitions cannot replay
+  unrelated notes already present in the destination pattern. Override behavior
+  is unchanged.
+- Preview rendering now uses Song mode and the captured phrase range instead of
+  inheriting distant Automation Clip placements from the project.
+
+### Fixed
+
+- Saving a Pattern from the middle of a song no longer moves the preview phrase
+  to the beginning while leaving unrelated song-length automation in place.
+- Boundary-crossing Automation Clips retain their correct curve offset after
+  being cropped to the captured phrase.
+
 ## [0.4.1] - 2026-08-12
 
 ### Added
