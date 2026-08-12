@@ -97,11 +97,15 @@ class PackageReleaseTests(unittest.TestCase):
             executable.chmod(0o755)
 
             destination = stage_macos_setup(app, helper)
+            relative_destination = Path("Contents") / "Resources" / "Setup"
+            self.assertEqual(
+                destination.resolve(), (app / relative_destination).resolve()
+            )
             moved_app = root / "Applications" / app.name
             moved_app.parent.mkdir()
             app.rename(moved_app)
 
-            embedded = moved_app / destination.relative_to(app)
+            embedded = moved_app / relative_destination
             self.assertTrue((embedded / "Helper" / "Sound Capsule Helper").is_file())
             self.assertTrue(
                 (embedded / "fl-studio" / "SoundCapsule" / "device_SoundCapsule.py").is_file()
