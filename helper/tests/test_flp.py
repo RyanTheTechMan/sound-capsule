@@ -1171,6 +1171,42 @@ class PlaylistPhraseFLPTests(unittest.TestCase):
         self.assertTrue(patterns[-1].muted)
         self.assertEqual(patterns[-1].end_position, window.duration)
 
+    def test_phrase_preview_rebases_saved_playlist_selection_for_rendering(self) -> None:
+        project = self.project_with_playlist(
+            pattern_playlist_item(3, position=8_256, length=768),
+            pattern_playlist_item(3, position=9_024, length=384),
+        )
+        project.events.append(
+            data_event(EVENT_PLAYLIST_SELECTION, struct.pack("<II", 8_064, 9_792))
+        )
+        window = project.resolve_playlist_capture_window(3, playhead=0)
+
+        preview = project.isolated_preview_project(
+            [2], 3, playlist_window=window
+        )
+
+        self.assertEqual((window.start, window.end), (8_064, 9_792))
+        self.assertEqual(preview.playlist_selection(), (0, 1_728))
+
+    def test_playhead_phrase_preview_clears_stale_playlist_selection(self) -> None:
+        project = fixture_project_with_automation()
+        project.events.append(
+            data_event(EVENT_PLAYLIST_SELECTION, struct.pack("<II", 8_064, 9_792))
+        )
+        window = project.resolve_playlist_capture_window(
+            3,
+            playhead=960,
+            selection_start=-1,
+            selection_end=-1,
+        )
+
+        preview = project.isolated_preview_project(
+            [2, 9], 3, playlist_window=window
+        )
+
+        self.assertEqual(window.source, "playhead")
+        self.assertIsNone(preview.playlist_selection())
+
     def test_append_phrase_scales_ppq_and_keeps_gaps(self) -> None:
         destination = fixture_project(ppq=192)
         items = [

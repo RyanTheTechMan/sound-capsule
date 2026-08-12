@@ -12,6 +12,8 @@ version's section is also used as its GitHub release notes.
 
 - Windows can locate a newly saved project in an external project library before
   FL Studio flushes that project to its on-disk recent-files list.
+- Playlist-range previews rebase FL Studio's saved time selection together with
+  the selected clips, preventing command-line renders of an empty silent range.
 
 ## [0.4.2] - 2026-08-12
 

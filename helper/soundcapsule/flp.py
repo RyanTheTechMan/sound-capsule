@@ -1809,16 +1809,7 @@ class FLPFile:
         ]
 
     def playlist_selection(self) -> tuple[int, int] | None:
-        channel_owned = {
-            id(event)
-            for section in self.channel_sections()
-            for event in section.events
-        }
-        selections = [
-            event for event in self.events
-            if event.id == EVENT_PLAYLIST_SELECTION
-            and id(event) not in channel_owned
-        ]
+        selections = [self.events[index] for index in self._playlist_selection_indices()]
         if not selections:
             return None
         event = selections[-1]
@@ -1826,6 +1817,40 @@ class FLPFile:
             raise FLPUnsupportedError("the saved Playlist selection format is unsupported")
         start, end = struct.unpack("<II", event.payload)
         return (start, end) if end > start else None
+
+    def _playlist_selection_indices(self) -> list[int]:
+        channel_owned = {
+            id(event)
+            for section in self.channel_sections()
+            for event in section.events
+        }
+        return [
+            index for index, event in enumerate(self.events)
+            if event.id == EVENT_PLAYLIST_SELECTION
+            and id(event) not in channel_owned
+        ]
+
+    def _set_playlist_selection(self, selection: tuple[int, int] | None) -> None:
+        indices = self._playlist_selection_indices()
+        if selection is None:
+            if indices:
+                self.events[indices[-1]] = self.events[indices[-1]].with_payload(
+                    struct.pack("<II", 0, 0)
+                )
+            return
+        start, end = selection
+        if start < 0 or end <= start or end > 0xFFFFFFFF:
+            raise FLPUnsupportedError("the Playlist selection is invalid")
+        replacement = data_event(
+            EVENT_PLAYLIST_SELECTION, struct.pack("<II", start, end)
+        )
+        if indices:
+            self.events[indices[-1]] = replacement
+            return
+        # Project selection is global state. Keep a newly synthesized record
+        # outside Channel Rack ownership, alongside FL's other project settings.
+        channel_starts = self._channel_start_indices()
+        self.events.insert(channel_starts[0] if channel_starts else 0, replacement)
 
     def _playlist_item_size(self) -> int:
         items = self.playlist_items()
@@ -2745,6 +2770,12 @@ class FLPFile:
         playlist_index = self._ensure_current_playlist_event()
         self.events[playlist_index] = self.events[playlist_index].with_payload(
             b"".join(item.raw for item in items)
+        )
+        # Playlist clips are normalized to the start of the staged project.
+        # FL's command-line renderer honors a persisted time selection, so
+        # leaving the source coordinates here renders an empty range as silence.
+        self._set_playlist_selection(
+            (0, window.duration) if window.explicit_selection else None
         )
 
     def _isolate_automation_preview(
