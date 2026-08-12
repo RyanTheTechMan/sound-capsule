@@ -43,6 +43,11 @@ version's section is also used as its GitHub release notes.
 
 ### Fixed
 
+- Playlist phrase capture now restores the effective value left by related
+  Automation Clips that finished before the selected range. A portable
+  one-tick carry-in clip samples FL Studio's original curve, crop, range,
+  mapping, and built-in LFO state instead of falling back to the target's
+  initialized value.
 - Windows can locate a newly saved project in an external project library before
   FL Studio flushes that project to its on-disk recent-files list.
 - Playlist-range previews rebase FL Studio's saved time selection together with

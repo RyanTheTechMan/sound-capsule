@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import tempfile
 import time
 import unittest
@@ -15,6 +16,7 @@ from soundcapsule.flp import (
     AUTOMATION_BINDING_STRUCT,
     EVENT_ARRANGEMENT_NEW,
     EVENT_AUTOMATION_BINDINGS,
+    EVENT_AUTOMATION_POINTS,
     EVENT_CHANNEL_ENABLED,
     EVENT_CURRENT_ARRANGEMENT,
     EVENT_FL_VERSION,
@@ -1738,7 +1740,7 @@ class ProjectServiceTests(unittest.TestCase):
             ):
                 service.capture_preflight(include_related_automation=True)
 
-    def test_related_automation_discovery_ignores_out_of_range_clip(self) -> None:
+    def test_related_automation_discovery_reports_future_only_clip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             project = fixture_project_with_automation()
@@ -1779,13 +1781,15 @@ class ProjectServiceTests(unittest.TestCase):
 
             self.assertEqual(preflight.selected_channel_ids, [2])
             self.assertEqual(preflight.retained_automation_ids, [])
-            self.assertEqual(preflight.playlist_window_source, "playhead")
+            self.assertEqual(preflight.playlist_window_source, "selection")
+            self.assertTrue(preflight.requires_confirmation)
+            self.assertIn("no placement", preflight.excluded[0]["target"])
             self.assertEqual(
                 (preflight.playlist_window_start, preflight.playlist_window_end),
                 (960, 1344),
             )
 
-    def test_empty_selected_range_without_related_automation_uses_playhead(
+    def test_empty_selected_range_without_current_pattern_fails(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1811,17 +1815,225 @@ class ProjectServiceTests(unittest.TestCase):
             ), mock.patch(
                 "soundcapsule.project.ProjectLocator.find_current",
                 return_value=source.resolve(),
+            ), self.assertRaisesRegex(
+                FLPUnsupportedError, "contains no Pattern 3 clips"
+            ):
+                service.capture_preflight(
+                    include_related_automation=True
+                )
+
+    def test_prior_related_automation_becomes_a_portable_carry_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            automation = next(
+                section
+                for section in project.channel_sections()
+                if section.channel_type == 5
+            )
+            point_event = next(
+                event
+                for event in automation.events
+                if event.id == EVENT_AUTOMATION_POINTS
+            )
+            point_payload = bytearray(point_event.payload)
+            struct.pack_into("<i", point_payload, 4, 123)
+            point_payload[8] = 1
+            point_payload[-1] = 0x5A
+            project.events[project.events.index(point_event)] = point_event.with_payload(
+                bytes(point_payload)
+            )
+            playlist_index = project._current_playlist_event_index()
+            assert playlist_index is not None
+            playlist = project.events[playlist_index]
+            pattern = next(
+                item
+                for item in PlaylistItem.parse_many(playlist.payload)
+                if item.is_pattern
+            )
+            project.events[playlist_index] = playlist.with_payload(
+                pattern.raw + playlist_item(9, position=0, length=384)
+            )
+            source = root / "Song.flp"
+            source.write_bytes(project.to_bytes())
+            preview = root / "preview.wav"
+            write_silence(preview)
+            service = CapsuleService(Settings(data_dir=root / "data"))
+            session = BridgeSession(
+                timestamp=time.time(), project_title="Song", midi_api_version=42,
+                selected_channels=[0], selected_channel_names=["Serum Lead"],
+                selected_channel_types=[2], current_pattern=3,
+                pattern_name="Verse", pattern_length_steps=16, ppq=96,
+                changed=0, save_sequence=1, channel_count=3,
+                last_save_requested_at=time.time(), load_sequence=1,
+                last_load_status=100, last_load_at=time.time(),
+                playlist_selection_start_ticks=960,
+                playlist_selection_end_ticks=1344,
+            )
+
+            with mock.patch.object(
+                service.bridge, "session", return_value=session
+            ), mock.patch(
+                "soundcapsule.project.ProjectLocator.find_current",
+                return_value=source.resolve(),
             ):
                 preflight = service.capture_preflight(
                     include_related_automation=True
                 )
+                capsule = service.capture(
+                    "Carry phrase",
+                    preview_wav=preview,
+                    include_related_automation=True,
+                    preflight_token=preflight.token,
+                )[0]
 
-            self.assertEqual(preflight.selected_channel_ids, [5])
-            self.assertEqual(preflight.playlist_window_source, "playhead")
+            self.assertFalse(preflight.requires_confirmation)
+            self.assertEqual(len(preflight.carry_ins or []), 1)
+            self.assertEqual(preflight.retained_automation_ids, [10])
             self.assertEqual(
-                (preflight.playlist_window_start, preflight.playlist_window_end),
-                (960, 1344),
+                preflight.carry_ins[0]["seed_name"],
+                "Carry-in — Serum macro sweep",
             )
+            seed_manifest = capsule.manifest.automations[0]
+            seed_channel = next(
+                channel
+                for channel in capsule.manifest.channels
+                if channel.source_iid == seed_manifest.source_iid
+            )
+            seed_state = capsule.read_channel_state(seed_channel)
+            seed_event = next(
+                event
+                for event in seed_state.channel_sections()[0].events
+                if event.id == EVENT_AUTOMATION_POINTS
+            )
+            self.assertEqual(seed_event.payload, bytes(point_payload))
+            seed_item = capsule.read_automation_playlist(seed_manifest)[0]
+            self.assertEqual((seed_item.position, seed_item.length), (0, 1))
+            seed_start, seed_end = struct.unpack_from("<ff", seed_item.raw, 24)
+            self.assertLess(seed_start, seed_end)
+            self.assertEqual(seed_end, 4.0)
+
+            destination = root / "Destination.flp"
+            destination.write_bytes(fixture_project().to_bytes())
+            result = service.import_capsule(
+                capsule.manifest.id,
+                mode="append",
+                project_path=destination,
+                open_project=False,
+            )
+            imported = FLPFile.read(result.merged_project)
+            imported_seed_iid = result.channel_mapping[seed_manifest.source_iid]
+            imported_seed = next(
+                section
+                for section in imported.channel_sections()
+                if section.iid == imported_seed_iid
+            )
+            self.assertEqual(imported_seed.name, "Carry-in — Serum macro sweep")
+            imported_item = imported.playlist_items_for_channels(
+                [imported_seed_iid]
+            )[imported_seed_iid][0]
+            self.assertEqual((imported_item.position, imported_item.length), (0, 1))
+            imported_connection = imported.automation_connections(
+                imported_seed_iid
+            )[0]
+            self.assertEqual(
+                imported_connection.target.source_channel_iid,
+                result.channel_mapping[2],
+            )
+
+    def test_carry_in_preview_contains_seed_and_not_the_distant_source_clip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            playlist_index = project._current_playlist_event_index()
+            assert playlist_index is not None
+            playlist = project.events[playlist_index]
+            pattern = next(
+                item
+                for item in PlaylistItem.parse_many(playlist.payload)
+                if item.is_pattern
+            )
+            project.events[playlist_index] = playlist.with_payload(
+                pattern.raw + playlist_item(9, position=0, length=384)
+            )
+            window = project.resolve_playlist_capture_window(
+                3,
+                playhead=960,
+                selection_start=960,
+                selection_end=1344,
+            )
+            service = CapsuleService(Settings(data_dir=root / "data"))
+
+            prepared, channel_ids, preflight = service._prepare_capture(
+                project,
+                [2, 9],
+                "source-hash",
+                individually=False,
+                include_mixer_insert=True,
+                include_related_automation=False,
+                playlist_window=window,
+            )
+            preview = prepared.isolated_preview_project(
+                channel_ids,
+                3,
+                automation_target_event_ids=preflight.retained_target_event_ids,
+                playlist_window=window,
+            )
+
+            automation_items = [
+                item for item in preview.playlist_items() if not item.is_pattern
+            ]
+            self.assertEqual(len(automation_items), 1)
+            self.assertEqual(
+                automation_items[0].item_index,
+                preflight.retained_automation_ids[0],
+            )
+            self.assertEqual(
+                (automation_items[0].position, automation_items[0].length),
+                (0, 1),
+            )
+            self.assertNotEqual(automation_items[0].item_index, 9)
+
+    def test_boundary_crossing_automation_is_cropped_without_a_carry_in(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = fixture_project_with_automation()
+            playlist_index = project._current_playlist_event_index()
+            assert playlist_index is not None
+            playlist = project.events[playlist_index]
+            pattern = next(
+                item
+                for item in PlaylistItem.parse_many(playlist.payload)
+                if item.is_pattern
+            )
+            project.events[playlist_index] = playlist.with_payload(
+                pattern.raw + playlist_item(9, position=800, length=300)
+            )
+            window = project.resolve_playlist_capture_window(
+                3,
+                playhead=960,
+                selection_start=960,
+                selection_end=1344,
+            )
+            service = CapsuleService(Settings(data_dir=root / "data"))
+
+            _, channel_ids, preflight = service._prepare_capture(
+                project,
+                [2, 9],
+                "source-hash",
+                individually=False,
+                include_mixer_insert=True,
+                include_related_automation=False,
+                playlist_window=window,
+            )
+
+            self.assertEqual(channel_ids, [2, 9])
+            self.assertEqual(preflight.retained_automation_ids, [9])
+            self.assertEqual(preflight.carry_ins, [])
 
     def test_related_automation_with_no_matching_clips_uses_playhead(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

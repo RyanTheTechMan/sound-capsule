@@ -16,11 +16,13 @@ from .bridge import BridgeQueue, BridgeSession
 from .capsule import Capsule, slugify, unique_capsule_path
 from .config import Settings
 from .flp import (
+    AutomationTarget,
     ChannelSection,
     FLPFile,
     FLPUnsupportedError,
     NoteRecord,
     PlaylistCaptureWindow,
+    PlaylistItem,
 )
 from .library import CapsuleLibrary
 from .project_locator import ProjectLocator, indexed_project_paths, recent_project_paths
@@ -64,6 +66,7 @@ class CapturePreflight:
     automation_owners: dict[int, int]
     retained: list[dict[str, object]]
     excluded: list[dict[str, object]]
+    carry_ins: list[dict[str, object]] | None = None
     playlist_window_start: int = 0
     playlist_window_end: int = 0
     playlist_window_source: str = ""
@@ -81,12 +84,19 @@ class CapturePreflight:
             "retained_target_event_ids": self.retained_target_event_ids,
             "retained": self.retained,
             "excluded": self.excluded,
+            "carry_ins": self.carry_ins or [],
             "playlist_window_start": self.playlist_window_start,
             "playlist_window_end": self.playlist_window_end,
             "playlist_window_source": self.playlist_window_source,
             "requires_confirmation": self.requires_confirmation,
             "blocking_error": self.blocking_error,
         }
+
+
+@dataclass(slots=True)
+class _AutomationCarryGroup:
+    placement: PlaylistItem
+    target_event_ids: list[int]
 
 
 class CapsuleService:
@@ -250,6 +260,9 @@ class CapsuleService:
     ) -> list[int]:
         sections = project.channel_sections()
         sections_by_id = {section.iid: section for section in sections}
+        missing = [iid for iid in channel_ids if iid not in sections_by_id]
+        if missing:
+            raise FLPUnsupportedError(f"selected channel ids were not found: {missing}")
         selected_generator_ids = {
             iid
             for iid in channel_ids
@@ -308,6 +321,294 @@ class CapsuleService:
                     break
         return discovered
 
+    @staticmethod
+    def _automation_target_owners(
+        target: AutomationTarget | None,
+        *,
+        selected_generators: set[int],
+        generators_by_insert: dict[int, list[int]],
+        include_mixer_insert: bool,
+    ) -> tuple[list[int], str | None]:
+        if target is None:
+            return [], "Master, global, routing, or unknown targets are not portable"
+        if target.kind == "generator_parameter":
+            if target.source_channel_iid in selected_generators:
+                return [target.source_channel_iid], None
+            return [], "the target generator is not selected"
+        if not include_mixer_insert:
+            return [], "Save mixer insert is disabled"
+        owners = generators_by_insert.get(target.source_insert_index or 0, [])
+        if owners:
+            return owners, None
+        return [], "the target insert is unrelated to the selected generators"
+
+    def _materialize_automation_carry_seeds(
+        self,
+        project: FLPFile,
+        channel_ids: list[int],
+        *,
+        include_mixer_insert: bool,
+        playlist_window: PlaylistCaptureWindow,
+    ) -> tuple[
+        FLPFile,
+        list[int],
+        list[dict[str, object]],
+        list[dict[str, object]],
+    ]:
+        """Add sample-and-hold Automation Clips for state entering a phrase."""
+        sections = project.channel_sections()
+        sections_by_id = {section.iid: section for section in sections}
+        primary_ids = [
+            iid
+            for iid in channel_ids
+            if iid in sections_by_id and sections_by_id[iid].channel_type != 5
+        ]
+        automation_ids = [
+            iid
+            for iid in channel_ids
+            if iid in sections_by_id and sections_by_id[iid].channel_type == 5
+        ]
+        if not automation_ids:
+            return project, channel_ids, [], []
+
+        selected_generators = set(primary_ids)
+        generators_by_insert: dict[int, list[int]] = {}
+        for iid in primary_ids:
+            insert_index = sections_by_id[iid].mixer_insert
+            if insert_index > 0:
+                generators_by_insert.setdefault(insert_index, []).append(iid)
+
+        ordered_items = list(enumerate(project.playlist_items()))
+        placements_by_iid: dict[int, list[tuple[int, PlaylistItem]]] = {
+            iid: [] for iid in automation_ids
+        }
+        for order, item in ordered_items:
+            if not item.is_pattern and item.item_index in placements_by_iid:
+                placements_by_iid[item.item_index].append((order, item))
+
+        connection_info: dict[
+            int,
+            list[
+                tuple[
+                    int,
+                    AutomationTarget | None,
+                    list[int],
+                    str | None,
+                    str,
+                    str,
+                ]
+            ],
+        ] = {}
+        candidates_by_target: dict[int, list[int]] = {}
+        for automation_iid in automation_ids:
+            info: list[
+                tuple[
+                    int,
+                    AutomationTarget | None,
+                    list[int],
+                    str | None,
+                    str,
+                    str,
+                ]
+            ] = []
+            for role, binding, remote_link in project.automation_connection_records(
+                automation_iid
+            ):
+                event_id = (
+                    binding.target_event_id
+                    if binding is not None
+                    else remote_link.target_event_id
+                    if remote_link is not None
+                    else -1
+                )
+                target = project.classify_automation_event_id(event_id)
+                owners, reason = self._automation_target_owners(
+                    target,
+                    selected_generators=selected_generators,
+                    generators_by_insert=generators_by_insert,
+                    include_mixer_insert=include_mixer_insert,
+                )
+                description = project.automation_target_description(
+                    target, event_id=event_id
+                )
+                info.append((event_id, target, owners, reason, role, description))
+                if reason is None:
+                    candidates_by_target.setdefault(event_id, []).append(
+                        automation_iid
+                    )
+            connection_info[automation_iid] = info
+
+        ordinary_ids = {
+            iid
+            for iid, placements in placements_by_iid.items()
+            if any(
+                item.crop_to_window(
+                    playlist_window.start,
+                    playlist_window.end,
+                    ppq=project.ppq,
+                )
+                is not None
+                for _, item in placements
+            )
+        }
+        winners: dict[int, tuple[int, int, PlaylistItem]] = {}
+        for event_id, source_ids in candidates_by_target.items():
+            active = [
+                (order, iid, item)
+                for iid in source_ids
+                for order, item in placements_by_iid[iid]
+                if not item.muted
+                and item.position <= playlist_window.start < item.end_position
+            ]
+            if active:
+                continue
+            prior = [
+                (item.end_position, order, iid, item)
+                for iid in source_ids
+                for order, item in placements_by_iid[iid]
+                if not item.muted and item.end_position <= playlist_window.start
+            ]
+            if prior:
+                _, order, iid, item = max(prior, key=lambda value: value[:2])
+                winners[event_id] = (iid, order, item)
+
+        grouped: dict[tuple[int, int], _AutomationCarryGroup] = {}
+        for event_id, (source_iid, order, placement) in winners.items():
+            group = grouped.setdefault(
+                (source_iid, order),
+                _AutomationCarryGroup(placement, []),
+            )
+            group.target_event_ids.append(event_id)
+
+        carry_ins: list[dict[str, object]] = []
+        extra_excluded: list[dict[str, object]] = []
+        winning_sources = {source_iid for source_iid, _ in grouped}
+        for source_iid in automation_ids:
+            if source_iid in ordinary_ids:
+                continue
+            section = sections_by_id[source_iid]
+            has_prior_placement = any(
+                not item.muted and item.end_position <= playlist_window.start
+                for _, item in placements_by_iid[source_iid]
+            )
+            eligible_connections = [
+                item for item in connection_info[source_iid] if item[3] is None
+            ]
+            if has_prior_placement and (
+                source_iid in winning_sources or not eligible_connections
+            ):
+                for _, _, _, reason, role, description in connection_info[source_iid]:
+                    if reason is not None:
+                        extra_excluded.append(
+                            {
+                                "source_iid": source_iid,
+                                "clip_name": section.name,
+                                "connection_role": role,
+                                "target": description,
+                                "reason": reason,
+                            }
+                        )
+            elif not has_prior_placement:
+                extra_excluded.append(
+                    {
+                        "source_iid": source_iid,
+                        "clip_name": section.name,
+                        "connection_role": "placement",
+                        "target": "no placement has affected the captured Playlist phrase yet",
+                        "reason": "the clip has not affected the selected phrase yet",
+                    }
+                )
+        if not grouped:
+            prepared_ids = [*primary_ids, *(iid for iid in automation_ids if iid in ordinary_ids)]
+            return project, prepared_ids, carry_ins, extra_excluded
+
+        next_temporary_iid = max(sections_by_id, default=-1) + 1
+        seed_sections = []
+        bindings = {}
+        targets = {}
+        remote_links = {}
+        playlist_items = {}
+        temporary_details: dict[int, dict[str, object]] = {}
+        for offset, ((source_iid, _), group) in enumerate(grouped.items()):
+            temporary_iid = next_temporary_iid + offset
+            if temporary_iid > 20_480:
+                raise FLPUnsupportedError(
+                    "the Channel Rack has no available ID for an automation carry-in"
+                )
+            source = sections_by_id[source_iid]
+            target_event_ids = set(group.target_event_ids)
+            connections = project.automation_connections(
+                source_iid, allowed_target_event_ids=target_event_ids
+            )
+            if not connections or connections[0].binding is None:
+                raise FLPUnsupportedError(
+                    f'automation clip "{source.name}" has no portable carry-in target'
+                )
+            seed_name = f"Carry-in — {source.name}"
+            seed_sections.append(
+                source.remap(temporary_iid)
+                .with_name(seed_name, unicode_text=True)
+                .detached()
+            )
+            bindings[temporary_iid] = connections[0].binding
+            targets[temporary_iid] = connections[0].target
+            remote_links[temporary_iid] = [
+                (connection.target, connection.binding, connection.remote_link)
+                for connection in connections
+                if connection.binding is not None
+                and connection.remote_link is not None
+            ]
+            placement = group.placement
+            playlist_items[temporary_iid] = [
+                placement.as_automation_carry_seed(
+                    temporary_iid, ppq=project.ppq
+                )
+            ]
+            target_descriptions = [
+                project.automation_target_description(
+                    connection.target, event_id=connection.target_event_id
+                )
+                for connection in connections
+            ]
+            temporary_details[temporary_iid] = {
+                "source_iid": source_iid,
+                "clip_name": source.name,
+                "seed_name": seed_name,
+                "targets": target_descriptions,
+                "source_placement_end": placement.end_position,
+            }
+
+        identity_channels = {iid: iid for iid in sections_by_id}
+        identity_inserts = {
+            section.mixer_insert: section.mixer_insert
+            for section in sections
+            if section.channel_type != 5 and section.mixer_insert > 0
+        }
+        prepared, mapping = project.append_automation_channels(
+            seed_sections,
+            target_mapping=identity_channels,
+            bindings=bindings,
+            targets=targets,
+            remote_links=remote_links,
+            mixer_insert_mapping=identity_inserts,
+            playlist_items=playlist_items,
+            source_ppq=project.ppq,
+            playlist_anchor=playlist_window.start,
+            playlist_source_anchor=0,
+        )
+        seed_ids = []
+        for temporary_iid, detail in temporary_details.items():
+            seed_iid = mapping[temporary_iid]
+            seed_ids.append(seed_iid)
+            carry_ins.append({**detail, "seed_iid": seed_iid})
+
+        prepared_ids = [
+            *primary_ids,
+            *(iid for iid in automation_ids if iid in ordinary_ids),
+            *seed_ids,
+        ]
+        return prepared, prepared_ids, carry_ins, extra_excluded
+
     def _resolve_related_automation_capture(
         self,
         project: FLPFile,
@@ -343,18 +644,16 @@ class CapsuleService:
             include_mixer_insert=include_mixer_insert,
             playlist_window=selection,
         )
-        if related_in_selection:
-            selected = set(channel_ids)
-            return [
-                *channel_ids,
-                *(iid for iid in related_in_selection if iid not in selected),
-            ], self._resolve_capture_window(project, session, pattern_id)
-        return channel_ids, self._resolve_capture_window(
-            project,
-            session,
-            pattern_id,
-            ignore_selection=True,
-        )
+        # A selected phrase also needs automation that finished before it: FL
+        # leaves the controlled parameter at the last played value.  Discover
+        # every related lane here and let preflight decide whether it supplies
+        # an in-range placement, a carry-in seed, or no effective state.
+        selected = set(channel_ids)
+        related = list(dict.fromkeys([*related_in_selection, *related_anywhere]))
+        return [
+            *channel_ids,
+            *(iid for iid in related if iid not in selected),
+        ], self._resolve_capture_window(project, session, pattern_id)
 
     @staticmethod
     def _capture_playlist_selection(
@@ -444,27 +743,12 @@ class CapsuleService:
                 description = project.automation_target_description(
                     target, event_id=event_id
                 )
-                owner_ids: list[int] = []
-                reason: str | None = None
-                if target is None:
-                    reason = (
-                        "Master, global, routing, or unknown targets are not portable"
-                    )
-                elif target.kind == "generator_parameter":
-                    if target.source_channel_iid in selected_set:
-                        owner_ids = [target.source_channel_iid]
-                    else:
-                        reason = "the target generator is not selected"
-                elif not include_mixer_insert:
-                    reason = "Save mixer insert is disabled"
-                else:
-                    owner_ids = generators_by_insert.get(
-                        target.source_insert_index or 0, []
-                    )
-                    if not owner_ids:
-                        reason = (
-                            "the target insert is unrelated to the selected generators"
-                        )
+                owner_ids, reason = self._automation_target_owners(
+                    target,
+                    selected_generators=selected_set,
+                    generators_by_insert=generators_by_insert,
+                    include_mixer_insert=include_mixer_insert,
+                )
 
                 item = {
                     "source_iid": automation_iid,
@@ -519,6 +803,38 @@ class CapsuleService:
             playlist_window_source=playlist_window.source,
             blocking_error=blocking_error,
         )
+
+    def _prepare_capture(
+        self,
+        project: FLPFile,
+        channel_ids: list[int],
+        source_hash: str,
+        *,
+        individually: bool,
+        include_mixer_insert: bool,
+        include_related_automation: bool,
+        playlist_window: PlaylistCaptureWindow,
+    ) -> tuple[FLPFile, list[int], CapturePreflight]:
+        prepared, prepared_ids, carry_ins, extra_excluded = (
+            self._materialize_automation_carry_seeds(
+                project,
+                channel_ids,
+                include_mixer_insert=include_mixer_insert,
+                playlist_window=playlist_window,
+            )
+        )
+        preflight = self._analyze_capture(
+            prepared,
+            prepared_ids,
+            source_hash,
+            individually=individually,
+            include_mixer_insert=include_mixer_insert,
+            include_related_automation=include_related_automation,
+            playlist_window=playlist_window,
+        )
+        preflight.carry_ins = carry_ins
+        preflight.excluded.extend(extra_excluded)
+        return prepared, prepared_ids, preflight
 
     @staticmethod
     def _resolve_capture_window(
@@ -584,7 +900,7 @@ class CapsuleService:
             playlist_window = self._resolve_capture_window(
                 project, session, pattern_id
             )
-        return self._analyze_capture(
+        _, _, preflight = self._prepare_capture(
             project,
             channel_ids,
             hashlib.sha256(raw).hexdigest(),
@@ -593,6 +909,7 @@ class CapsuleService:
             include_related_automation=include_related_automation,
             playlist_window=playlist_window,
         )
+        return preflight
 
     def capture(
         self,
@@ -635,9 +952,6 @@ class CapsuleService:
             pattern_id = session.current_pattern if session else project.current_pattern
             if not channel_ids:
                 raise FLPUnsupportedError("select at least one Channel Rack channel")
-            sections_by_id = {
-                section.iid: section for section in project.channel_sections()
-            }
             if include_related_automation:
                 channel_ids, playlist_window = self._resolve_related_automation_capture(
                     project,
@@ -650,7 +964,7 @@ class CapsuleService:
                 playlist_window = self._resolve_capture_window(
                     project, session, pattern_id
                 )
-            preflight = self._analyze_capture(
+            project, channel_ids, preflight = self._prepare_capture(
                 project,
                 channel_ids,
                 source_hash,
@@ -659,6 +973,9 @@ class CapsuleService:
                 include_related_automation=include_related_automation,
                 playlist_window=playlist_window,
             )
+            sections_by_id = {
+                section.iid: section for section in project.channel_sections()
+            }
             if preflight_token is not None and preflight_token != preflight.token:
                 raise FLPUnsupportedError(
                     "the FL Studio project, selection, playhead, or capture options changed after confirmation; review the capture warning again"

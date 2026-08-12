@@ -428,7 +428,6 @@ class CapsuleLibrary:
                 points = sections[0].automation_points() if sections else []
                 if not points:
                     continue
-                source_end = max(points[-1].position * manifest.source_ppq, 1.0)
                 if len(points) > 256:
                     stride = math.ceil((len(points) - 1) / 255)
                     sampled = points[::stride]
@@ -437,14 +436,56 @@ class CapsuleLibrary:
                     points = sampled
                 for item in capsule.read_automation_playlist(automation):
                     item_start = float(item.position - anchor)
-                    scale = item.length / source_end
+                    content_start, content_end = item.automation_content_window(
+                        ppq=manifest.source_ppq
+                    )
+                    content_span = content_end - content_start
+                    if content_span <= 0.0:
+                        continue
+
+                    def boundary_value(position: float) -> tuple[float, float]:
+                        if position <= points[0].position:
+                            return points[0].value, points[0].tension
+                        for left, right in zip(points, points[1:]):
+                            if position <= right.position:
+                                span = right.position - left.position
+                                ratio = (
+                                    (position - left.position) / span
+                                    if span > 0.0
+                                    else 1.0
+                                )
+                                # Display geometry is intentionally lightweight;
+                                # FL itself evaluates the preserved curve/LFO for
+                                # audio. Linear boundary interpolation prevents a
+                                # cropped or one-ULP carry seed from displaying
+                                # the entire source envelope in one Playlist tick.
+                                value = left.value + (right.value - left.value) * ratio
+                                return value, right.tension
+                        return points[-1].value, points[-1].tension
+
+                    visible = [
+                        point
+                        for point in points
+                        if content_start < point.position < content_end
+                    ]
+                    start_value, start_tension = boundary_value(content_start)
+                    end_value, end_tension = boundary_value(content_end)
+                    source_curve = [
+                        (content_start, start_value, start_tension),
+                        *[
+                            (point.position, point.value, point.tension)
+                            for point in visible
+                        ],
+                        (content_end, end_value, end_tension),
+                    ]
                     curve = [
                         (
-                            item_start + point.position * manifest.source_ppq * scale,
-                            max(0.0, min(1.0, point.value)),
-                            point.tension,
+                            item_start
+                            + (position - content_start) * item.length / content_span,
+                            max(0.0, min(1.0, value)),
+                            tension,
                         )
-                        for point in points
+                        for position, value, tension in source_curve
                     ]
                     raw_automation.append(
                         (channel_indexes[automation.source_iid], curve)

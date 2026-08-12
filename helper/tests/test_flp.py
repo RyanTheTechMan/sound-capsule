@@ -1151,6 +1151,50 @@ class PlaylistPhraseFLPTests(unittest.TestCase):
         self.assertEqual(cropped.raw[12:24], source.raw[12:24])
         self.assertEqual(cropped.raw[32:], source.raw[32:])
 
+    def test_automation_carry_seed_samples_the_placed_endpoint_for_fl25_and_26(
+        self,
+    ) -> None:
+        for item_size in (60, 88):
+            raw = bytearray(
+                playlist_item(
+                    9,
+                    position=384,
+                    length=192,
+                    item_size=item_size,
+                )
+            )
+            struct.pack_into("<ff", raw, 24, 1.5, 3.25)
+            struct.pack_into("<H", raw, 18, struct.unpack_from("<H", raw, 18)[0] | 0x2000)
+            source = PlaylistItem(bytes(raw))
+
+            seed = source.as_automation_carry_seed(12, ppq=96)
+
+            self.assertEqual((seed.position, seed.item_index, seed.length), (0, 12, 1))
+            self.assertFalse(seed.muted)
+            start, end = struct.unpack_from("<ff", seed.raw, 24)
+            self.assertEqual(end, 3.25)
+            self.assertLess(start, end)
+            self.assertEqual(
+                struct.unpack("<I", struct.pack("<f", start))[0] + 1,
+                struct.unpack("<I", struct.pack("<f", end))[0],
+            )
+            self.assertEqual(seed.raw[32:], source.raw[32:])
+
+    def test_one_tick_automation_seed_survives_lower_destination_ppq(self) -> None:
+        source = PlaylistItem(
+            playlist_item(9, position=0, length=1, item_size=60)
+        )
+
+        remapped = source.remap_channel(
+            11,
+            source_anchor=0,
+            destination_anchor=480,
+            source_ppq=960,
+            destination_ppq=96,
+        )
+
+        self.assertEqual((remapped.position, remapped.length), (480, 1))
+
     def test_phrase_preview_omits_distant_automation_and_marks_range_end(self) -> None:
         project = fixture_project_with_automation()
         playlist_index = project._current_playlist_event_index()

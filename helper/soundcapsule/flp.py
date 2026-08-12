@@ -873,6 +873,80 @@ class PlaylistItem:
             struct.pack_into("<ff", raw, 24, cropped_start, cropped_end)
         return PlaylistItem(bytes(raw))
 
+    def automation_content_window(self, *, ppq: int) -> tuple[float, float]:
+        """Return the Automation Clip source interval used by this placement.
+
+        FL stores Automation Clip offsets as quarter-note positions, while the
+        Playlist placement itself uses project ticks.  Keeping this conversion
+        in one place is important for carry-in clips: their source slice must be
+        taken from the end of the actual placed/cropped clip, not necessarily
+        from the final point in the Automation Clip channel.
+        """
+        if self.is_pattern:
+            raise FLPUnsupportedError(
+                "cannot read Automation Clip offsets from a Pattern placement"
+            )
+        if ppq <= 0:
+            raise FLPFormatError("Automation Clip PPQ must be positive")
+        start_offset, end_offset = struct.unpack_from("<ff", self.raw, 24)
+        if start_offset == end_offset == -1.0 or start_offset == end_offset == 0.0:
+            return 0.0, self.length / ppq
+        if (
+            math.isfinite(start_offset)
+            and math.isfinite(end_offset)
+            and start_offset >= 0.0
+            and end_offset > start_offset
+        ):
+            return float(start_offset), float(end_offset)
+        raise FLPUnsupportedError(
+            "Automation Clip placement has unsupported crop offsets"
+        )
+
+    def as_automation_carry_seed(
+        self,
+        channel_iid: int,
+        *,
+        ppq: int,
+    ) -> "PlaylistItem":
+        """Create a one-tick sample-and-hold placement at this clip's end.
+
+        The source interval is one float32 ULP immediately before the placed
+        clip's end.  FL therefore evaluates the original point curve, range,
+        time transform, and built-in LFO at the value that was active when the
+        source placement stopped, without Sound Capsule having to approximate
+        FL's private curve or LFO math.  The interval is effectively constant,
+        and the linked control holds that value after the one-tick seed ends.
+        """
+        if self.is_pattern:
+            raise FLPUnsupportedError(
+                "cannot create an automation carry seed from a Pattern placement"
+            )
+        if not 0 <= channel_iid <= self.pattern_base:
+            raise FLPUnsupportedError("carry-in Automation Clip ID is invalid")
+        content_start, content_end = self.automation_content_window(ppq=ppq)
+        packed_end = struct.pack("<f", content_end)
+        end_bits = struct.unpack("<I", packed_end)[0]
+        if end_bits == 0 or end_bits >= 0x7F800000:
+            raise FLPUnsupportedError(
+                "Automation Clip carry position is outside FL Studio limits"
+            )
+        start = struct.unpack("<f", struct.pack("<I", end_bits - 1))[0]
+        if start < content_start:
+            start = content_start
+        if not start < content_end:
+            raise FLPUnsupportedError(
+                "Automation Clip carry position has no representable source interval"
+            )
+
+        raw = bytearray(self.raw)
+        struct.pack_into("<I", raw, 0, 0)
+        struct.pack_into("<H", raw, 6, channel_iid)
+        struct.pack_into("<I", raw, 8, 1)
+        flags = struct.unpack_from("<H", raw, 18)[0] & ~0x2000
+        struct.pack_into("<H", raw, 18, flags)
+        struct.pack_into("<ff", raw, 24, start, content_end)
+        return PlaylistItem(bytes(raw))
+
     def remap_channel(
         self,
         channel_iid: int,
@@ -889,7 +963,7 @@ class PlaylistItem:
         raw = bytearray(self.raw)
         relative = self.position - source_anchor
         position = destination_anchor + round(relative * destination_ppq / source_ppq)
-        length = round(self.length * destination_ppq / source_ppq)
+        length = max(1, round(self.length * destination_ppq / source_ppq))
         if not 0 <= position <= 0xFFFFFFFF or not 0 < length <= 0xFFFFFFFF:
             raise FLPUnsupportedError("destination Automation Clip timing exceeds FL limits")
         struct.pack_into("<I", raw, 0, position)
@@ -1333,6 +1407,16 @@ class ChannelSection:
             else:
                 remapped.append(event)
         return ChannelSection(iid, tuple(remapped))
+
+    def detached(self) -> "ChannelSection":
+        """Copy every event so the section can coexist with its source."""
+        return ChannelSection(
+            self.iid,
+            tuple(
+                Event(event.id, event.payload, event.raw, event.source_offset)
+                for event in self.events
+            ),
+        )
 
     def with_mixer_insert(self, insert_index: int) -> "ChannelSection":
         if not 0 <= insert_index <= 125:
